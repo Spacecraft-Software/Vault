@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "vault-tui"
+description = "Vault interactive terminal UI (ratatui)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "vault-tui"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+vault-core = { path = "../vault-core" }
+vault-ipc = { path = "../vault-ipc" }
+vault-theme = { path = "../vault-theme" }

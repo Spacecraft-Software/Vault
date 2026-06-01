@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# AI assistant artifacts — kept local, not published
+Chat.txt
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.claude/
+.cursor/
+.cursorrules
+.aider*
+
+# Nested reference repositories (out-of-tree third-party projects)
+# Kept on disk for offline reference during development.
+/cruxpass/
+/rbw/
+
+# Local environment overrides
+.env
+.env.*
+!.env.example

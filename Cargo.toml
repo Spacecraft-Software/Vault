@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/vault-core",
+    "crates/vault-api",
+    "crates/vault-store",
+    "crates/vault-agent",
+    "crates/vault-ipc",
+    "crates/vault-cli",
+    "crates/vault-tui",
+    "crates/vault-theme",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-or-later"
+authors = ["Mohamed Hammad <Mohamed.Hammad@SpacecraftSoftware.org>"]
+homepage = "https://Vault.SpacecraftSoftware.org/"
+repository = "https://github.com/Spacecraft-Software/Vault"
+readme = "README.md"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+dbg_macro = "warn"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time", "fs"] }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+overflow-checks = true

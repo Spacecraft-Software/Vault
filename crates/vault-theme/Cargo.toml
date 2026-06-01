@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "vault-theme"
+description = "Steelbore palette tokens for Vault CLI and TUI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
