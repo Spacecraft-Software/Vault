@@ -26,5 +26,8 @@ cli = []
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+zeroize = { workspace = true }
 vault-core = { path = "../vault-core" }
 vault-ipc = { path = "../vault-ipc" }

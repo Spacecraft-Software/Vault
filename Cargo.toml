@@ -71,6 +71,8 @@ time = { version = "0.3", features = ["serde", "serde-well-known"] }
 fs2 = "0.4"
 
 tempfile = "3"
+ciborium = "0.2"
+ciborium-io = "0.2"
 
 # Dev-only.
 wiremock = "0.6"

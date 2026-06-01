@@ -7,12 +7,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cipher;
 pub mod enc_string;
 pub mod error;
 pub mod export;
 pub mod kdf;
 pub mod login;
 
+pub use cipher::{Cipher, DecryptOptions, Login, PlainCipher, decrypt_user_key};
 pub use enc_string::EncString;
 pub use error::{Error, Result};
 pub use export::EncryptedExport;
