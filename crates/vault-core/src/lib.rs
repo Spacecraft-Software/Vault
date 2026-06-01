@@ -1,7 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Vault core — crypto primitives, vault model, KDF, `EncString` parsing.
+//! Vault core — crypto primitives, KDF, `EncString` parsing, and the
+//! encrypted-export decoder.
 //!
-//! Stub crate at M0. See PRD §9.1.
+//! Stability: pre-1.0, every API may change. See PRD §9.1.
 
 #![forbid(unsafe_code)]
+
+pub mod enc_string;
+pub mod error;
+pub mod export;
+pub mod kdf;
+
+pub use enc_string::EncString;
+pub use error::{Error, Result};
+pub use export::EncryptedExport;
+pub use kdf::{KdfParams, KdfType, derive_master_key, stretch_master_key};
