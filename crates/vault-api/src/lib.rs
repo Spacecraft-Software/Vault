@@ -1,7 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Vault API — Bitwarden REST + identity client.
+//! Vault API — Bitwarden / Vaultwarden REST client.
 //!
-//! Stub crate at M0. See PRD §9.1.
+//! Stability: pre-1.0, every API may change. See PRD §9.1.
 
 #![forbid(unsafe_code)]
+
+pub mod client;
+pub mod error;
+pub mod identity;
+pub mod sync;
+pub mod urls;
+
+pub use client::{BitwardenClient, CLIENT_ID, DEVICE_TYPE_CLI};
+pub use error::{Error, Result};
+pub use identity::{PreloginResponse, TokenResponse};
+pub use sync::SyncResponse;
+pub use urls::BaseUrls;

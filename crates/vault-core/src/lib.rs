@@ -11,8 +11,10 @@ pub mod enc_string;
 pub mod error;
 pub mod export;
 pub mod kdf;
+pub mod login;
 
 pub use enc_string::EncString;
 pub use error::{Error, Result};
 pub use export::EncryptedExport;
 pub use kdf::{KdfParams, KdfType, derive_master_key, stretch_master_key};
+pub use login::master_password_hash;

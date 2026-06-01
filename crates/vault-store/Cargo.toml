@@ -17,4 +17,11 @@ workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+fs2 = { workspace = true }
+time = { workspace = true }
+zeroize = { workspace = true }
+tempfile = { workspace = true }
 vault-core = { path = "../vault-core" }

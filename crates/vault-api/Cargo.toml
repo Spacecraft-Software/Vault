@@ -17,4 +17,19 @@ workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+time = { workspace = true }
+base64 = { workspace = true }
 vault-core = { path = "../vault-core" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+vault-store = { path = "../vault-store" }
