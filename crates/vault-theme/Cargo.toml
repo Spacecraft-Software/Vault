@@ -4,6 +4,7 @@
 name = "vault-theme"
 description = "Steelbore palette tokens for Vault CLI and TUI"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

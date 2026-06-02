@@ -4,6 +4,7 @@
 name = "vault-cli"
 description = "Vault command-line interface — Bitwarden client for the terminal"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

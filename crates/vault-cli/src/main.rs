@@ -9,14 +9,16 @@
 
 #![forbid(unsafe_code)]
 
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use tokio::net::UnixStream;
 use zeroize::Zeroize;
 
-use vault_ipc::proto::{Error as IpcError, Field, Item, ListEntry, Request, Response, Status};
+use vault_ipc::proto::{
+    Error as IpcError, Field, Item, ListEntry, Removed, Request, Response, Status,
+};
 use vault_ipc::{default_socket_path, read_frame, sanitize_socket_path, write_frame};
 
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -28,10 +30,22 @@ Maintained by Mohamed Hammad <Mohamed.Hammad@SpacecraftSoftware.org>
 Copyright (C) 2026 Mohamed Hammad & Spacecraft Software  |  License: GPL-3.0-or-later
 https://Vault.SpacecraftSoftware.org/";
 
+/// `--version` payload. clap only surfaces `after_help` on `--help`, so the
+/// §13.2 attribution block is folded into `long_version` to satisfy the CI
+/// `version-gate` (`vault --version` must carry maintainer / license / URL).
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\n",
+    "Maintained by Mohamed Hammad <Mohamed.Hammad@SpacecraftSoftware.org>\n",
+    "Copyright (C) 2026 Mohamed Hammad & Spacecraft Software  |  License: GPL-3.0-or-later\n",
+    "https://Vault.SpacecraftSoftware.org/",
+);
+
 #[derive(Parser, Debug)]
 #[command(
     name = "vault",
     version = PKG_VERSION,
+    long_version = LONG_VERSION,
     about = "Vault — Bitwarden client for the terminal",
     long_about = "Vault is a terminal-native Bitwarden client. Two front-ends share a single Rust engine: a cruxpass-style TUI and an rbw-style CLI. See https://Vault.SpacecraftSoftware.org/.",
     after_help = ATTRIBUTION,
@@ -86,8 +100,40 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Soft-delete a cipher on the server and drop it from the local cache.
+    Remove {
+        /// Cipher id (UUID) or decrypted item name (case-insensitive).
+        selector: String,
+        /// Skip the confirmation prompt. Required when stdin is not a TTY.
+        #[arg(long, short = 'f')]
+        force: bool,
+        /// Emit JSON instead of a human-readable confirmation.
+        #[arg(long)]
+        json: bool,
+    },
     /// Politely shut down the agent (equivalent to `Request::Quit`).
     StopAgent,
+    /// Generate a password locally (no agent or server interaction).
+    Generate {
+        /// Password length in characters.
+        #[arg(long, short = 'l', default_value_t = 20)]
+        length: usize,
+        /// Include symbols (`!@#$%^&*`). Off by default.
+        #[arg(long, short = 's')]
+        symbols: bool,
+        /// Exclude lowercase letters.
+        #[arg(long)]
+        no_lowercase: bool,
+        /// Exclude uppercase letters.
+        #[arg(long)]
+        no_uppercase: bool,
+        /// Exclude digits.
+        #[arg(long)]
+        no_digits: bool,
+        /// Emit JSON instead of the raw password.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -153,8 +199,62 @@ async fn run(cmd: Cmd, socket: &std::path::Path) -> Result<(), u8> {
         Cmd::Sync => cmd_simple(socket, Request::Sync).await,
         Cmd::List { json } => cmd_list(socket, json).await,
         Cmd::Get { name, field, json } => cmd_get(socket, name, field.into(), json).await,
+        Cmd::Remove {
+            selector,
+            force,
+            json,
+        } => cmd_remove(socket, selector, force, json).await,
         Cmd::StopAgent => cmd_simple(socket, Request::Quit).await,
+        Cmd::Generate {
+            length,
+            symbols,
+            no_lowercase,
+            no_uppercase,
+            no_digits,
+            json,
+        } => cmd_generate(length, symbols, no_lowercase, no_uppercase, no_digits, json),
     }
+}
+
+#[allow(clippy::fn_params_excessive_bools)] // each flag mirrors a `vault generate` CLI switch
+fn cmd_generate(
+    length: usize,
+    symbols: bool,
+    no_lowercase: bool,
+    no_uppercase: bool,
+    no_digits: bool,
+    json: bool,
+) -> Result<(), u8> {
+    let opts = vault_core::GenerateOptions {
+        length,
+        lowercase: !no_lowercase,
+        uppercase: !no_uppercase,
+        digits: !no_digits,
+        symbols,
+    };
+    let pw = match vault_core::generate_password(&opts) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("vault: {e}");
+            return Err(2);
+        }
+    };
+    if json {
+        let v = serde_json::json!({
+            "password": pw.as_str(),
+            "length": opts.length,
+            "classes": {
+                "lowercase": opts.lowercase,
+                "uppercase": opts.uppercase,
+                "digits": opts.digits,
+                "symbols": opts.symbols,
+            },
+        });
+        println!("{v}");
+    } else {
+        println!("{}", pw.as_str());
+    }
+    Ok(())
 }
 
 async fn cmd_status(socket: &std::path::Path, json: bool) -> Result<(), u8> {
@@ -165,8 +265,8 @@ async fn cmd_status(socket: &std::path::Path, json: bool) -> Result<(), u8> {
             print_status(&s, json);
             Ok(())
         }
-        Response::Error(e) => report_error(e),
-        other => unexpected(other),
+        Response::Error(e) => report_error(&e),
+        other => unexpected(&other),
     }
 }
 
@@ -191,8 +291,8 @@ async fn cmd_unlock(
     drop(req);
     match resp {
         Response::Ok => Ok(()),
-        Response::Error(e) => report_error(e),
-        other => unexpected(other),
+        Response::Error(e) => report_error(&e),
+        other => unexpected(&other),
     }
 }
 
@@ -200,10 +300,9 @@ async fn cmd_simple(socket: &std::path::Path, req: Request) -> Result<(), u8> {
     let mut stream = connect(socket).await?;
     let resp = exchange(&mut stream, &req).await?;
     match resp {
-        Response::Ok => Ok(()),
-        Response::Status(_) => Ok(()),
-        Response::Error(e) => report_error(e),
-        other => unexpected(other),
+        Response::Ok | Response::Status(_) => Ok(()),
+        Response::Error(e) => report_error(&e),
+        other => unexpected(&other),
     }
 }
 
@@ -215,8 +314,48 @@ async fn cmd_list(socket: &std::path::Path, json: bool) -> Result<(), u8> {
             print_list(&items, json);
             Ok(())
         }
-        Response::Error(e) => report_error(e),
-        other => unexpected(other),
+        Response::Error(e) => report_error(&e),
+        other => unexpected(&other),
+    }
+}
+
+async fn cmd_remove(
+    socket: &std::path::Path,
+    selector: String,
+    force: bool,
+    json: bool,
+) -> Result<(), u8> {
+    if !force {
+        if !io::stdin().is_terminal() {
+            eprintln!("vault: refusing to remove without --force when stdin is not a TTY");
+            return Err(2);
+        }
+        let mut stderr = io::stderr();
+        let _ = write!(
+            stderr,
+            "Remove '{selector}'? Type the item name to confirm: "
+        );
+        let _ = stderr.flush();
+        let mut buf = String::new();
+        if io::stdin().lock().read_line(&mut buf).is_err() {
+            eprintln!("vault: failed to read confirmation");
+            return Err(2);
+        }
+        if buf.trim() != selector {
+            eprintln!("vault: confirmation did not match, aborting");
+            return Err(2);
+        }
+    }
+    let mut stream = connect(socket).await?;
+    let req = Request::Remove { selector };
+    let resp = exchange(&mut stream, &req).await?;
+    match resp {
+        Response::Removed(r) => {
+            print_removed(&r, json);
+            Ok(())
+        }
+        Response::Error(e) => report_error(&e),
+        other => unexpected(&other),
     }
 }
 
@@ -237,8 +376,8 @@ async fn cmd_get(
             print_item(&item, json);
             Ok(())
         }
-        Response::Error(e) => report_error(e),
-        other => unexpected(other),
+        Response::Error(e) => report_error(&e),
+        other => unexpected(&other),
     }
 }
 
@@ -271,20 +410,21 @@ async fn exchange(stream: &mut UnixStream, req: &Request) -> Result<Response, u8
     }
 }
 
-fn report_error(e: IpcError) -> Result<(), u8> {
+fn report_error(e: &IpcError) -> Result<(), u8> {
     let code = match e {
         IpcError::Locked => 4,
         IpcError::BadPassword => 5,
         IpcError::TwoFactorRequired => 6,
         IpcError::NoSuchItem(_) => 7,
         IpcError::NoSuchField { .. } => 8,
+        IpcError::AmbiguousItem { .. } => 10,
         IpcError::Network(_) | IpcError::Internal(_) | IpcError::Decrypt(_) => 9,
     };
     eprintln!("vault: {e}");
     Err(code)
 }
 
-fn unexpected(other: Response) -> Result<(), u8> {
+fn unexpected(other: &Response) -> Result<(), u8> {
     eprintln!("vault: unexpected response from agent: {other:?}");
     Err(9)
 }
@@ -293,10 +433,10 @@ fn resolve_arg(cli: Option<String>, env_key: &str, flag: &str) -> Result<String,
     if let Some(v) = cli {
         return Ok(v);
     }
-    if let Ok(v) = std::env::var(env_key) {
-        if !v.is_empty() {
-            return Ok(v);
-        }
+    if let Ok(v) = std::env::var(env_key)
+        && !v.is_empty()
+    {
+        return Ok(v);
     }
     eprintln!("vault: missing {flag} (or ${env_key})");
     Err(2)
@@ -313,7 +453,8 @@ fn read_password() -> Result<Vec<u8>, u8> {
         let _ = stderr.flush();
     }
     let mut buf = String::new();
-    if let Err(e) = stdin.lock().read_to_string(&mut buf) {
+    let read_res = stdin.lock().read_to_string(&mut buf);
+    if let Err(e) = read_res {
         eprintln!("vault: failed to read password: {e}");
         return Err(2);
     }
@@ -389,6 +530,19 @@ fn print_list(items: &[ListEntry], json: bool) {
         let folder = e.folder.as_deref().unwrap_or("");
         let user = e.username.as_deref().unwrap_or("");
         println!("{}\t{}\t{}", e.name, user, folder);
+    }
+}
+
+fn print_removed(r: &Removed, json: bool) {
+    if json {
+        let v = serde_json::json!({
+            "id": r.id,
+            "name": r.name,
+            "removed": true,
+        });
+        println!("{v}");
+    } else {
+        println!("removed: {} ({})", r.name, r.id);
     }
 }
 

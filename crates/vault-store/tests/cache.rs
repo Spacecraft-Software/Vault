@@ -10,7 +10,7 @@
 use vault_core::kdf::{KdfParams, KdfType, derive_master_key, stretch_master_key};
 use vault_store::{VaultCache, load_from_dir, save_to_dir};
 
-fn fast_pbkdf2() -> KdfParams {
+const fn fast_pbkdf2() -> KdfParams {
     KdfParams {
         kind: KdfType::Pbkdf2Sha256,
         iterations: 1_000,
@@ -31,7 +31,7 @@ fn cache_round_trip_through_disk() {
     let mut cache = VaultCache::new(
         "device-uuid".into(),
         "https://vault.example.org".into(),
-        "User@Example.org".into(),
+        "User@Example.org",
     );
     assert_eq!(cache.email, "user@example.org"); // normalised at construction
     cache.set_payload(&enc, &mac, sync_json).unwrap();
@@ -60,7 +60,7 @@ fn cache_load_missing_returns_not_found() {
 
 #[test]
 fn cache_without_payload_errs_on_load() {
-    let cache = VaultCache::new("dev".into(), "https://x".into(), "a@b".into());
+    let cache = VaultCache::new("dev".into(), "https://x".into(), "a@b");
     let key = [0u8; 32];
     let err = cache.load_payload(&key, &key).unwrap_err();
     assert!(matches!(err, vault_store::Error::NoPayload));
@@ -71,7 +71,7 @@ fn cache_wrong_key_fails_to_decrypt() {
     let tmp = tempfile::tempdir().unwrap();
     let master = derive_master_key(b"right", b"user@example.org", fast_pbkdf2()).unwrap();
     let (enc, mac) = stretch_master_key(&master).unwrap();
-    let mut cache = VaultCache::new("dev".into(), "https://x".into(), "a@b".into());
+    let mut cache = VaultCache::new("dev".into(), "https://x".into(), "a@b");
     cache.set_payload(&enc, &mac, b"secret payload").unwrap();
     save_to_dir(tmp.path(), &cache).unwrap();
 

@@ -12,7 +12,7 @@
 //! but leave structured fields untouched. Richer typing lands in M4.
 
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::enc_string::EncString;
 use crate::error::{Error, Result};
@@ -129,6 +129,7 @@ impl Drop for PlainCipher {
 
 /// Which fields to materialise during decryption.
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)] // one flag per decryptable field — a bitset would be less legible
 pub struct DecryptOptions {
     /// Decrypt `notes` if present. Default `false`.
     pub notes: bool,
@@ -171,11 +172,21 @@ impl Cipher {
     /// Decrypt this cipher's name under `(enc_key, mac_key)`. Returns
     /// `Ok(None)` for ciphers with no name field (rare; mostly secure notes
     /// that never had one set).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MacMismatch`] or [`Error::Unpad`] if the name field is
+    /// present but fails authentication or decryption under the given keys.
     pub fn decrypt_name(&self, enc_key: &[u8; 32], mac_key: &[u8; 32]) -> Result<Option<String>> {
         decrypt_optional(self.name.as_deref(), enc_key, mac_key)
     }
 
     /// Decrypt the requested set of fields and return a [`PlainCipher`] view.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MacMismatch`] or [`Error::Unpad`] if any requested
+    /// field fails authentication or decryption under the given keys.
     pub fn decrypt(
         &self,
         enc_key: &[u8; 32],
@@ -211,13 +222,10 @@ impl Cipher {
             if opts.totp {
                 out.totp = decrypt_optional(login.totp.as_deref(), enc_key, mac_key)?;
             }
-            if opts.primary_uri {
-                if let Some(uris) = login.uris.as_ref() {
-                    if let Some(first) = uris.first() {
-                        out.primary_uri =
-                            decrypt_optional(first.uri.as_deref(), enc_key, mac_key)?;
-                    }
-                }
+            if opts.primary_uri
+                && let Some(first) = login.uris.as_ref().and_then(|uris| uris.first())
+            {
+                out.primary_uri = decrypt_optional(first.uri.as_deref(), enc_key, mac_key)?;
             }
         }
 
@@ -229,24 +237,27 @@ impl Cipher {
 /// `/identity/connect/token`) using the stretched master key.
 ///
 /// The plaintext is 64 bytes: `enc_key || mac_key`, both 32 bytes.
+///
+/// # Errors
+///
+/// Returns [`Error::MacMismatch`] / [`Error::Unpad`] if the wrapped key fails
+/// authentication or decryption under the stretched master key, or
+/// [`Error::EncString`] if the decrypted plaintext is not exactly 64 bytes.
 pub fn decrypt_user_key(
     encrypted_user_key: &str,
     stretch_enc: &[u8; 32],
     stretch_mac: &[u8; 32],
 ) -> Result<([u8; 32], [u8; 32])> {
     let enc = EncString::parse(encrypted_user_key)?;
-    let pt = enc.decrypt(stretch_enc, stretch_mac)?;
+    // `Zeroizing` scrubs the 64-byte plaintext on every return path below.
+    let pt = Zeroizing::new(enc.decrypt(stretch_enc, stretch_mac)?);
     if pt.len() != 64 {
-        let mut pt_z = pt;
-        pt_z.zeroize();
         return Err(Error::EncString("user-key plaintext must be 64 bytes"));
     }
     let mut user_enc = [0u8; 32];
     let mut user_mac = [0u8; 32];
     user_enc.copy_from_slice(&pt[..32]);
     user_mac.copy_from_slice(&pt[32..]);
-    let mut pt_z = pt;
-    pt_z.zeroize();
     Ok((user_enc, user_mac))
 }
 

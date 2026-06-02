@@ -46,6 +46,10 @@ pub enum Error {
     /// The export envelope declared an unsupported version or KDF type.
     #[error("unsupported export format: {0}")]
     UnsupportedExport(&'static str),
+
+    /// Password generation could not satisfy the requested options.
+    #[error("generate: {0}")]
+    Generate(&'static str),
 }
 
 impl From<argon2::Error> for Error {

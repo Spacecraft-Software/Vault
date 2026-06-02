@@ -53,6 +53,17 @@ pub enum Request {
         field: Option<Field>,
     },
 
+    /// Soft-delete a cipher by id or decrypted name.
+    ///
+    /// `selector` is matched against `Cipher.id` first (exact); if no id
+    /// match, it's case-insensitively matched against decrypted names. If a
+    /// name matches more than one cipher the agent refuses with
+    /// `Error::AmbiguousItem` — the caller must retry with the explicit id.
+    Remove {
+        /// Cipher id (UUID) or decrypted item name.
+        selector: String,
+    },
+
     /// Cleanly shut the agent down. Equivalent to `vault stop-agent`.
     Quit,
 }
@@ -69,8 +80,20 @@ pub enum Response {
     List(Vec<ListEntry>),
     /// `Get` result.
     Item(Item),
+    /// `Remove` result — cipher was deleted on the server.
+    Removed(Removed),
     /// Recoverable error — operation declined or failed.
     Error(Error),
+}
+
+/// Wire shape for `Response::Removed`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Removed {
+    /// Server-assigned id of the cipher that was deleted.
+    pub id: String,
+    /// Decrypted name of the cipher that was deleted (echoed so callers can
+    /// confirm what they hit without re-listing).
+    pub name: String,
 }
 
 /// Status snapshot returned by `Request::Status` and `Request::Ping`.
@@ -128,10 +151,11 @@ impl Drop for Item {
 }
 
 /// Selectable field on `Request::Get`.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Field {
     /// `Login.Password`. The default.
+    #[default]
     Password,
     /// `Login.Username`.
     Username,
@@ -141,12 +165,6 @@ pub enum Field {
     Notes,
     /// First `Login.Uris[].Uri`.
     Uri,
-}
-
-impl Default for Field {
-    fn default() -> Self {
-        Self::Password
-    }
 }
 
 /// Re-export the full cipher payload from `vault-core` when needed.
@@ -179,6 +197,14 @@ pub enum Error {
     /// No such item by the supplied name.
     #[error("no item named {0}")]
     NoSuchItem(String),
+    /// Multiple items match the supplied name — operation refused.
+    #[error("name {name} is ambiguous (matches {} items: {})", ids.len(), ids.join(", "))]
+    AmbiguousItem {
+        /// The name that matched multiple ciphers.
+        name: String,
+        /// Ids of every matching cipher.
+        ids: Vec<String>,
+    },
     /// The named item exists but lacks the requested field.
     #[error("item {item} has no {field}")]
     NoSuchField {

@@ -4,6 +4,7 @@
 name = "vault-tui"
 description = "Vault interactive terminal UI (ratatui)"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

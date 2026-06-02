@@ -16,15 +16,10 @@ use crate::state::Vault;
 
 /// Lock-step the unlock sequence:
 /// prelogin → derive master key → login → decrypt user key → sync → assemble.
-pub async fn perform_unlock(
-    server: &str,
-    email: &str,
-    password: &[u8],
-) -> Result<Vault, IpcError> {
+pub async fn perform_unlock(server: &str, email: &str, password: &[u8]) -> Result<Vault, IpcError> {
     let email_lower = email.trim().to_lowercase();
     let urls = BaseUrls::self_hosted(server).map_err(|e| IpcError::Internal(e.to_string()))?;
-    let mut client = BitwardenClient::new(urls, Uuid::new_v4(), "vault-agent")
-        .map_err(api_err)?;
+    let mut client = BitwardenClient::new(urls, Uuid::new_v4(), "vault-agent").map_err(api_err)?;
 
     let prelogin = client.prelogin(&email_lower).await.map_err(api_err)?;
     let params = prelogin.into_kdf_params().map_err(crypto_err)?;
@@ -73,15 +68,17 @@ pub async fn perform_unlock(
         let Some(name_enc) = obj.get("Name").and_then(|v| v.as_str()) else {
             continue;
         };
-        if let Ok(enc) = vault_core::EncString::parse(name_enc) {
-            if let Ok(pt) = enc.decrypt(&user_enc, &user_mac) {
-                if let Ok(name) = String::from_utf8(pt) {
-                    folders.insert(id.to_owned(), name);
-                }
-            }
+        if let Ok(enc) = vault_core::EncString::parse(name_enc)
+            && let Ok(pt) = enc.decrypt(&user_enc, &user_mac)
+            && let Ok(name) = String::from_utf8(pt)
+        {
+            folders.insert(id.to_owned(), name);
         }
     }
 
+    // `client` holds the access token internally (`login_password` stashed
+    // it). Hand the client itself to the vault so subsequent Sync / Remove
+    // / Edit / Add reuse the same authenticated session.
     Ok(Vault {
         server: server.to_owned(),
         email: email_lower,
@@ -89,7 +86,7 @@ pub async fn perform_unlock(
         user_mac,
         ciphers,
         folders,
-        access_token: Zeroizing::new(token.access_token),
+        client,
         last_sync: now_iso(),
     })
 }
@@ -97,8 +94,7 @@ pub async fn perform_unlock(
 fn api_err(e: vault_api::Error) -> IpcError {
     match e {
         vault_api::Error::ServerStatus { status, message } if status == 400 => {
-            if message.contains("invalid_grant") || message.to_lowercase().contains("username")
-            {
+            if message.contains("invalid_grant") || message.to_lowercase().contains("username") {
                 IpcError::BadPassword
             } else {
                 IpcError::Network(format!("HTTP {status}: {message}"))
@@ -116,10 +112,12 @@ fn translate_login_err(e: vault_api::Error) -> IpcError {
     api_err(e)
 }
 
+#[allow(clippy::needless_pass_by_value)] // used as a `map_err` callback, which hands ownership of `e`
 fn crypto_err(e: vault_core::Error) -> IpcError {
     IpcError::Internal(format!("crypto: {e}"))
 }
 
+#[allow(clippy::many_single_char_names)] // h/m/s/y/d are the conventional date-field names
 fn now_iso() -> Option<String> {
     use std::time::SystemTime;
     let now = SystemTime::now();
@@ -133,6 +131,13 @@ fn now_iso() -> Option<String> {
     Some(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z"))
 }
 
+// Casts below are inherent to the integer civil-calendar algorithm; every
+// intermediate is bounded well within the target type.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 fn days_to_ymd(days_since_epoch: u64) -> (i32, u32, u32) {
     // Civil-from-days, after Howard Hinnant. Epoch 1970-01-01 → days = 0.
     let z: i64 = i64::try_from(days_since_epoch).unwrap_or(0) + 719_468;
@@ -144,6 +149,6 @@ fn days_to_ymd(days_since_epoch: u64) -> (i32, u32, u32) {
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = y_minus_2000 + if m <= 2 { 1 } else { 0 } + 2000;
+    let y = y_minus_2000 + i64::from(m <= 2) + 2000;
     (i32::try_from(y).unwrap_or(0), m as u32, d as u32)
 }

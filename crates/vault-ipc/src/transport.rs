@@ -13,10 +13,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub const MAX_FRAME: u32 = 16 * 1024 * 1024;
 
 /// Encode `msg` to CBOR, prefix with a 4-byte big-endian length, write.
+///
+/// # Errors
+///
+/// Returns [`io::Error`] if `msg` fails to serialise, if the encoded body
+/// exceeds [`MAX_FRAME`] (or `u32`), or if writing to `stream` fails.
 pub async fn write_frame<W, T>(stream: &mut W, msg: &T) -> io::Result<()>
 where
-    W: AsyncWriteExt + Unpin,
-    T: Serialize,
+    W: AsyncWriteExt + Unpin + Send,
+    T: Serialize + Sync,
 {
     let mut body = Vec::with_capacity(256);
     ciborium::ser::into_writer(msg, &mut body)
@@ -37,9 +42,14 @@ where
 }
 
 /// Read a 4-byte length, then read that many bytes, then CBOR-decode.
+///
+/// # Errors
+///
+/// Returns [`io::Error`] on EOF / short read, if the declared length exceeds
+/// [`MAX_FRAME`], or if the body fails to CBOR-decode into `T`.
 pub async fn read_frame<R, T>(stream: &mut R) -> io::Result<T>
 where
-    R: AsyncReadExt + Unpin,
+    R: AsyncReadExt + Unpin + Send,
     T: DeserializeOwned,
 {
     let mut len_bytes = [0u8; 4];

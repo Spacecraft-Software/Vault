@@ -28,6 +28,11 @@ use sha2::Sha256;
 use crate::error::{Error, Result};
 
 /// Compute the base64-encoded master-password hash sent to `/identity/connect/token`.
+///
+/// # Errors
+///
+/// Returns [`Error::Kdf`] if the single-iteration PBKDF2 reports an invalid
+/// output length (unreachable for the fixed 32-byte output here).
 pub fn master_password_hash(master_key: &[u8; 32], password: &[u8]) -> Result<String> {
     let mut out = [0u8; 32];
     pbkdf2::<Hmac<Sha256>>(master_key, password, 1, &mut out)

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Identity service — prelogin (KDF discovery) and OAuth2 password-grant token.
+//! Identity service — prelogin (KDF discovery) and `OAuth2` password-grant token.
 
 use serde::{Deserialize, Serialize};
 use vault_core::kdf::{KdfParams, KdfType};
@@ -26,6 +26,11 @@ pub struct PreloginResponse {
 
 impl PreloginResponse {
     /// Translate the server's prelogin response into a `KdfParams`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`vault_core::Error::Kdf`] if the `kdf` discriminant is not a
+    /// KDF type Vault supports.
     pub fn into_kdf_params(self) -> Result<KdfParams, vault_core::Error> {
         let kind = KdfType::try_from(self.kdf)?;
         Ok(KdfParams {
@@ -41,21 +46,21 @@ impl PreloginResponse {
 /// use are kept as `serde_json::Value` so unknown extensions don't fail.
 #[derive(Clone, Debug, Deserialize)]
 pub struct TokenResponse {
-    /// OAuth2 access token, used as `Authorization: Bearer …` on API calls.
+    /// `OAuth2` access token, used as `Authorization: Bearer …` on API calls.
     pub access_token: String,
     /// Seconds until `access_token` expires.
     #[serde(default)]
     pub expires_in: u64,
     /// `Bearer`.
     pub token_type: String,
-    /// OAuth2 refresh token for renewing the access token without re-prompt.
+    /// `OAuth2` refresh token for renewing the access token without re-prompt.
     #[serde(default)]
     pub refresh_token: Option<String>,
-    /// Encrypted user symmetric key (EncString form). Decrypts to a 64-byte
+    /// Encrypted user symmetric key (`EncString` form). Decrypts to a 64-byte
     /// enc+mac pair under the stretched master key.
     #[serde(default, rename = "Key")]
     pub key: Option<String>,
-    /// Encrypted RSA private key (EncString form).
+    /// Encrypted RSA private key (`EncString` form).
     #[serde(default, rename = "PrivateKey")]
     pub private_key: Option<String>,
 }

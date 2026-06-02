@@ -42,10 +42,10 @@ fn uid_string() -> String {
     // Reading /proc/self/status avoids the `libc` dep at this layer.
     if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
         for line in s.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:") {
-                if let Some(uid) = rest.split_whitespace().next() {
-                    return uid.to_owned();
-                }
+            if let Some(rest) = line.strip_prefix("Uid:")
+                && let Some(uid) = rest.split_whitespace().next()
+            {
+                return uid.to_owned();
             }
         }
     }

@@ -38,6 +38,12 @@ pub struct EncString {
 
 impl EncString {
     /// Parse the canonical Bitwarden serialisation: `2.<iv_b64>|<ct_b64>|<mac_b64>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EncString`] for a missing/unknown type prefix, a
+    /// rejected legacy (type 0/1) string, a missing component, or an IV/MAC of
+    /// the wrong length; [`Error::Base64`] if any component is not valid base64.
     pub fn parse(s: &str) -> Result<Self> {
         let (ty, rest) = s
             .split_once('.')
@@ -84,6 +90,13 @@ impl EncString {
     ///
     /// The caller is responsible for the IV's uniqueness; in production paths
     /// use [`Self::encrypt`] which generates a fresh random IV.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: `HMAC-SHA256` accepts a key of any length, so the
+    /// keyed-MAC construction below is infallible.
+    #[must_use]
+    #[allow(clippy::expect_used)] // HMAC-SHA256 takes any key length; the Err arm is unreachable
     pub fn encrypt_with_iv(
         enc_key: &[u8; KEY_LEN],
         mac_key: &[u8; KEY_LEN],
@@ -102,6 +115,13 @@ impl EncString {
     }
 
     /// Encrypt `plaintext` under `(enc_key, mac_key)` with a freshly drawn IV.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the OS RNG (`getrandom`) is unavailable — a non-recoverable
+    /// platform fault on the targets Vault supports.
+    #[must_use]
+    #[allow(clippy::expect_used)] // a missing OS RNG is unrecoverable; failing loudly is correct
     pub fn encrypt(enc_key: &[u8; KEY_LEN], mac_key: &[u8; KEY_LEN], plaintext: &[u8]) -> Self {
         let mut iv = [0u8; IV_LEN];
         getrandom::getrandom(&mut iv).expect("OS RNG must be available");
@@ -112,6 +132,16 @@ impl EncString {
     ///
     /// Returns `Err(Error::MacMismatch)` before touching the cipher when MAC
     /// verification fails — Encrypt-then-MAC discipline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MacMismatch`] if the authentication tag does not match,
+    /// or [`Error::Unpad`] if PKCS#7 unpadding of the decrypted plaintext fails.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: `HMAC-SHA256` accepts a key of any length.
+    #[allow(clippy::expect_used)] // HMAC-SHA256 takes any key length; the Err arm is unreachable
     pub fn decrypt(&self, enc_key: &[u8; KEY_LEN], mac_key: &[u8; KEY_LEN]) -> Result<Vec<u8>> {
         let mut hmac = <HmacSha256 as Mac>::new_from_slice(mac_key)
             .expect("HMAC-SHA256 accepts any key length");
@@ -137,7 +167,7 @@ impl EncString {
 
     /// Borrow the IV.
     #[must_use]
-    pub fn iv(&self) -> &[u8; IV_LEN] {
+    pub const fn iv(&self) -> &[u8; IV_LEN] {
         &self.iv
     }
     /// Borrow the ciphertext.
@@ -147,7 +177,7 @@ impl EncString {
     }
     /// Borrow the MAC tag.
     #[must_use]
-    pub fn mac(&self) -> &[u8; MAC_LEN] {
+    pub const fn mac(&self) -> &[u8; MAC_LEN] {
         &self.mac
     }
 }

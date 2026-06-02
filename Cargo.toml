@@ -15,6 +15,10 @@ members = [
 
 [workspace.package]
 version = "0.0.1"
+# Internal application crates — distributed as the `vault` / `vault-agent`
+# binaries, never published to crates.io as libraries. Keeps cargo-deny's
+# wildcard check happy with intra-workspace `path` deps (allow-wildcard-paths).
+publish = false
 edition = "2024"
 rust-version = "1.95"
 license = "GPL-3.0-or-later"

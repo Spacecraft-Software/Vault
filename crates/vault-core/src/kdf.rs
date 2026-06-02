@@ -55,7 +55,7 @@ pub struct KdfParams {
 }
 
 impl KdfParams {
-    /// Bitwarden's current default for PBKDF2 password vaults: 600_000 iterations.
+    /// Bitwarden's current default for PBKDF2 password vaults: `600_000` iterations.
     #[must_use]
     pub const fn pbkdf2_default() -> Self {
         Self {
@@ -83,6 +83,11 @@ impl KdfParams {
 /// For PBKDF2 the salt is used directly. For Argon2id, Bitwarden first
 /// SHA-256-hashes the salt to a fixed 32-byte string before passing it to
 /// Argon2 — this matches the official clients and is what the server expects.
+///
+/// # Errors
+///
+/// Returns [`Error::Kdf`] for invalid parameters (zero iterations, missing
+/// Argon2 memory/lanes) and [`Error::Argon2`] if Argon2id hashing fails.
 pub fn derive_master_key(password: &[u8], salt: &[u8], params: KdfParams) -> Result<[u8; 32]> {
     if params.iterations == 0 {
         return Err(Error::Kdf("iterations must be > 0"));
@@ -115,6 +120,11 @@ pub fn derive_master_key(password: &[u8], salt: &[u8], params: KdfParams) -> Res
 /// Bitwarden uses a fixed `info` of `"enc"` for the encryption half and
 /// `"mac"` for the MAC half, with an empty salt. This mirrors the official
 /// clients' `stretchKey` routine.
+///
+/// # Errors
+///
+/// Returns [`Error::Hkdf`] if HKDF-SHA-256 expansion fails (output length out
+/// of range — unreachable for the fixed 32-byte outputs here).
 pub fn stretch_master_key(master: &[u8; 32]) -> Result<([u8; 32], [u8; 32])> {
     let hk = hkdf::Hkdf::<Sha256>::from_prk(master).map_err(|_| Error::Hkdf)?;
     let mut enc = [0u8; 32];

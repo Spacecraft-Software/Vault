@@ -13,8 +13,9 @@ use std::time::Instant;
 
 use zeroize::Zeroizing;
 
+use vault_api::BitwardenClient;
 use vault_core::cipher::{Cipher, DecryptOptions};
-use vault_ipc::proto::{Error as IpcError, Field, Item, ListEntry, Status};
+use vault_ipc::proto::{Error as IpcError, Field, Item, ListEntry, Removed, Status};
 
 /// In-memory keys + ciphers held while the agent is unlocked.
 pub struct Vault {
@@ -31,10 +32,10 @@ pub struct Vault {
     pub ciphers: Vec<Cipher>,
     /// Folder id → decrypted folder name.
     pub folders: std::collections::HashMap<String, String>,
-    /// Active access token, used by `vault sync` to refresh.
-    /// Held for the future standalone-Sync path (M4); see [`crate::server`].
-    #[allow(dead_code)]
-    pub access_token: Zeroizing<String>,
+    /// Authenticated REST client, reused by `Sync`/`Remove`/`Edit`/`Add` for
+    /// the lifetime of the unlock. Holds the access token internally; dropped
+    /// when the agent locks.
+    pub client: BitwardenClient,
     /// Most recent sync time (ISO 8601 UTC), or `None` if never synced.
     pub last_sync: Option<String>,
 }
@@ -65,7 +66,7 @@ impl AgentState {
 
     /// Whether the agent currently holds the user key.
     #[must_use]
-    pub fn is_unlocked(&self) -> bool {
+    pub const fn is_unlocked(&self) -> bool {
         self.vault.is_some()
     }
 
@@ -88,16 +89,15 @@ impl AgentState {
     /// Build a `Status` snapshot for `Request::Status` / `Request::Ping`.
     #[must_use]
     pub fn status_snapshot(&self) -> Status {
-        let (server, email, items, last_sync) = if let Some(v) = self.vault.as_ref() {
-            (
-                Some(v.server.clone()),
-                Some(v.email.clone()),
-                Some(v.ciphers.len()),
-                v.last_sync.clone(),
-            )
-        } else {
-            (None, None, None, None)
-        };
+        let (server, email, items, last_sync) =
+            self.vault.as_ref().map_or((None, None, None, None), |v| {
+                (
+                    Some(v.server.clone()),
+                    Some(v.email.clone()),
+                    Some(v.ciphers.len()),
+                    v.last_sync.clone(),
+                )
+            });
         Status {
             unlocked: self.is_unlocked(),
             server,
@@ -139,8 +139,65 @@ impl AgentState {
                 folder,
             });
         }
-        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        out.sort_by_key(|e| e.name.to_lowercase());
         Ok(out)
+    }
+
+    /// Resolve `selector` to exactly one cipher index in `self.vault.ciphers`.
+    ///
+    /// Matching order:
+    /// 1. Exact `Cipher.id` equality (server UUIDs are unique). One match
+    ///    wins outright, even if a different cipher happens to be named
+    ///    that UUID.
+    /// 2. Otherwise, case-insensitive decrypted-name match.
+    ///
+    /// Returns `NoSuchItem` if nothing matches and `AmbiguousItem` if the
+    /// name resolves to more than one cipher.
+    fn resolve_cipher(&self, selector: &str) -> Result<usize, IpcError> {
+        let v = self.vault.as_ref().ok_or(IpcError::Locked)?;
+        if let Some(idx) = v.ciphers.iter().position(|c| c.id == selector) {
+            return Ok(idx);
+        }
+        let sel_lower = selector.to_lowercase();
+        let mut matches: Vec<(usize, String)> = Vec::new();
+        for (idx, c) in v.ciphers.iter().enumerate() {
+            let name = c
+                .decrypt_name(&v.user_enc, &v.user_mac)
+                .map_err(|e| IpcError::Decrypt(e.to_string()))?;
+            if let Some(n) = name
+                && n.to_lowercase() == sel_lower
+            {
+                matches.push((idx, c.id.clone()));
+            }
+        }
+        match matches.len() {
+            0 => Err(IpcError::NoSuchItem(selector.to_owned())),
+            1 => Ok(matches[0].0),
+            _ => Err(IpcError::AmbiguousItem {
+                name: selector.to_owned(),
+                ids: matches.into_iter().map(|(_, id)| id).collect(),
+            }),
+        }
+    }
+
+    /// Server-call: DELETE the cipher referenced by `selector`, then drop
+    /// it from the in-memory cache so subsequent `list`/`get` reflect it.
+    /// The on-disk encrypted cache is intentionally not patched — the next
+    /// `unlock` will re-pull `/sync` and overwrite it.
+    pub async fn remove_cipher(&mut self, selector: &str) -> Result<Removed, IpcError> {
+        let idx = self.resolve_cipher(selector)?;
+        let v = self.vault.as_mut().ok_or(IpcError::Locked)?;
+        let id = v.ciphers[idx].id.clone();
+        let name = v.ciphers[idx]
+            .decrypt_name(&v.user_enc, &v.user_mac)
+            .map_err(|e| IpcError::Decrypt(e.to_string()))?
+            .unwrap_or_else(|| "<unnamed>".to_owned());
+        v.client
+            .delete_cipher(&id)
+            .await
+            .map_err(|e| IpcError::Network(e.to_string()))?;
+        v.ciphers.remove(idx);
+        Ok(Removed { id, name })
     }
 
     /// Decrypt the named field on the cipher matching `query` (case-insensitive).
@@ -152,11 +209,11 @@ impl AgentState {
             let name = c
                 .decrypt_name(&v.user_enc, &v.user_mac)
                 .map_err(|e| IpcError::Decrypt(e.to_string()))?;
-            if let Some(n) = name {
-                if n.to_lowercase() == query_lower {
-                    matched = Some((c, n));
-                    break;
-                }
+            if let Some(n) = name
+                && n.to_lowercase() == query_lower
+            {
+                matched = Some((c, n));
+                break;
             }
         }
         let (cipher, name) = matched.ok_or_else(|| IpcError::NoSuchItem(query.to_owned()))?;
@@ -209,6 +266,11 @@ impl AgentState {
 
 #[cfg(test)]
 mod tests {
+    // Tests reach into the past with plain `Instant`/`Duration` arithmetic to
+    // simulate idle time; the checked-subtraction and unit-readability lints
+    // are noise for fixed test constants.
+    #![allow(clippy::unchecked_time_subtraction, clippy::duration_suboptimal_units)]
+
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -268,7 +330,90 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn resolve_cipher_matches_by_id_then_name() {
+        let enc = [7u8; 32];
+        let mac = [9u8; 32];
+        let mut v = stub_vault();
+        v.user_enc = Zeroizing::new(enc);
+        v.user_mac = Zeroizing::new(mac);
+        v.ciphers.push(make_cipher(
+            "00000000-0000-0000-0000-000000000001",
+            "github",
+            &enc,
+            &mac,
+        ));
+        v.ciphers.push(make_cipher(
+            "00000000-0000-0000-0000-000000000002",
+            "GitLab",
+            &enc,
+            &mac,
+        ));
+
+        let mut s = AgentState::new(900);
+        s.vault = Some(v);
+
+        assert_eq!(
+            s.resolve_cipher("00000000-0000-0000-0000-000000000002")
+                .unwrap(),
+            1
+        );
+        // Name match is case-insensitive.
+        assert_eq!(s.resolve_cipher("gitlab").unwrap(), 1);
+        assert!(matches!(
+            s.resolve_cipher("not-there"),
+            Err(IpcError::NoSuchItem(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_cipher_rejects_ambiguous_name() {
+        let enc = [3u8; 32];
+        let mac = [4u8; 32];
+        let mut v = stub_vault();
+        v.user_enc = Zeroizing::new(enc);
+        v.user_mac = Zeroizing::new(mac);
+        v.ciphers.push(make_cipher(
+            "00000000-0000-0000-0000-0000000000aa",
+            "duplicate",
+            &enc,
+            &mac,
+        ));
+        v.ciphers.push(make_cipher(
+            "00000000-0000-0000-0000-0000000000bb",
+            "DUPLICATE",
+            &enc,
+            &mac,
+        ));
+
+        let mut s = AgentState::new(900);
+        s.vault = Some(v);
+
+        match s.resolve_cipher("duplicate") {
+            Err(IpcError::AmbiguousItem { name, ids }) => {
+                assert_eq!(name, "duplicate");
+                assert_eq!(ids.len(), 2);
+                assert!(ids.contains(&"00000000-0000-0000-0000-0000000000aa".to_owned()));
+                assert!(ids.contains(&"00000000-0000-0000-0000-0000000000bb".to_owned()));
+            }
+            other => panic!("expected AmbiguousItem, got {other:?}"),
+        }
+    }
+
+    fn make_cipher(id: &str, plain_name: &str, enc: &[u8; 32], mac: &[u8; 32]) -> Cipher {
+        let enc_name = vault_core::EncString::encrypt(enc, mac, plain_name.as_bytes()).serialize();
+        Cipher {
+            id: id.to_owned(),
+            cipher_type: 1,
+            name: Some(enc_name),
+            ..Cipher::default()
+        }
+    }
+
     fn stub_vault() -> Vault {
+        let urls = vault_api::BaseUrls::self_hosted("https://vault.example.org").unwrap();
+        let client = vault_api::BitwardenClient::new(urls, uuid::Uuid::nil(), "vault-agent-test")
+            .expect("client");
         Vault {
             server: "https://vault.example.org".into(),
             email: "alice@example.org".into(),
@@ -276,7 +421,7 @@ mod tests {
             user_mac: Zeroizing::new([0u8; 32]),
             ciphers: Vec::new(),
             folders: std::collections::HashMap::new(),
-            access_token: Zeroizing::new(String::new()),
+            client,
             last_sync: None,
         }
     }

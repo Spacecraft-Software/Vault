@@ -22,6 +22,12 @@ pub struct BaseUrls {
 
 impl BaseUrls {
     /// Hosted Bitwarden — `api.bitwarden.com` + `identity.bitwarden.com`.
+    ///
+    /// # Panics
+    ///
+    /// Never: both URLs are compile-time string literals known to parse.
+    #[must_use]
+    #[allow(clippy::expect_used)] // the two literals are valid URLs; the Err arm is unreachable
     pub fn bitwarden_hosted() -> Self {
         Self {
             api: "https://api.bitwarden.com"
@@ -35,6 +41,11 @@ impl BaseUrls {
 
     /// Vaultwarden / self-hosted — both halves are served from one origin
     /// under `/api` and `/identity`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BaseUrl`] if `origin` is not a valid URL or the
+    /// `/api/` and `/identity/` path joins fail.
     pub fn self_hosted(origin: &str) -> Result<Self> {
         let mut base: Url = origin
             .parse()

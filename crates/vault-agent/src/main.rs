@@ -29,10 +29,21 @@ Maintained by Mohamed Hammad <Mohamed.Hammad@SpacecraftSoftware.org>
 Copyright (C) 2026 Mohamed Hammad & Spacecraft Software  |  License: GPL-3.0-or-later
 https://Vault.SpacecraftSoftware.org/";
 
+/// `--version` payload — mirrors `vault`'s: clap shows `after_help` only on
+/// `--help`, so the §13.2 attribution block rides in `long_version`.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\n",
+    "Maintained by Mohamed Hammad <Mohamed.Hammad@SpacecraftSoftware.org>\n",
+    "Copyright (C) 2026 Mohamed Hammad & Spacecraft Software  |  License: GPL-3.0-or-later\n",
+    "https://Vault.SpacecraftSoftware.org/",
+);
+
 #[derive(Parser, Debug)]
 #[command(
     name = "vault-agent",
     version = env!("CARGO_PKG_VERSION"),
+    long_version = LONG_VERSION,
     about = "Vault agent — holds the unwrapped user key behind a Unix socket",
     after_help = ATTRIBUTION,
     after_long_help = ATTRIBUTION,

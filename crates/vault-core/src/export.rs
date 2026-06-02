@@ -62,6 +62,12 @@ pub struct EncryptedExport {
 
 impl EncryptedExport {
     /// Parse the JSON envelope without performing any cryptography.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Json`] if `s` is not valid JSON for the envelope shape,
+    /// or [`Error::UnsupportedExport`] if the envelope is not a
+    /// password-protected encrypted export.
     pub fn from_json(s: &str) -> Result<Self> {
         let out: Self = serde_json::from_str(s)?;
         if !out.encrypted {
@@ -77,7 +83,7 @@ impl EncryptedExport {
 
     /// KDF parameters extracted from the envelope.
     #[must_use]
-    pub fn kdf_params(&self) -> KdfParams {
+    pub const fn kdf_params(&self) -> KdfParams {
         KdfParams {
             kind: self.kdf_type,
             iterations: self.kdf_iterations,
@@ -91,6 +97,11 @@ impl EncryptedExport {
     /// Fails with `Error::BadExportPassword` if the supplied password does
     /// not validate against the `encKeyValidation_DO_NOT_EDIT` field —
     /// indistinguishable in timing from a successful path up to that check.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BadExportPassword`] on a wrong password, or any KDF /
+    /// [`EncString`] error if derivation or decryption of the payload fails.
     pub fn decrypt(&self, password: &[u8]) -> Result<Vec<u8>> {
         let derived = derive_master_key(password, self.salt.as_bytes(), self.kdf_params())?;
         let (enc_key, mac_key) = stretch_master_key(&derived)?;

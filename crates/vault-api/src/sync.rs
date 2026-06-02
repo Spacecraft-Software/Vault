@@ -37,12 +37,12 @@ pub struct SyncResponse {
 impl SyncResponse {
     /// Number of ciphers in the payload.
     #[must_use]
-    pub fn cipher_count(&self) -> usize {
+    pub const fn cipher_count(&self) -> usize {
         self.ciphers.len()
     }
     /// Number of folders in the payload.
     #[must_use]
-    pub fn folder_count(&self) -> usize {
+    pub const fn folder_count(&self) -> usize {
         self.folders.len()
     }
 }

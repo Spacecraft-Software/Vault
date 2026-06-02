@@ -4,6 +4,13 @@
 /target/
 **/*.rs.bk
 *.pdb
+/rust_out
+
+# Local-only cargo config. On Arch, /etc/makepkg.conf leaks `-flto=auto` into
+# CFLAGS, which breaks ring's C build under ld.lld; .cargo/config.toml overrides
+# CFLAGS to fix it. Kept untracked — its force'd flags (e.g. -fcf-protection)
+# would break non-Arch CI runners (notably macOS / Apple clang).
+/.cargo/
 
 # Editor / IDE
 .idea/

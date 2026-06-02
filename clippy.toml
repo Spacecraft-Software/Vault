@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Clippy configuration for the Vault workspace.
+#
+# The workspace lints (`[workspace.lints]` in Cargo.toml) deny `unwrap_used`,
+# `expect_used`, and `panic` so production code surfaces every failure through
+# the typed error path. Test code is exempt: an `unwrap()`/`expect()`/`panic!`
+# in a `#[test]` is the idiomatic way to assert, and a panic there fails the
+# test rather than a user's session.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

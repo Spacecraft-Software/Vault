@@ -8,8 +8,58 @@ range may break in any release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI is green for the first time (M0–M3 had been red on every push).** Four
+  jobs were failing independently of the code's behaviour:
+  - **`clippy -D warnings`** — the workspace lints enable `clippy::pedantic` +
+    `clippy::nursery` and deny `unwrap`/`expect`/`panic`, but clippy had never
+    run to completion locally (a stale-artifact issue), so the debt was never
+    seen. Resolved across every crate: `# Errors` / `# Panics` doc sections,
+    `const fn`, `#[must_use]`, let-chains for collapsible `if`s, `map_or`,
+    `sort_by_key`, derived `Default`, `Send`/`Sync` bounds on the transport
+    generics (`future_not_send`), and justified `#[allow]`s on the
+    infallible-HMAC/RNG `expect`s and the civil-calendar casts in
+    `vault-agent::unlock`.
+  - **`vault --version`** now actually emits the §13.2 attribution block. clap
+    only surfaces `after_help` on `--help`, so the block was missing from
+    `--version`; it now rides in `long_version` (mirrored in `vault-agent`).
+  - **rustfmt** — `cargo fmt --all` applied.
+  - **cargo-deny** — two policy decisions, called out explicitly: (1) allow
+    `CDLA-Permissive-2.0` (webpki-roots ≥ 1.0 ships Mozilla's CA bundle under
+    it — a permissive *data* licence, GPL-compatible, no copyleft on the
+    linking program); (2) mark the eight `vault-*` crates `publish = false` and
+    set `allow-wildcard-paths = true` so intra-workspace `path` deps stop
+    tripping the wildcard ban. A `clippy.toml` permits `unwrap`/`expect`/`panic`
+    in tests only.
+
 ### Added
 
+- **M4 (slice 2) — `vault remove`.** Soft-deletes a cipher via
+  `DELETE /api/ciphers/{id}` and drops it from the in-memory cache. CLI:
+  `vault remove <selector> [-f|--force] [--json]`. The selector matches
+  `Cipher.id` exactly first, then falls back to a case-insensitive
+  decrypted-name match; if a name resolves to more than one cipher the agent
+  refuses with `AmbiguousItem` (CLI exit 10) and prints the matching ids so
+  the caller can retry with the explicit UUID. Interactive callers must
+  re-type the selector to confirm; non-TTY stdin requires `--force`.
+  `vault-agent::Vault` now owns the authenticated `BitwardenClient`
+  (replacing the dead-code `access_token` field) so future M4 verbs reuse
+  one session. New `IpcError::AmbiguousItem { name, ids }` variant; new
+  `Response::Removed { id, name }`. Three new tests:
+  `resolve_cipher_matches_by_id_then_name`,
+  `resolve_cipher_rejects_ambiguous_name` (agent), and an `#[ignore]`d
+  wiremock test `delete_cipher_sends_authorized_delete` (api) that asserts
+  the `Bearer` header and surfaces 404 as `ServerStatus`.
+- **M4 (slice 1) — `vault generate`.** Pure-local password generator with no
+  agent or server interaction. `vault-core::generate::generate_password`
+  takes a `GenerateOptions` (length + per-class toggles for lowercase,
+  uppercase, digits, symbols) and returns a `Zeroizing<String>`. Sampling
+  uses OS `getrandom` with 64-bit rejection sampling to avoid modulo bias;
+  output is seeded with one character from each enabled class then
+  Fisher–Yates shuffled. CLI verb `vault generate [--length N] [--symbols]
+  [--no-lowercase] [--no-uppercase] [--no-digits] [--json]`. 8 integration
+  tests in `crates/vault-core/tests/generate.rs`.
 - M0 scaffolding: Cargo workspace, eight member crates (`vault-core`,
   `vault-api`, `vault-store`, `vault-agent`, `vault-ipc`, `vault-cli`,
   `vault-tui`, `vault-theme`).

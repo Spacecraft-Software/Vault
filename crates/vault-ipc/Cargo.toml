@@ -4,6 +4,7 @@
 name = "vault-ipc"
 description = "Client ↔ agent CBOR protocol over a Unix domain socket"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

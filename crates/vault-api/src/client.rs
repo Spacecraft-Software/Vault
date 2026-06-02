@@ -40,6 +40,10 @@ pub struct BitwardenClient {
 impl BitwardenClient {
     /// Build a new client pointed at `urls`. The device identifier persists
     /// across calls and should be saved by the caller across process restarts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Transport`] if the underlying `reqwest` client fails to build.
     pub fn new(urls: BaseUrls, device_id: Uuid, device_name: impl Into<String>) -> Result<Self> {
         let user_agent = format!("vault/{} (Spacecraft-Software)", env!("CARGO_PKG_VERSION"));
         let http = Client::builder()
@@ -77,7 +81,7 @@ impl BitwardenClient {
 
     /// Stable per-install device identifier (matches Bitwarden's `deviceIdentifier`).
     #[must_use]
-    pub fn device_id(&self) -> Uuid {
+    pub const fn device_id(&self) -> Uuid {
         self.device_id
     }
 
@@ -89,11 +93,16 @@ impl BitwardenClient {
 
     /// Whether the client currently holds a valid-looking access token.
     #[must_use]
-    pub fn is_authenticated(&self) -> bool {
+    pub const fn is_authenticated(&self) -> bool {
         self.access_token.is_some()
     }
 
     /// `POST /accounts/prelogin` — discover the account's KDF parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Transport`] on transport failure or [`Error::ServerStatus`]
+    /// if the server rejects the prelogin request.
     pub async fn prelogin(&self, email: &str) -> Result<PreloginResponse> {
         let url = self
             .urls
@@ -110,6 +119,12 @@ impl BitwardenClient {
     ///
     /// The supplied password is consumed to compute the master-password hash
     /// and discarded; only the resulting hash leaves this function.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::TwoFactorRequired`] if the account has 2FA enabled,
+    /// [`Error::ServerStatus`] on a bad password / other non-success status,
+    /// or a crypto error if master-key derivation fails.
     pub async fn login_password(
         &mut self,
         email: &str,
@@ -154,10 +169,10 @@ impl BitwardenClient {
             // Could be 2FA-required or bad-password — peek at the body.
             let body = resp.text().await.unwrap_or_default();
             if let Ok(tfa) = serde_json::from_str::<TwoFactorErrorBody>(&body) {
-                if let Some(legacy) = tfa.two_factor_providers {
-                    if !legacy.is_empty() {
-                        return Err(Error::TwoFactorRequired(legacy));
-                    }
+                if let Some(legacy) = tfa.two_factor_providers
+                    && !legacy.is_empty()
+                {
+                    return Err(Error::TwoFactorRequired(legacy));
                 }
                 if tfa.two_factor_providers2.is_some() {
                     return Err(Error::TwoFactorRequired(vec![]));
@@ -176,6 +191,16 @@ impl BitwardenClient {
     }
 
     /// `GET /sync` — fetch the full encrypted vault. Requires a prior `login_password`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ServerStatus`] if no access token is held or the
+    /// server replies non-2xx, or [`Error::Transport`] on transport failure.
+    ///
+    /// # Panics
+    ///
+    /// Never: the `Bearer` header is built from an ASCII access token.
+    #[allow(clippy::expect_used)] // access tokens are ASCII; HeaderValue construction cannot fail
     pub async fn sync(&self) -> Result<SyncResponse> {
         let token = self.access_token.as_ref().ok_or(Error::ServerStatus {
             status: 401,
@@ -196,6 +221,54 @@ impl BitwardenClient {
 
         let resp = self.http.get(url).headers(headers).send().await?;
         handle_json(resp).await
+    }
+
+    /// `DELETE /api/ciphers/{id}` — soft-delete a cipher.
+    ///
+    /// Bitwarden's hosted API and Vaultwarden both move the cipher to the
+    /// account's trash; the user can restore it from the web UI for ~30 days
+    /// (hosted) or until purged (Vaultwarden). This client surfaces only the
+    /// delete; restore is out of scope for Vault.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ServerStatus`] if the client lacks an access token,
+    /// if the server replies with a non-2xx status (`404` if the id is
+    /// unknown, `401` if the token is expired). Returns [`Error::Transport`] on
+    /// transport failure.
+    ///
+    /// # Panics
+    ///
+    /// Never: the `Bearer` header is built from an ASCII access token.
+    #[allow(clippy::expect_used)] // access tokens are ASCII; HeaderValue construction cannot fail
+    pub async fn delete_cipher(&self, id: &str) -> Result<()> {
+        let token = self.access_token.as_ref().ok_or(Error::ServerStatus {
+            status: 401,
+            message: "no access token; call login_password() first".into(),
+        })?;
+
+        let url = self
+            .urls
+            .api
+            .join(&format!("ciphers/{id}"))
+            .map_err(|_| Error::BaseUrl("could not build delete-cipher URL"))?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Authorization",
+            HeaderValue::try_from(format!("Bearer {}", token.as_str())).expect("token is ASCII"),
+        );
+
+        let resp = self.http.delete(url).headers(headers).send().await?;
+        let status = resp.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(Error::ServerStatus {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            })
+        }
     }
 }
 

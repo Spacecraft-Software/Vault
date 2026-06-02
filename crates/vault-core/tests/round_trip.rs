@@ -7,7 +7,11 @@
 //! credentials. The test still exercises every wire-level detail an external
 //! export touches: the JSON envelope, PBKDF2-SHA-256 / Argon2id KDFs,
 //! HKDF-SHA-256 stretching, the hex-encoded validation slot, and AES-256-CBC
-//! + HMAC-SHA-256 EncString framing.
+//! + HMAC-SHA-256 `EncString` framing.
+
+// Test-support helpers below build fixtures and use `unwrap()` on infallible
+// KDF/serde calls; a panic here fails the test, which is the intent.
+#![allow(clippy::unwrap_used)]
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;

@@ -4,6 +4,7 @@
 name = "vault-agent"
 description = "Vault long-lived daemon — master-key custody, UDS server"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

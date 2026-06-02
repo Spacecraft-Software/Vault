@@ -25,6 +25,11 @@
 //! cargo test -p vault-api --test login_sync -- --ignored --nocapture
 //! ```
 
+// Test-support helpers below use `unwrap()` on infallible calls (writing to a
+// `String`, etc.); a panic there fails the test, which is the intent.
+#![allow(clippy::unwrap_used)]
+
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::json;
@@ -41,7 +46,7 @@ const EMAIL: &str = "discovery@example.org";
 const PASSWORD: &str = "open the pod bay doors";
 const KDF_ITERS: u32 = 1_000; // fast for tests; real accounts use 600_000+
 
-fn pbkdf2_params() -> KdfParams {
+const fn pbkdf2_params() -> KdfParams {
     KdfParams {
         kind: KdfType::Pbkdf2Sha256,
         iterations: KDF_ITERS,
@@ -84,7 +89,7 @@ async fn login_sync_cache_round_trip() {
     Mock::given(method("POST"))
         .and(path("/identity/connect/token"))
         .and(body_string_contains("grant_type=password"))
-        .and(body_string_contains(&urlencoded(&expected_hash)))
+        .and(body_string_contains(urlencoded(&expected_hash)))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token": "test-access-token",
             "expires_in": 3600,
@@ -142,7 +147,7 @@ async fn login_sync_cache_round_trip() {
     let (enc_key, mac_key) = stretch_master_key(&derived).unwrap();
 
     let sync_bytes = serde_json::to_vec(&sync).unwrap();
-    let mut cache = VaultCache::new(device_id.to_string(), server.uri(), EMAIL.into());
+    let mut cache = VaultCache::new(device_id.to_string(), server.uri(), EMAIL);
     cache.set_payload(&enc_key, &mac_key, &sync_bytes).unwrap();
     let cache_path = vault_store::save_to_dir(dir, &cache).unwrap();
     assert!(cache_path.exists(), "cache.json must exist on disk");
@@ -183,6 +188,56 @@ async fn wrong_password_surfaces_server_status() {
     ));
 }
 
+#[tokio::test]
+#[ignore = "links ring into a test binary; see file preamble"]
+async fn delete_cipher_sends_authorized_delete() {
+    let server = MockServer::start().await;
+    let urls = BaseUrls::self_hosted(&server.uri()).unwrap();
+
+    // Stand up a token mock so we can prime the client with an access token.
+    Mock::given(method("POST"))
+        .and(path("/identity/connect/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "del-test-token",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+            "refresh_token": "del-test-refresh",
+            "Key": "2.dGVzdA==|dGVzdA==|dGVzdA==",
+            "PrivateKey": null
+        })))
+        .mount(&server)
+        .await;
+
+    let cipher_id = "11111111-2222-3333-4444-555555555555";
+    Mock::given(method("DELETE"))
+        .and(path(format!("/api/ciphers/{cipher_id}")))
+        .and(header("Authorization", "Bearer del-test-token"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut client = BitwardenClient::new(urls, Uuid::new_v4(), "vault-test").unwrap();
+    // Prime token via login_password (uses the token mock above).
+    client
+        .login_password(EMAIL, PASSWORD.as_bytes(), pbkdf2_params())
+        .await
+        .unwrap();
+
+    client.delete_cipher(cipher_id).await.unwrap();
+
+    // 404 should surface as ServerStatus.
+    Mock::given(method("DELETE"))
+        .and(path("/api/ciphers/does-not-exist"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+        .mount(&server)
+        .await;
+    let err = client.delete_cipher("does-not-exist").await.unwrap_err();
+    assert!(matches!(
+        err,
+        vault_api::Error::ServerStatus { status: 404, .. }
+    ));
+}
+
 fn urlencoded(s: &str) -> String {
     // wiremock body_string_contains needs the literal bytes that appear in
     // the form-encoded request body. reqwest's serde_urlencoded percent-
@@ -196,7 +251,7 @@ fn urlencoded(s: &str) -> String {
             b' ' => out.push('+'),
             _ => {
                 out.push('%');
-                out.push_str(&format!("{b:02X}"));
+                write!(out, "{b:02X}").unwrap();
             }
         }
     }

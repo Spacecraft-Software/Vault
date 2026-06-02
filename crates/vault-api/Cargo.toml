@@ -4,6 +4,7 @@
 name = "vault-api"
 description = "Bitwarden REST + identity client for Vault"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

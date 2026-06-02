@@ -43,7 +43,7 @@ pub struct VaultCache {
 impl VaultCache {
     /// Build a fresh cache for `(server, email)` with no payload yet.
     #[must_use]
-    pub fn new(device_id: String, server: String, email: String) -> Self {
+    pub fn new(device_id: String, server: String, email: &str) -> Self {
         Self {
             schema_version: 1,
             device_id,
@@ -57,6 +57,10 @@ impl VaultCache {
     /// Encrypt `sync_bytes` under `(enc_key, mac_key)` and store the
     /// resulting `EncString` as the cache payload, stamping `last_sync` with
     /// the current UTC time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Time`] if the current time fails to format as RFC 3339.
     pub fn set_payload(
         &mut self,
         enc_key: &[u8; 32],
@@ -73,6 +77,11 @@ impl VaultCache {
     }
 
     /// Decrypt and return the most recent sync payload bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoPayload`] if the cache has never been synced, or a
+    /// [`Error::Crypto`] if the payload fails to parse or authenticate.
     pub fn load_payload(&self, enc_key: &[u8; 32], mac_key: &[u8; 32]) -> Result<Vec<u8>, Error> {
         let enc_str = self.payload.as_deref().ok_or(Error::NoPayload)?;
         let enc = EncString::parse(enc_str)?;
@@ -82,11 +91,17 @@ impl VaultCache {
 
 /// Default cache directory: `$XDG_DATA_HOME/vault/<account>` (with the
 /// account directory created lazily by `save_to_dir`).
+#[must_use]
 pub fn default_data_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("vault"))
 }
 
 /// Save `cache` to `<dir>/cache.json` atomically.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] if the directory cannot be created or the atomic
+/// write fails, or [`Error::Json`] if `cache` fails to serialise.
 pub fn save_to_dir(dir: &Path, cache: &VaultCache) -> Result<PathBuf, Error> {
     fs::create_dir_all(dir)?;
     let path = dir.join("cache.json");
@@ -96,6 +111,11 @@ pub fn save_to_dir(dir: &Path, cache: &VaultCache) -> Result<PathBuf, Error> {
 }
 
 /// Load `<dir>/cache.json`. Returns `Err(Error::NotFound)` if missing.
+///
+/// # Errors
+///
+/// Returns [`Error::NotFound`] if the cache file is absent, [`Error::Io`] on
+/// any other read failure, or [`Error::Json`] if the file fails to parse.
 pub fn load_from_dir(dir: &Path) -> Result<VaultCache, Error> {
     let path = dir.join("cache.json");
     let bytes = fs::read(&path).map_err(|e| match e.kind() {
@@ -136,7 +156,7 @@ pub enum Error {
     /// Cache has no encrypted payload yet (never synced).
     #[error("no payload — never synced")]
     NoPayload,
-    /// EncString or crypto error from `vault-core`.
+    /// `EncString` or crypto error from `vault-core`.
     #[error("crypto: {0}")]
     Crypto(#[from] vault_core::Error),
     /// Filesystem path edge case (target has no parent, etc.).

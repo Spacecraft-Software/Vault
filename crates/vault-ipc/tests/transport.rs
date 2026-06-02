@@ -113,7 +113,9 @@ async fn status_round_trip_preserves_optionals() {
         last_sync: Some("2026-06-01T00:00:00Z".into()),
         agent_version: "0.0.1".into(),
     };
-    write_frame(&mut a, &Response::Status(s.clone())).await.unwrap();
+    write_frame(&mut a, &Response::Status(s.clone()))
+        .await
+        .unwrap();
     let got: Response = read_frame(&mut b).await.unwrap();
     match got {
         Response::Status(got) => {
@@ -170,7 +172,16 @@ async fn multiple_frames_on_one_stream() {
     write_frame(&mut a, &Request::Ping).await.unwrap();
     write_frame(&mut a, &Request::Lock).await.unwrap();
     write_frame(&mut a, &Request::Quit).await.unwrap();
-    assert!(matches!(read_frame::<_, Request>(&mut b).await.unwrap(), Request::Ping));
-    assert!(matches!(read_frame::<_, Request>(&mut b).await.unwrap(), Request::Lock));
-    assert!(matches!(read_frame::<_, Request>(&mut b).await.unwrap(), Request::Quit));
+    assert!(matches!(
+        read_frame::<_, Request>(&mut b).await.unwrap(),
+        Request::Ping
+    ));
+    assert!(matches!(
+        read_frame::<_, Request>(&mut b).await.unwrap(),
+        Request::Lock
+    ));
+    assert!(matches!(
+        read_frame::<_, Request>(&mut b).await.unwrap(),
+        Request::Quit
+    ));
 }

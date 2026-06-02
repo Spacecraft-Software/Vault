@@ -71,11 +71,7 @@ async fn handle_conn(stream: UnixStream, state: Arc<Mutex<AgentState>>) {
 
 async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
     match req {
-        Request::Ping => {
-            let s = state.lock().await;
-            Response::Status(s.status_snapshot())
-        }
-        Request::Status => {
+        Request::Ping | Request::Status => {
             let s = state.lock().await;
             Response::Status(s.status_snapshot())
         }
@@ -84,10 +80,10 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
             email,
             password,
         } => {
+            // Wrap the password so it is zeroised on drop no matter how
+            // perform_unlock fares; deref coercion hands it to the API as &[u8].
+            let password = zeroize::Zeroizing::new(password);
             let unlock_res = perform_unlock(&server, &email, &password).await;
-            // Wipe password no matter how perform_unlock fared.
-            let mut password = password;
-            password.iter_mut().for_each(|b| *b = 0);
             match unlock_res {
                 Ok(vault) => {
                     let mut s = state.lock().await;
@@ -108,16 +104,18 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
             // M3 keeps Sync minimal: the agent already pulled /sync during
             // unlock. A standalone re-sync lands in M4 when the cache reload
             // path is split out of the unlock flow.
-            let s = state.lock().await;
-            if !s.is_unlocked() {
-                return Response::Error(IpcError::Locked);
+            let unlocked = state.lock().await.is_unlocked();
+            if unlocked {
+                Response::Ok
+            } else {
+                Response::Error(IpcError::Locked)
             }
-            Response::Ok
         }
         Request::List => {
             let mut s = state.lock().await;
             let res = s.list_entries();
             s.touch();
+            drop(s);
             match res {
                 Ok(items) => Response::List(items),
                 Err(e) => Response::Error(e),
@@ -128,8 +126,22 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
             let f = field.unwrap_or_default();
             let res = s.get_item(&name, f);
             s.touch();
+            drop(s);
             match res {
                 Ok(item) => Response::Item(item),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::Remove { selector } => {
+            // Hold the agent mutex across the network call. Vault is
+            // single-user / single-agent, so request concurrency is low and
+            // a coarse lock keeps the cache + server in lock-step.
+            let mut s = state.lock().await;
+            let res = s.remove_cipher(&selector).await;
+            s.touch();
+            drop(s);
+            match res {
+                Ok(removed) => Response::Removed(removed),
                 Err(e) => Response::Error(e),
             }
         }

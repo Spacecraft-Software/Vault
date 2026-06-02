@@ -32,12 +32,20 @@ allow = [
     "CC0-1.0",
     "MPL-2.0",
     "0BSD",
+    # webpki-roots ships Mozilla's CA certificate bundle under CDLA-Permissive-2.0
+    # (a permissive *data* licence, GPL-compatible — it imposes no copyleft on the
+    # linking program). Required since webpki-roots 1.0 relicensed to it.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The eight `vault-*` crates depend on each other by `path` with no version
+# field, which cargo-deny reports as a wildcard. That's intra-workspace, not a
+# crates.io `*` constraint, so permit it while still denying real wildcards.
+allow-wildcard-paths = true
 deny = [
     # No openssl — rustls only.
     { name = "openssl" },
