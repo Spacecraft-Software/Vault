@@ -270,6 +270,146 @@ impl BitwardenClient {
             })
         }
     }
+
+    /// `POST /api/ciphers` — create a new cipher from an already-encrypted
+    /// [`vault_core::Cipher`]. Returns the server-assigned id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ServerStatus`] if the client lacks an access token or
+    /// the server replies non-2xx, [`Error::Transport`] on transport failure,
+    /// or [`Error::Decode`] if the response id cannot be parsed.
+    ///
+    /// # Panics
+    ///
+    /// Never: the `Bearer` header is built from an ASCII access token.
+    #[allow(clippy::expect_used)] // access tokens are ASCII; HeaderValue construction cannot fail
+    pub async fn create_cipher(&self, cipher: &vault_core::Cipher) -> Result<String> {
+        let url = self
+            .urls
+            .api
+            .join("ciphers")
+            .map_err(|_| Error::BaseUrl("could not build create-cipher URL"))?;
+        let body = CipherRequest::from_cipher(cipher);
+        let resp = self
+            .http
+            .post(url)
+            .headers(self.bearer_headers()?)
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        if status.is_success() {
+            let res: CipherIdResponse = resp.json().await?;
+            Ok(res.id)
+        } else {
+            Err(Error::ServerStatus {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            })
+        }
+    }
+
+    /// `PUT /api/ciphers/{id}` — replace an existing cipher with the
+    /// already-encrypted `cipher`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ServerStatus`] if the client lacks an access token or
+    /// the server replies non-2xx (`404` for an unknown id), or
+    /// [`Error::Transport`] on transport failure.
+    ///
+    /// # Panics
+    ///
+    /// Never: the `Bearer` header is built from an ASCII access token.
+    #[allow(clippy::expect_used)] // access tokens are ASCII; HeaderValue construction cannot fail
+    pub async fn update_cipher(&self, id: &str, cipher: &vault_core::Cipher) -> Result<()> {
+        let url = self
+            .urls
+            .api
+            .join(&format!("ciphers/{id}"))
+            .map_err(|_| Error::BaseUrl("could not build update-cipher URL"))?;
+        let body = CipherRequest::from_cipher(cipher);
+        let resp = self
+            .http
+            .put(url)
+            .headers(self.bearer_headers()?)
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(Error::ServerStatus {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            })
+        }
+    }
+
+    /// Build the `Authorization: Bearer …` header set, erroring if no token is
+    /// held yet.
+    #[allow(clippy::expect_used)] // access tokens are ASCII; HeaderValue construction cannot fail
+    fn bearer_headers(&self) -> Result<HeaderMap> {
+        let token = self.access_token.as_ref().ok_or(Error::ServerStatus {
+            status: 401,
+            message: "no access token; call login_password() first".into(),
+        })?;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Authorization",
+            HeaderValue::try_from(format!("Bearer {}", token.as_str())).expect("token is ASCII"),
+        );
+        Ok(headers)
+    }
+}
+
+/// Bitwarden create/update cipher request body. Note the wire shape: the
+/// top level is **`camelCase`** (`type`, `folderId`, `name`, `notes`, `login`,
+/// `secureNote`) while the nested `login` object reuses `vault_core`'s
+/// `PascalCase` [`Login`](vault_core::cipher::Login) — the asymmetry the
+/// Bitwarden API actually expects.
+#[derive(serde::Serialize, Debug)]
+struct CipherRequest<'a> {
+    #[serde(rename = "type")]
+    cipher_type: u8,
+    #[serde(rename = "folderId", skip_serializing_if = "Option::is_none")]
+    folder_id: Option<&'a str>,
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    login: Option<&'a vault_core::cipher::Login>,
+    #[serde(rename = "secureNote", skip_serializing_if = "Option::is_none")]
+    secure_note: Option<SecureNoteRequest>,
+}
+
+impl<'a> CipherRequest<'a> {
+    fn from_cipher(c: &'a vault_core::Cipher) -> Self {
+        Self {
+            cipher_type: c.cipher_type,
+            folder_id: c.folder_id.as_deref(),
+            name: c.name.as_deref().unwrap_or_default(),
+            notes: c.notes.as_deref(),
+            login: c.login.as_ref(),
+            // Bitwarden requires a `secureNote: { type: 0 }` marker on type-2.
+            secure_note: (c.cipher_type == 2).then_some(SecureNoteRequest { note_type: 0 }),
+        }
+    }
+}
+
+#[derive(serde::Serialize, Debug)]
+struct SecureNoteRequest {
+    #[serde(rename = "type")]
+    note_type: u8,
+}
+
+/// Minimal projection of a create-cipher response — we only need the new id.
+#[derive(serde::Deserialize)]
+struct CipherIdResponse {
+    #[serde(rename = "Id", alias = "id")]
+    id: String,
 }
 
 async fn handle_json<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T> {

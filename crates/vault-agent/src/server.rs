@@ -69,6 +69,7 @@ async fn handle_conn(stream: UnixStream, state: Arc<Mutex<AgentState>>) {
     }
 }
 
+#[allow(clippy::too_many_lines)] // flat one-arm-per-request protocol dispatch reads best in one place
 async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
     match req {
         Request::Ping | Request::Status => {
@@ -142,6 +143,62 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
             drop(s);
             match res {
                 Ok(removed) => Response::Removed(removed),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::Add {
+            name,
+            cipher_type,
+            folder,
+            notes,
+            username,
+            password,
+            totp,
+            uri,
+        } => {
+            let w = crate::state::CipherWrite {
+                name: Some(name),
+                folder,
+                notes,
+                username,
+                password,
+                totp,
+                uri,
+            };
+            let mut s = state.lock().await;
+            let res = s.add_cipher(cipher_type, w).await;
+            s.touch();
+            drop(s);
+            match res {
+                Ok(saved) => Response::Saved(saved),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::Edit {
+            selector,
+            name,
+            folder,
+            notes,
+            username,
+            password,
+            totp,
+            uri,
+        } => {
+            let w = crate::state::CipherWrite {
+                name,
+                folder,
+                notes,
+                username,
+                password,
+                totp,
+                uri,
+            };
+            let mut s = state.lock().await;
+            let res = s.edit_cipher(&selector, w).await;
+            s.touch();
+            drop(s);
+            match res {
+                Ok(saved) => Response::Saved(saved),
                 Err(e) => Response::Error(e),
             }
         }

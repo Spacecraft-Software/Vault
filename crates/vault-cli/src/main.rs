@@ -14,10 +14,10 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use tokio::net::UnixStream;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use vault_ipc::proto::{
-    Error as IpcError, Field, Item, ListEntry, Removed, Request, Response, Status,
+    Error as IpcError, Field, Item, ListEntry, Removed, Request, Response, Saved, Status,
 };
 use vault_ipc::{default_socket_path, read_frame, sanitize_socket_path, write_frame};
 
@@ -100,6 +100,63 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Create a new login or secure note.
+    Add {
+        /// Item name.
+        name: String,
+        /// Item kind.
+        #[arg(long = "type", value_enum, default_value_t = KindArg::Login)]
+        kind: KindArg,
+        /// Username (login only).
+        #[arg(long)]
+        username: Option<String>,
+        /// Primary URI (login only).
+        #[arg(long)]
+        uri: Option<String>,
+        /// Folder to file under (name or id).
+        #[arg(long)]
+        folder: Option<String>,
+        /// Notes text.
+        #[arg(long)]
+        notes: Option<String>,
+        /// Generate the password locally (login only); optional length, default 20.
+        /// Without this flag the password is read from stdin.
+        #[arg(long, value_name = "LEN", num_args = 0..=1, default_missing_value = "20")]
+        generate: Option<usize>,
+        /// Emit JSON instead of a human-readable confirmation.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Edit fields of an existing login or secure note. Only the flags you pass
+    /// change; everything else is left as-is.
+    Edit {
+        /// Cipher id (UUID) or decrypted item name (case-insensitive).
+        selector: String,
+        /// New name.
+        #[arg(long)]
+        name: Option<String>,
+        /// New username.
+        #[arg(long)]
+        username: Option<String>,
+        /// New primary URI.
+        #[arg(long)]
+        uri: Option<String>,
+        /// New folder (name or id).
+        #[arg(long)]
+        folder: Option<String>,
+        /// New notes text.
+        #[arg(long)]
+        notes: Option<String>,
+        /// Replace the password — the new value is read from stdin.
+        #[arg(long)]
+        password: bool,
+        /// Replace the password with a freshly generated one; optional length.
+        #[arg(long, value_name = "LEN", num_args = 0..=1, default_missing_value = "20")]
+        generate: Option<usize>,
+        /// Emit JSON instead of a human-readable confirmation.
+        #[arg(long)]
+        json: bool,
+    },
     /// Soft-delete a cipher on the server and drop it from the local cache.
     Remove {
         /// Cipher id (UUID) or decrypted item name (case-insensitive).
@@ -157,6 +214,25 @@ impl From<FieldArg> for Field {
     }
 }
 
+/// Cipher kind selectable on `vault add`.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum KindArg {
+    /// Login item (type 1).
+    Login,
+    /// Secure note (type 2).
+    Note,
+}
+
+impl KindArg {
+    /// Bitwarden cipher-type discriminant.
+    const fn cipher_type(self) -> u8 {
+        match self {
+            Self::Login => 1,
+            Self::Note => 2,
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
@@ -199,6 +275,58 @@ async fn run(cmd: Cmd, socket: &std::path::Path) -> Result<(), u8> {
         Cmd::Sync => cmd_simple(socket, Request::Sync).await,
         Cmd::List { json } => cmd_list(socket, json).await,
         Cmd::Get { name, field, json } => cmd_get(socket, name, field.into(), json).await,
+        Cmd::Add {
+            name,
+            kind,
+            username,
+            uri,
+            folder,
+            notes,
+            generate,
+            json,
+        } => {
+            cmd_add(
+                socket,
+                AddArgs {
+                    name,
+                    kind,
+                    username,
+                    uri,
+                    folder,
+                    notes,
+                    generate,
+                    json,
+                },
+            )
+            .await
+        }
+        Cmd::Edit {
+            selector,
+            name,
+            username,
+            uri,
+            folder,
+            notes,
+            password,
+            generate,
+            json,
+        } => {
+            cmd_edit(
+                socket,
+                EditArgs {
+                    selector,
+                    name,
+                    username,
+                    uri,
+                    folder,
+                    notes,
+                    password,
+                    generate,
+                    json,
+                },
+            )
+            .await
+        }
         Cmd::Remove {
             selector,
             force,
@@ -357,6 +485,159 @@ async fn cmd_remove(
         Response::Error(e) => report_error(&e),
         other => unexpected(&other),
     }
+}
+
+/// Parsed `vault add` arguments (bundled to keep the handler signature small).
+struct AddArgs {
+    name: String,
+    kind: KindArg,
+    username: Option<String>,
+    uri: Option<String>,
+    folder: Option<String>,
+    notes: Option<String>,
+    generate: Option<usize>,
+    json: bool,
+}
+
+async fn cmd_add(socket: &std::path::Path, args: AddArgs) -> Result<(), u8> {
+    let cipher_type = args.kind.cipher_type();
+    let is_login = matches!(args.kind, KindArg::Login);
+
+    // Password (login only): generate locally or read from stdin. Empty stdin
+    // means "no password" — a login with just a username is valid.
+    let mut generated: Option<Zeroizing<String>> = None;
+    let password = if is_login {
+        if let Some(len) = args.generate {
+            let pw = generate_pw(len)?;
+            let bytes = pw.as_bytes().to_vec();
+            generated = Some(pw);
+            Some(bytes)
+        } else {
+            read_secret("Password (leave empty for none): ")?
+        }
+    } else {
+        None
+    };
+    let (username, uri) = if is_login {
+        (args.username, args.uri)
+    } else {
+        (None, None)
+    };
+
+    let req = Request::Add {
+        name: args.name,
+        cipher_type,
+        folder: args.folder,
+        notes: args.notes,
+        username,
+        password,
+        totp: None,
+        uri,
+    };
+    let mut stream = connect(socket).await?;
+    let resp = exchange(&mut stream, &req).await?;
+    match resp {
+        Response::Saved(s) => {
+            print_saved(&s, args.json, generated.as_ref().map(|z| z.as_str()));
+            Ok(())
+        }
+        Response::Error(e) => report_error(&e),
+        other => unexpected(&other),
+    }
+}
+
+/// Parsed `vault edit` arguments.
+struct EditArgs {
+    selector: String,
+    name: Option<String>,
+    username: Option<String>,
+    uri: Option<String>,
+    folder: Option<String>,
+    notes: Option<String>,
+    password: bool,
+    generate: Option<usize>,
+    json: bool,
+}
+
+async fn cmd_edit(socket: &std::path::Path, args: EditArgs) -> Result<(), u8> {
+    let mut generated: Option<Zeroizing<String>> = None;
+    let password = if let Some(len) = args.generate {
+        let pw = generate_pw(len)?;
+        let bytes = pw.as_bytes().to_vec();
+        generated = Some(pw);
+        Some(bytes)
+    } else if args.password {
+        let Some(b) = read_secret("New password: ")? else {
+            eprintln!("vault: empty password; nothing changed");
+            return Err(2);
+        };
+        Some(b)
+    } else {
+        None
+    };
+
+    let req = Request::Edit {
+        selector: args.selector,
+        name: args.name,
+        folder: args.folder,
+        notes: args.notes,
+        username: args.username,
+        password,
+        totp: None,
+        uri: args.uri,
+    };
+    let mut stream = connect(socket).await?;
+    let resp = exchange(&mut stream, &req).await?;
+    match resp {
+        Response::Saved(s) => {
+            print_saved(&s, args.json, generated.as_ref().map(|z| z.as_str()));
+            Ok(())
+        }
+        Response::Error(e) => report_error(&e),
+        other => unexpected(&other),
+    }
+}
+
+/// Generate a password locally, surfacing generator errors as exit code 2.
+fn generate_pw(len: usize) -> Result<Zeroizing<String>, u8> {
+    let opts = vault_core::GenerateOptions {
+        length: len,
+        ..vault_core::GenerateOptions::default()
+    };
+    vault_core::generate_password(&opts).map_err(|e| {
+        eprintln!("vault: {e}");
+        2
+    })
+}
+
+/// Read an optional secret from stdin. Returns `None` for empty input (after a
+/// single trailing newline). Prompts on a TTY; never echoes via argv.
+fn read_secret(prompt: &str) -> Result<Option<Vec<u8>>, u8> {
+    let stdin = io::stdin();
+    if stdin.is_terminal() {
+        let mut stderr = io::stderr();
+        let _ = write!(stderr, "{prompt}");
+        let _ = stderr.flush();
+    }
+    let mut buf = String::new();
+    let read_res = stdin.lock().read_to_string(&mut buf);
+    if let Err(e) = read_res {
+        eprintln!("vault: failed to read input: {e}");
+        return Err(2);
+    }
+    if buf.ends_with('\n') {
+        buf.pop();
+        if buf.ends_with('\r') {
+            buf.pop();
+        }
+    }
+    if buf.is_empty() {
+        buf.zeroize();
+        return Ok(None);
+    }
+    let bytes = buf.as_bytes().to_vec();
+    buf.zeroize();
+    Ok(Some(bytes))
 }
 
 async fn cmd_get(
@@ -543,6 +824,25 @@ fn print_removed(r: &Removed, json: bool) {
         println!("{v}");
     } else {
         println!("removed: {} ({})", r.name, r.id);
+    }
+}
+
+fn print_saved(s: &Saved, json: bool, generated: Option<&str>) {
+    if json {
+        let mut v = serde_json::json!({
+            "id": s.id,
+            "name": s.name,
+            "saved": true,
+        });
+        if let Some(pw) = generated {
+            v["generated_password"] = serde_json::Value::String(pw.to_owned());
+        }
+        println!("{v}");
+    } else {
+        println!("saved: {} ({})", s.name, s.id);
+        if let Some(pw) = generated {
+            println!("generated password: {pw}");
+        }
     }
 }
 

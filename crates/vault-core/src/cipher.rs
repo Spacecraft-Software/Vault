@@ -231,6 +231,38 @@ impl Cipher {
 
         Ok(out)
     }
+
+    /// Encrypt a [`PlainCipher`]'s populated fields under `(enc_key, mac_key)`,
+    /// producing a `/sync`-shaped `Cipher` ready to serialize into a create or
+    /// update request. The inverse of [`Cipher::decrypt`].
+    ///
+    /// `cipher_type`, `id`, and `folder_id` pass through from `plain`
+    /// unchanged (they are plaintext metadata, not `EncString` fields). Login
+    /// sub-fields (`username`/`password`/`totp`/`primary_uri`) are only emitted
+    /// for `cipher_type == 1`; for any other type the `login` object is `None`.
+    #[must_use]
+    pub fn from_plain(plain: &PlainCipher, enc_key: &[u8; 32], mac_key: &[u8; 32]) -> Self {
+        let enc = |s: &str| EncString::encrypt(enc_key, mac_key, s.as_bytes()).serialize();
+        let login = (plain.cipher_type == 1).then(|| Login {
+            username: plain.username.as_deref().map(&enc),
+            password: plain.password.as_deref().map(&enc),
+            totp: plain.totp.as_deref().map(&enc),
+            uris: plain
+                .primary_uri
+                .as_deref()
+                .map(|u| vec![LoginUri { uri: Some(enc(u)) }]),
+        });
+        Self {
+            id: plain.id.clone(),
+            cipher_type: plain.cipher_type,
+            folder_id: plain.folder_id.clone(),
+            organization_id: None,
+            name: plain.name.as_deref().map(&enc),
+            notes: plain.notes.as_deref().map(&enc),
+            login,
+            fields: None,
+        }
+    }
 }
 
 /// Decrypt the user symmetric key (the `Key` field returned by

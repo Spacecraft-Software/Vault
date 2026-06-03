@@ -64,6 +64,49 @@ pub enum Request {
         selector: String,
     },
 
+    /// Create a new cipher (1 = login, 2 = secure note). All value fields
+    /// arrive as plaintext on the local UDS and are encrypted inside the agent
+    /// — the unwrapped user key never leaves it.
+    Add {
+        /// Display name (required).
+        name: String,
+        /// Cipher type: `1` = login, `2` = secure note.
+        cipher_type: u8,
+        /// Folder name (resolved to an id by the agent), or `None` for unfiled.
+        folder: Option<String>,
+        /// Free-form notes.
+        notes: Option<String>,
+        /// Login username (login type only).
+        username: Option<String>,
+        /// Login password (login type only); secret, wiped after encryption.
+        password: Option<Vec<u8>>,
+        /// TOTP secret / URI (login type only); secret, wiped after encryption.
+        totp: Option<Vec<u8>>,
+        /// Primary login URI (login type only).
+        uri: Option<String>,
+    },
+
+    /// Edit an existing cipher. Only the `Some` fields change; `None` leaves
+    /// the current value untouched. `selector` resolves like `Remove`.
+    Edit {
+        /// Cipher id (UUID) or decrypted item name (case-insensitive).
+        selector: String,
+        /// New display name.
+        name: Option<String>,
+        /// New folder name (resolved by the agent).
+        folder: Option<String>,
+        /// New notes.
+        notes: Option<String>,
+        /// New username.
+        username: Option<String>,
+        /// New password; secret, wiped after encryption.
+        password: Option<Vec<u8>>,
+        /// New TOTP secret / URI; secret, wiped after encryption.
+        totp: Option<Vec<u8>>,
+        /// New primary URI.
+        uri: Option<String>,
+    },
+
     /// Cleanly shut the agent down. Equivalent to `vault stop-agent`.
     Quit,
 }
@@ -82,6 +125,8 @@ pub enum Response {
     Item(Item),
     /// `Remove` result — cipher was deleted on the server.
     Removed(Removed),
+    /// `Add` / `Edit` result — cipher was created or updated on the server.
+    Saved(Saved),
     /// Recoverable error — operation declined or failed.
     Error(Error),
 }
@@ -93,6 +138,15 @@ pub struct Removed {
     pub id: String,
     /// Decrypted name of the cipher that was deleted (echoed so callers can
     /// confirm what they hit without re-listing).
+    pub name: String,
+}
+
+/// Wire shape for `Response::Saved` (the result of `Add` / `Edit`).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Saved {
+    /// Server-assigned id of the created or updated cipher.
+    pub id: String,
+    /// Decrypted name, echoed so callers can confirm what they wrote.
     pub name: String,
 }
 

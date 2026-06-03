@@ -8,6 +8,35 @@ range may break in any release.
 
 ## [Unreleased]
 
+### Added
+
+- **M4 (slice 3) — `vault add` + `vault edit`.** The two remaining write verbs,
+  the inverse of the read path: caller-supplied plaintext fields are encrypted
+  **inside the agent** (the user key never leaves it) and `POST`/`PUT` to the
+  server. Login (`--type login`) and secure note (`--type note`) are supported.
+  - `vault add <name> [--type login|note] [--username U] [--uri URL]
+    [--folder F] [--notes N] [--generate[=LEN]] [--json]`. The password is read
+    from stdin or generated locally with `--generate` (printed back so the user
+    has it); no `--password` flag, so secrets never enter argv / shell history.
+  - `vault edit <selector> [--name|--username|--uri|--folder|--notes ...]
+    [--password (stdin)] [--generate[=LEN]] [--json]`. Only the flags you pass
+    change; `edit` re-encrypts just those fields onto a clone of the original
+    encrypted cipher, so everything it doesn't individually edit — secondary
+    URIs, custom fields, organization membership — survives verbatim. `--uri`
+    replaces the primary URI and keeps the rest. Folder is resolved by id or
+    case-insensitive name.
+  - New `vault_core::Cipher::from_plain` (the encryption inverse of `decrypt`),
+    `vault_api::BitwardenClient::{create_cipher, update_cipher}` (`POST`/`PUT
+    /api/ciphers`, camelCase request body with a `secureNote` marker on type 2),
+    `Request::Add` / `Request::Edit` and `Response::Saved { id, name }`, and the
+    agent's `add_cipher` / `edit_cipher` (with folder name→id resolution). Tests:
+    3 `from_plain` round-trips (`vault-core`); `resolve_folder` and two
+    `apply_cipher_edits` cases proving a secondary URI survives an edit (agent);
+    and `#[ignore]`d wiremock create/update + secure-note-marker tests (api).
+
+  (`add` + `edit` complete the write verbs; remaining M4: `--json` on
+  `unlock`/`lock`/`sync`/`stop-agent`, and a real re-pull `vault sync`.)
+
 ### Fixed
 
 - **CI is green for the first time (M0–M3 had been red on every push).** Four

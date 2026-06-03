@@ -38,6 +38,7 @@ use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use vault_api::{BaseUrls, BitwardenClient};
+use vault_core::EncString;
 use vault_core::kdf::{KdfParams, KdfType, derive_master_key, stretch_master_key};
 use vault_core::login::master_password_hash;
 use vault_store::VaultCache;
@@ -236,6 +237,118 @@ async fn delete_cipher_sends_authorized_delete() {
         err,
         vault_api::Error::ServerStatus { status: 404, .. }
     ));
+}
+
+#[tokio::test]
+#[ignore = "links ring into a test binary; see file preamble"]
+async fn create_and_update_cipher_send_authorized_requests() {
+    let server = MockServer::start().await;
+    let urls = BaseUrls::self_hosted(&server.uri()).unwrap();
+
+    Mock::given(method("POST"))
+        .and(path("/identity/connect/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "write-test-token",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+            "Key": "2.dGVzdA==|dGVzdA==|dGVzdA==",
+        })))
+        .mount(&server)
+        .await;
+
+    // An encrypted, type-2 EncString name — the body must carry it verbatim.
+    let enc = [0x11u8; 32];
+    let mac = [0x22u8; 32];
+    let name = EncString::encrypt(&enc, &mac, b"GitHub").serialize();
+    let cipher = vault_core::Cipher {
+        cipher_type: 1,
+        name: Some(name),
+        ..vault_core::Cipher::default()
+    };
+
+    let new_id = "aaaa1111-bbbb-2222-cccc-333333333333";
+    Mock::given(method("POST"))
+        .and(path("/api/ciphers"))
+        .and(header("Authorization", "Bearer write-test-token"))
+        .and(body_string_contains("\"name\":\"2."))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "Id": new_id })))
+        .mount(&server)
+        .await;
+
+    let cipher_id = "44445555-6666-7777-8888-999999999999";
+    Mock::given(method("PUT"))
+        .and(path(format!("/api/ciphers/{cipher_id}")))
+        .and(header("Authorization", "Bearer write-test-token"))
+        .and(body_string_contains("\"name\":\"2."))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "Id": cipher_id })))
+        .mount(&server)
+        .await;
+
+    let mut client = BitwardenClient::new(urls, Uuid::new_v4(), "vault-test").unwrap();
+    client
+        .login_password(EMAIL, PASSWORD.as_bytes(), pbkdf2_params())
+        .await
+        .unwrap();
+
+    let got_id = client.create_cipher(&cipher).await.unwrap();
+    assert_eq!(got_id, new_id, "create returns the server-assigned id");
+
+    client.update_cipher(cipher_id, &cipher).await.unwrap();
+
+    // Unknown id on PUT surfaces as ServerStatus.
+    Mock::given(method("PUT"))
+        .and(path("/api/ciphers/nope"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+        .mount(&server)
+        .await;
+    let err = client.update_cipher("nope", &cipher).await.unwrap_err();
+    assert!(matches!(
+        err,
+        vault_api::Error::ServerStatus { status: 404, .. }
+    ));
+}
+
+#[tokio::test]
+#[ignore = "links ring into a test binary; see file preamble"]
+async fn create_secure_note_carries_securenote_marker() {
+    let server = MockServer::start().await;
+    let urls = BaseUrls::self_hosted(&server.uri()).unwrap();
+
+    Mock::given(method("POST"))
+        .and(path("/identity/connect/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "note-token",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+            "Key": "2.dGVzdA==|dGVzdA==|dGVzdA==",
+        })))
+        .mount(&server)
+        .await;
+
+    let enc = [0x33u8; 32];
+    let mac = [0x44u8; 32];
+    let note = vault_core::Cipher {
+        cipher_type: 2,
+        name: Some(EncString::encrypt(&enc, &mac, b"My note").serialize()),
+        ..vault_core::Cipher::default()
+    };
+
+    // Type-2 bodies must carry the `secureNote` marker (and no `login`).
+    Mock::given(method("POST"))
+        .and(path("/api/ciphers"))
+        .and(body_string_contains("\"secureNote\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "Id": "note-id-1" })))
+        .mount(&server)
+        .await;
+
+    let mut client = BitwardenClient::new(urls, Uuid::new_v4(), "vault-test").unwrap();
+    client
+        .login_password(EMAIL, PASSWORD.as_bytes(), pbkdf2_params())
+        .await
+        .unwrap();
+
+    let id = client.create_cipher(&note).await.unwrap();
+    assert_eq!(id, "note-id-1");
 }
 
 fn urlencoded(s: &str) -> String {
