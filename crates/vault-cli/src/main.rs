@@ -78,11 +78,22 @@ enum Cmd {
         /// Account email. Falls back to `$VAULT_EMAIL`.
         #[arg(long)]
         email: Option<String>,
+        /// Emit JSON instead of staying silent on success.
+        #[arg(long)]
+        json: bool,
     },
     /// Wipe the in-memory key (the agent stays running).
-    Lock,
-    /// Refresh the encrypted item cache from the server.
-    Sync,
+    Lock {
+        /// Emit JSON instead of staying silent on success.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Refresh the item cache from the server (re-pull `/sync`).
+    Sync {
+        /// Emit JSON instead of staying silent on success.
+        #[arg(long)]
+        json: bool,
+    },
     /// List every cached item by decrypted name.
     List {
         /// Emit JSON instead of a tab-separated table.
@@ -169,7 +180,11 @@ enum Cmd {
         json: bool,
     },
     /// Politely shut down the agent (equivalent to `Request::Quit`).
-    StopAgent,
+    StopAgent {
+        /// Emit JSON instead of staying silent on success.
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate a password locally (no agent or server interaction).
     Generate {
         /// Password length in characters.
@@ -270,9 +285,13 @@ fn resolve_socket(cli: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 async fn run(cmd: Cmd, socket: &std::path::Path) -> Result<(), u8> {
     match cmd {
         Cmd::Status { json } => cmd_status(socket, json).await,
-        Cmd::Unlock { server, email } => cmd_unlock(socket, server, email).await,
-        Cmd::Lock => cmd_simple(socket, Request::Lock).await,
-        Cmd::Sync => cmd_simple(socket, Request::Sync).await,
+        Cmd::Unlock {
+            server,
+            email,
+            json,
+        } => cmd_unlock(socket, server, email, json).await,
+        Cmd::Lock { json } => cmd_ack(socket, Request::Lock, "locked", json).await,
+        Cmd::Sync { json } => cmd_sync(socket, json).await,
         Cmd::List { json } => cmd_list(socket, json).await,
         Cmd::Get { name, field, json } => cmd_get(socket, name, field.into(), json).await,
         Cmd::Add {
@@ -332,7 +351,7 @@ async fn run(cmd: Cmd, socket: &std::path::Path) -> Result<(), u8> {
             force,
             json,
         } => cmd_remove(socket, selector, force, json).await,
-        Cmd::StopAgent => cmd_simple(socket, Request::Quit).await,
+        Cmd::StopAgent { json } => cmd_ack(socket, Request::Quit, "stopped", json).await,
         Cmd::Generate {
             length,
             symbols,
@@ -402,6 +421,7 @@ async fn cmd_unlock(
     socket: &std::path::Path,
     server: Option<String>,
     email: Option<String>,
+    json: bool,
 ) -> Result<(), u8> {
     let server = resolve_arg(server, "VAULT_SERVER", "--server")?;
     let email = resolve_arg(email, "VAULT_EMAIL", "--email")?;
@@ -418,17 +438,58 @@ async fn cmd_unlock(
     // best-effort beyond that point.
     drop(req);
     match resp {
-        Response::Ok => Ok(()),
+        Response::Ok => {
+            print_ack("unlocked", json);
+            Ok(())
+        }
         Response::Error(e) => report_error(&e),
         other => unexpected(&other),
     }
 }
 
-async fn cmd_simple(socket: &std::path::Path, req: Request) -> Result<(), u8> {
+/// Fire-and-acknowledge: send `req`, expect a bare `Ok`, and (only under
+/// `--json`) print a `{ "<action>": true }` envelope. Human mode stays silent
+/// on success, matching the pre-`--json` behaviour of `lock`/`stop-agent`.
+async fn cmd_ack(
+    socket: &std::path::Path,
+    req: Request,
+    action: &str,
+    json: bool,
+) -> Result<(), u8> {
     let mut stream = connect(socket).await?;
     let resp = exchange(&mut stream, &req).await?;
     match resp {
-        Response::Ok | Response::Status(_) => Ok(()),
+        Response::Ok => {
+            print_ack(action, json);
+            Ok(())
+        }
+        Response::Error(e) => report_error(&e),
+        other => unexpected(&other),
+    }
+}
+
+async fn cmd_sync(socket: &std::path::Path, json: bool) -> Result<(), u8> {
+    let mut stream = connect(socket).await?;
+    let resp = exchange(&mut stream, &Request::Sync).await?;
+    match resp {
+        // The agent answers a successful re-sync with a fresh Status snapshot.
+        Response::Status(s) => {
+            if json {
+                let v = serde_json::json!({
+                    "synced": true,
+                    "items": s.items,
+                    "last_sync": s.last_sync,
+                });
+                println!("{v}");
+            }
+            Ok(())
+        }
+        // Tolerate a bare Ok for forward-compat with an agent that hasn't
+        // adopted the Status-returning Sync contract.
+        Response::Ok => {
+            print_ack("synced", json);
+            Ok(())
+        }
         Response::Error(e) => report_error(&e),
         other => unexpected(&other),
     }
@@ -755,6 +816,17 @@ fn read_password() -> Result<Vec<u8>, u8> {
     let bytes = buf.as_bytes().to_vec();
     buf.zeroize();
     Ok(bytes)
+}
+
+/// Print a `{ "<action>": true }` acknowledgement under `--json`; stay silent
+/// otherwise. Used by `lock` / `unlock` / `stop-agent` (and `sync`'s
+/// forward-compat path), all of which carry no payload on success.
+fn print_ack(action: &str, json: bool) {
+    if json {
+        let mut map = serde_json::Map::new();
+        map.insert(action.to_owned(), serde_json::Value::Bool(true));
+        println!("{}", serde_json::Value::Object(map));
+    }
 }
 
 fn print_status(s: &Status, json: bool) {

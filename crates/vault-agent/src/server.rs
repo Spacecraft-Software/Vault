@@ -102,15 +102,18 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
             Response::Ok
         }
         Request::Sync => {
-            // M3 keeps Sync minimal: the agent already pulled /sync during
-            // unlock. A standalone re-sync lands in M4 when the cache reload
-            // path is split out of the unlock flow.
-            let unlocked = state.lock().await.is_unlocked();
-            if unlocked {
-                Response::Ok
-            } else {
-                Response::Error(IpcError::Locked)
-            }
+            // Re-pull /sync over the unlock-time session and refresh the
+            // in-memory cache. Hold the mutex across the network call (as with
+            // Remove) — single-user / single-agent, so a coarse lock is fine.
+            let mut s = state.lock().await;
+            let res = s.resync().await;
+            s.touch();
+            let resp = match res {
+                Ok(()) => Response::Status(s.status_snapshot()),
+                Err(e) => Response::Error(e),
+            };
+            drop(s);
+            resp
         }
         Request::List => {
             let mut s = state.lock().await;

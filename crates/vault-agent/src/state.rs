@@ -319,6 +319,30 @@ impl AgentState {
         Ok(Saved { id, name })
     }
 
+    /// Re-pull `/sync` over the existing authenticated session and replace the
+    /// in-memory ciphers, folder map, and `last_sync` stamp. Requires an
+    /// unlocked agent.
+    ///
+    /// Like `unlock`, this refreshes only the in-memory vault — the on-disk
+    /// encrypted cache is not (yet) written by the agent. Known limitation: a
+    /// `sync` long after `unlock` can fail with a `401` once the access token
+    /// expires; there is no refresh-token flow in M4, so that surfaces as
+    /// `IpcError::Network` (shared with `add`/`edit`/`remove`).
+    pub async fn resync(&mut self) -> Result<(), IpcError> {
+        let v = self.vault.as_mut().ok_or(IpcError::Locked)?;
+        let sync = v
+            .client
+            .sync()
+            .await
+            .map_err(|e| IpcError::Network(e.to_string()))?;
+        let (ciphers, folders) =
+            crate::unlock::ciphers_and_folders(&sync, &v.user_enc, &v.user_mac);
+        v.ciphers = ciphers;
+        v.folders = folders;
+        v.last_sync = crate::unlock::now_iso();
+        Ok(())
+    }
+
     /// Decrypt the named field on the cipher matching `query` (case-insensitive).
     pub fn get_item(&self, query: &str, field: Field) -> Result<Item, IpcError> {
         let v = self.vault.as_ref().ok_or(IpcError::Locked)?;

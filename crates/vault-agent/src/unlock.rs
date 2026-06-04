@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use vault_api::{BaseUrls, BitwardenClient};
+use vault_api::{BaseUrls, BitwardenClient, SyncResponse};
 use vault_core::cipher::{Cipher, decrypt_user_key};
 use vault_core::kdf::{derive_master_key, stretch_master_key};
 use vault_ipc::proto::Error as IpcError;
@@ -49,32 +49,7 @@ pub async fn perform_unlock(server: &str, email: &str, password: &[u8]) -> Resul
     let user_mac = Zeroizing::new(user_mac_arr);
 
     let sync = client.sync().await.map_err(api_err)?;
-
-    // Server returns Profile / Folders / Ciphers / etc as serde_json::Value
-    // at the vault-api layer — re-cast Ciphers and Folders into typed views.
-    let ciphers: Vec<Cipher> = sync
-        .ciphers
-        .iter()
-        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-        .collect();
-
-    // Decrypt folder names eagerly — there are typically few.
-    let mut folders = HashMap::new();
-    for f in &sync.folders {
-        let Some(obj) = f.as_object() else { continue };
-        let Some(id) = obj.get("Id").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(name_enc) = obj.get("Name").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if let Ok(enc) = vault_core::EncString::parse(name_enc)
-            && let Ok(pt) = enc.decrypt(&user_enc, &user_mac)
-            && let Ok(name) = String::from_utf8(pt)
-        {
-            folders.insert(id.to_owned(), name);
-        }
-    }
+    let (ciphers, folders) = ciphers_and_folders(&sync, &user_enc, &user_mac);
 
     // `client` holds the access token internally (`login_password` stashed
     // it). Hand the client itself to the vault so subsequent Sync / Remove
@@ -89,6 +64,44 @@ pub async fn perform_unlock(server: &str, email: &str, password: &[u8]) -> Resul
         client,
         last_sync: now_iso(),
     })
+}
+
+/// Re-cast a `/sync` payload into the typed views the agent caches: a list of
+/// [`Cipher`]s and an `id → decrypted-name` folder map. Shared by the initial
+/// [`perform_unlock`] and the standalone `resync` so both paths interpret the
+/// server response identically.
+///
+/// The server hands ciphers/folders to `vault-api` as `serde_json::Value`;
+/// here they are decoded into [`Cipher`] (dropping any that don't fit the
+/// schema) and folder names are decrypted eagerly — there are typically few.
+pub(crate) fn ciphers_and_folders(
+    sync: &SyncResponse,
+    user_enc: &[u8; 32],
+    user_mac: &[u8; 32],
+) -> (Vec<Cipher>, HashMap<String, String>) {
+    let ciphers: Vec<Cipher> = sync
+        .ciphers
+        .iter()
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+        .collect();
+
+    let mut folders = HashMap::new();
+    for f in &sync.folders {
+        let Some(obj) = f.as_object() else { continue };
+        let Some(id) = obj.get("Id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(name_enc) = obj.get("Name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if let Ok(enc) = vault_core::EncString::parse(name_enc)
+            && let Ok(pt) = enc.decrypt(user_enc, user_mac)
+            && let Ok(name) = String::from_utf8(pt)
+        {
+            folders.insert(id.to_owned(), name);
+        }
+    }
+    (ciphers, folders)
 }
 
 fn api_err(e: vault_api::Error) -> IpcError {
@@ -118,7 +131,7 @@ fn crypto_err(e: vault_core::Error) -> IpcError {
 }
 
 #[allow(clippy::many_single_char_names)] // h/m/s/y/d are the conventional date-field names
-fn now_iso() -> Option<String> {
+pub(crate) fn now_iso() -> Option<String> {
     use std::time::SystemTime;
     let now = SystemTime::now();
     let dur = now.duration_since(SystemTime::UNIX_EPOCH).ok()?;
@@ -151,4 +164,75 @@ fn days_to_ymd(days_since_epoch: u64) -> (i32, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = y_minus_2000 + i64::from(m <= 2) + 2000;
     (i32::try_from(y).unwrap_or(0), m as u32, d as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn enc_str(enc: &[u8; 32], mac: &[u8; 32], plain: &str) -> String {
+        vault_core::EncString::encrypt(enc, mac, plain.as_bytes()).serialize()
+    }
+
+    #[test]
+    fn ciphers_and_folders_decodes_typed_views() {
+        let enc = [1u8; 32];
+        let mac = [2u8; 32];
+
+        // Two well-formed ciphers and one folder with an encrypted name.
+        let sync = SyncResponse {
+            profile: serde_json::Value::Null,
+            folders: vec![serde_json::json!({
+                "Id": "fid-1",
+                "Name": enc_str(&enc, &mac, "Work"),
+            })],
+            collections: vec![],
+            ciphers: vec![
+                serde_json::json!({
+                    "Id": "c1",
+                    "Type": 1,
+                    "Name": enc_str(&enc, &mac, "github.com"),
+                }),
+                serde_json::json!({
+                    "Id": "c2",
+                    "Type": 2,
+                    "Name": enc_str(&enc, &mac, "note"),
+                }),
+            ],
+            domains: serde_json::Value::Null,
+            sends: vec![],
+        };
+
+        let (ciphers, folders) = ciphers_and_folders(&sync, &enc, &mac);
+
+        assert_eq!(ciphers.len(), 2);
+        assert_eq!(ciphers[0].id, "c1");
+        assert_eq!(
+            ciphers[0].decrypt_name(&enc, &mac).unwrap().as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(folders.get("fid-1").map(String::as_str), Some("Work"));
+    }
+
+    #[test]
+    fn ciphers_and_folders_skips_malformed_folder_entries() {
+        let enc = [3u8; 32];
+        let mac = [4u8; 32];
+        let sync = SyncResponse {
+            profile: serde_json::Value::Null,
+            // Missing Name, and an undecryptable Name — both dropped silently.
+            folders: vec![
+                serde_json::json!({ "Id": "fid-missing-name" }),
+                serde_json::json!({ "Id": "fid-bad", "Name": "not-an-encstring" }),
+            ],
+            collections: vec![],
+            ciphers: vec![],
+            domains: serde_json::Value::Null,
+            sends: vec![],
+        };
+
+        let (ciphers, folders) = ciphers_and_folders(&sync, &enc, &mac);
+        assert!(ciphers.is_empty());
+        assert!(folders.is_empty());
+    }
 }

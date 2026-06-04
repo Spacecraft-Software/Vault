@@ -10,6 +10,29 @@ range may break in any release.
 
 ### Added
 
+- **M4 (slice 4) — `--json` on the lifecycle verbs + a real `vault sync`.**
+  Closes the two remaining M4 items.
+  - `unlock`, `lock`, `sync`, and `stop-agent` now take `--json`. They stay
+    **silent on success in human mode** (unchanged — existing pipelines keep
+    working); under `--json` each emits a small envelope: `{"unlocked":true}`,
+    `{"locked":true}`, `{"stopped":true}`, and for sync
+    `{"synced":true,"items":N,"last_sync":"…"}`.
+  - `vault sync` now actually re-pulls `/sync` over the unlock-time session and
+    replaces the in-memory ciphers, folder map, and `last_sync` stamp (it was an
+    M3 stub that only checked the unlocked flag). The agent answers a successful
+    re-sync with a fresh `Status` snapshot, so `--json` can report the new item
+    count. Parity with `unlock`: only the in-memory vault is refreshed — the
+    agent still doesn't write the on-disk `vault-store` cache. Known limitation:
+    a `sync` long after `unlock` can `401` once the access token expires (no
+    refresh-token flow yet in M4); it surfaces as `IpcError::Network`, same as
+    `add`/`edit`/`remove`.
+  - The `/sync` → `(ciphers, folders)` decode is factored out of
+    `perform_unlock` into a shared `unlock::ciphers_and_folders`, now the single
+    spine of both `unlock` and `resync`. Tests: two direct unit tests on that
+    function (typed-view decode + malformed-folder skipping); the CLI's
+    `cmd_simple` was retired in favour of `cmd_ack` (Ok-only acks) and a
+    dedicated `cmd_sync`.
+
 - **M4 (slice 3) — `vault add` + `vault edit`.** The two remaining write verbs,
   the inverse of the read path: caller-supplied plaintext fields are encrypted
   **inside the agent** (the user key never leaves it) and `POST`/`PUT` to the
@@ -34,8 +57,10 @@ range may break in any release.
     `apply_cipher_edits` cases proving a secondary URI survives an edit (agent);
     and `#[ignore]`d wiremock create/update + secure-note-marker tests (api).
 
-  (`add` + `edit` complete the write verbs; remaining M4: `--json` on
-  `unlock`/`lock`/`sync`/`stop-agent`, and a real re-pull `vault sync`.)
+  (`add` + `edit` complete the write verbs; `--json` on the lifecycle verbs and
+  the real `vault sync` landed in slice 4 above. M4 feature work is complete —
+  the remaining M4 gate is the end-to-end `add → list/get → edit → get → remove`
+  run against a real Vaultwarden per `docs/m2-vaultwarden.md`.)
 
 ### Fixed
 
