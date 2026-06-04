@@ -8,7 +8,13 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # paste 1.0.15 — RUSTSEC-2024-0436 (unmaintained, not a vulnerability). A
+    # build-time-only proc-macro with no runtime surface, pulled in transitively
+    # by ratatui (TUI). The author archived it with no successor we can swap to
+    # without dropping ratatui. Revisit when ratatui's tree drops `paste`.
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 version = 2

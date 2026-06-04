@@ -22,6 +22,10 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
 vault-core = { path = "../vault-core" }
 vault-ipc = { path = "../vault-ipc" }
 vault-theme = { path = "../vault-theme" }

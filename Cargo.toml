@@ -74,6 +74,11 @@ dirs = "5"
 time = { version = "0.3", features = ["serde", "serde-well-known"] }
 fs2 = "0.4"
 
+# TUI — ratatui + crossterm (MIT; GPL-3.0-or-later compatible). No cursive
+# (license-tree hygiene per PRD §7.2).
+ratatui = "0.29"
+crossterm = "0.28"
+
 tempfile = "3"
 ciborium = "0.2"
 ciborium-io = "0.2"

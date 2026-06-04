@@ -10,6 +10,30 @@ range may break in any release.
 
 ### Added
 
+- **M5 (slice 1) — `vault-tui` skeleton (read-only browser).** The TUI stub is
+  now a real cruxpass-style three-pane interface (`ratatui` + `crossterm`):
+  **left** folder list, **center** filterable item list, **right** item detail,
+  with a status bar. It is just another UDS client of the agent — the user key
+  never crosses into it — and drives only the existing `Request::Status` +
+  `Request::List`, so no IPC change.
+  - Requires a pre-unlocked agent; a locked or absent agent shows a centered
+    banner (`Locked` / `No agent`). `r` refreshes (re-runs Status + List).
+  - Keys: `q`/`Esc`/`Ctrl+C` quit, `j`/`k` + arrows move, `Tab`/`h`/`l` switch
+    pane focus. Folder selection filters the item list (`All` / `Unfiled` /
+    named folders, derived from the entries). The status bar previews the
+    `/ c u o g :` keys as coming-soon so the layout is final.
+  - Detail is **read-only and secret-free** this slice: it shows only the
+    non-secret `ListEntry` metadata (name, type, username, folder, id) the agent
+    already returned — reveal/copy (which need `Request::Get`) land with the copy
+    slice. Terminal teardown is RAII + a panic hook, so a panic never leaves the
+    terminal in raw mode. `vault-tui --version` carries the §13.2 block.
+  - New modules `app` (state + pure nav/filter logic, 6 unit tests), `ui`
+    (rendering + a `#RRGGBB`→`Color` theme helper over `vault_theme::steelbore`,
+    2 `TestBackend` render smoke tests), and `client` (UDS request helper).
+  - `deny.toml` ignores **RUSTSEC-2024-0436** (`paste` unmaintained) — a
+    build-time-only proc-macro with no runtime surface, pulled in transitively
+    by `ratatui`; documented with a revisit note.
+
 - **M4 (slice 4) — `--json` on the lifecycle verbs + a real `vault sync`.**
   Closes the two remaining M4 items.
   - `unlock`, `lock`, `sync`, and `stop-agent` now take `--json`. They stay

@@ -1,0 +1,334 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! Rendering — a cruxpass-style three-pane layout (PRD §7.2) over the
+//! Steelbore palette (Standard §9). Pure function of [`App`] state; no IO.
+
+use ratatui::Frame;
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+
+use vault_theme::steelbore;
+
+use crate::app::{App, Focus, Screen};
+
+/// Parse a `#RRGGBB` palette constant into a ratatui [`Color`]; falls back to
+/// the terminal default on anything malformed.
+#[must_use]
+fn hex(s: &str) -> Color {
+    let s = s.strip_prefix('#').unwrap_or(s);
+    if s.len() == 6
+        && let Ok(r) = u8::from_str_radix(&s[0..2], 16)
+        && let Ok(g) = u8::from_str_radix(&s[2..4], 16)
+        && let Ok(b) = u8::from_str_radix(&s[4..6], 16)
+    {
+        Color::Rgb(r, g, b)
+    } else {
+        Color::Reset
+    }
+}
+
+/// Human label for a Bitwarden cipher type.
+const fn type_label(t: u8) -> &'static str {
+    match t {
+        1 => "login",
+        2 => "secure note",
+        3 => "card",
+        4 => "identity",
+        _ => "item",
+    }
+}
+
+/// Draw one frame of the whole UI.
+pub fn render(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    let bg = hex(steelbore::VOID_NAVY);
+    // Paint the backdrop Void Navy so unused cells aren't terminal-default.
+    frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
+
+    let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
+    let body = rows[0];
+    let status_bar = rows[1];
+
+    match &app.screen {
+        Screen::Message { title, body: text } => render_message(frame, body, title, text),
+        Screen::Browsing => render_browser(frame, app, body),
+    }
+    render_status_bar(frame, app, status_bar);
+}
+
+/// Centered banner for the locked / disconnected states.
+fn render_message(frame: &mut Frame, area: Rect, title: &str, body: &str) {
+    let amber = hex(steelbore::MOLTEN_AMBER);
+    let lines = vec![
+        Line::from(Span::styled(
+            title.to_owned(),
+            Style::default().fg(amber).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            body.to_owned(),
+            Style::default().fg(hex(steelbore::INFO)),
+        )),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(amber))
+        .title(" vault ");
+    let para = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true })
+        .block(block);
+    frame.render_widget(para, centered(area, 60, 30));
+}
+
+/// The three-pane browser: folders | items | detail.
+fn render_browser(frame: &mut Frame, app: &App, area: Rect) {
+    let cols = Layout::horizontal([
+        Constraint::Percentage(22),
+        Constraint::Percentage(38),
+        Constraint::Percentage(40),
+    ])
+    .split(area);
+
+    render_folders(frame, app, cols[0]);
+    render_items(frame, app, cols[1]);
+    render_detail(frame, app, cols[2]);
+}
+
+fn render_folders(frame: &mut Frame, app: &App, area: Rect) {
+    let items: Vec<ListItem> = app
+        .folders
+        .iter()
+        .map(|f| ListItem::new(f.label.clone()))
+        .collect();
+    let list = List::new(items)
+        .block(pane_block("Folders", app.focus == Focus::Folders))
+        .highlight_style(highlight(app.focus == Focus::Folders));
+    let mut state = ListState::default().with_selected(Some(app.folder_sel));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_items(frame: &mut Frame, app: &App, area: Rect) {
+    let filtered = app.filtered();
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .map(|e| {
+            let marker = if e.cipher_type == 2 { "≣ " } else { "● " };
+            ListItem::new(format!("{marker}{}", e.name))
+        })
+        .collect();
+    let title = format!("Items ({})", filtered.len());
+    let list = List::new(items)
+        .block(pane_block(&title, app.focus == Focus::Items))
+        .highlight_style(highlight(app.focus == Focus::Items));
+    let mut state = ListState::default().with_selected(Some(app.item_sel));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
+    let amber = hex(steelbore::MOLTEN_AMBER);
+    let info = hex(steelbore::INFO);
+    let lines: Vec<Line> = app.selected_entry().map_or_else(
+        || {
+            vec![Line::from(Span::styled(
+                "no item selected",
+                Style::default().fg(info),
+            ))]
+        },
+        |e| {
+            let folder = e.folder.clone().unwrap_or_else(|| "(unfiled)".to_owned());
+            let username = e.username.clone().unwrap_or_else(|| "—".to_owned());
+            vec![
+                field_line("Name", &e.name, amber),
+                field_line("Type", type_label(e.cipher_type), info),
+                field_line("User", &username, info),
+                field_line("Folder", &folder, info),
+                field_line("Id", &e.id, info),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "reveal/copy land in the next slice",
+                    Style::default()
+                        .fg(hex(steelbore::STEEL_BLUE))
+                        .add_modifier(Modifier::ITALIC),
+                )),
+            ]
+        },
+    );
+    let para = Paragraph::new(lines)
+        .block(pane_block("Detail", false))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(para, area);
+}
+
+fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let amber = hex(steelbore::MOLTEN_AMBER);
+    let (state_txt, state_color) = app.status.as_ref().map_or_else(
+        || ("no agent", hex(steelbore::ERROR)),
+        |s| {
+            if s.unlocked {
+                ("unlocked", hex(steelbore::SUCCESS))
+            } else {
+                ("locked", hex(steelbore::ERROR))
+            }
+        },
+    );
+    let mut spans = vec![
+        Span::styled(
+            format!(" {state_txt} "),
+            Style::default()
+                .fg(hex(steelbore::VOID_NAVY))
+                .bg(state_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+    ];
+    if let Some(s) = app.status.as_ref() {
+        if let Some(n) = s.items {
+            spans.push(Span::styled(
+                format!("{n} items"),
+                Style::default().fg(amber),
+            ));
+            spans.push(Span::raw("  "));
+        }
+        if let Some(ls) = s.last_sync.as_deref() {
+            spans.push(Span::styled(
+                format!("synced {ls}"),
+                Style::default().fg(hex(steelbore::STEEL_BLUE)),
+            ));
+            spans.push(Span::raw("  "));
+        }
+    }
+    spans.push(Span::styled(
+        "q quit  j/k move  Tab pane  r refresh  ·  / c u o g : soon",
+        Style::default().fg(hex(steelbore::STEEL_BLUE)),
+    ));
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(hex(steelbore::VOID_NAVY))),
+        area,
+    );
+}
+
+/// `Label: value` detail row with an amber-ish label and plain value. Both
+/// spans own their text, so the row is `'static` and never borrows the entry.
+fn field_line(label: &str, value: &str, value_color: Color) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<7}"),
+            Style::default()
+                .fg(hex(steelbore::MOLTEN_AMBER))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(value.to_owned(), Style::default().fg(value_color)),
+    ])
+}
+
+/// A bordered pane block whose border brightens to amber when focused.
+fn pane_block(title: &str, focused: bool) -> Block<'static> {
+    let border = if focused {
+        hex(steelbore::MOLTEN_AMBER)
+    } else {
+        hex(steelbore::STEEL_BLUE)
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border))
+        .title(format!(" {title} "))
+}
+
+/// Selection highlight: amber bar when the pane is focused, dimmer otherwise.
+fn highlight(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .bg(hex(steelbore::MOLTEN_AMBER))
+            .fg(hex(steelbore::VOID_NAVY))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::REVERSED)
+    }
+}
+
+/// Rect centered within `area` at the given percentage of width/height.
+fn centered(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
+    let h = Layout::horizontal([Constraint::Percentage(percent_x)])
+        .flex(Flex::Center)
+        .split(area)[0];
+    Layout::vertical([Constraint::Percentage(percent_y)])
+        .flex(Flex::Center)
+        .split(h)[0]
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    use super::*;
+    use vault_ipc::proto::{ListEntry, Status};
+
+    fn buffer_text(buf: &Buffer) -> String {
+        let area = buf.area;
+        let mut s = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                s.push_str(buf[(x, y)].symbol());
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    fn draw(app: &App) -> String {
+        let backend = TestBackend::new(90, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| render(f, app)).expect("draw");
+        buffer_text(terminal.backend().buffer())
+    }
+
+    fn status() -> Status {
+        Status {
+            unlocked: true,
+            server: Some("https://vault.example.org".into()),
+            email: Some("alice@example.org".into()),
+            items: Some(2),
+            last_sync: Some("2026-06-04T00:00:00Z".into()),
+            agent_version: "0.0.1".into(),
+        }
+    }
+
+    #[test]
+    fn browsing_frame_shows_items_and_unlocked_bar() {
+        let entries = vec![
+            ListEntry {
+                id: "c1".into(),
+                name: "github.com".into(),
+                cipher_type: 1,
+                username: Some("octocat".into()),
+                folder: Some("Work".into()),
+            },
+            ListEntry {
+                id: "c2".into(),
+                name: "bank-note".into(),
+                cipher_type: 2,
+                username: None,
+                folder: None,
+            },
+        ];
+        let app = App::browsing(status(), entries);
+        let text = draw(&app);
+        assert!(text.contains("github.com"), "item name missing:\n{text}");
+        assert!(text.contains("Folders"), "folder pane missing");
+        assert!(text.contains("Detail"), "detail pane missing");
+        assert!(text.contains("unlocked"), "status bar state missing");
+    }
+
+    #[test]
+    fn locked_frame_shows_banner() {
+        let app = App::message("Locked", "Run `vault unlock` to browse.", None);
+        let text = draw(&app);
+        assert!(text.contains("Locked"), "banner title missing:\n{text}");
+        assert!(text.contains("no agent") || text.contains("locked"));
+    }
+}
