@@ -66,12 +66,25 @@ jobs:
   audit:
     name: cargo-audit
     runs-on: ubuntu-latest
+    # audit-check posts findings as a check run — needs checks:write. Job-level
+    # permissions replace the default set, so contents:read is restated for
+    # checkout.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # Build-time / transitive advisories from the ratatui TUI tree, kept in
+          # lock-step with deny.toml's policy (see that file for the paste
+          # rationale). Both are informational (no fix that doesn't mean dropping
+          # ratatui); revisit when ratatui's tree updates.
+          #   RUSTSEC-2024-0436 — paste (unmaintained, build-time proc-macro)
+          #   RUSTSEC-2026-0002 — lru 0.12.5 (unsound IterMut; transitive via ratatui)
+          ignore: RUSTSEC-2024-0436,RUSTSEC-2026-0002
 
   deny:
     name: cargo-deny

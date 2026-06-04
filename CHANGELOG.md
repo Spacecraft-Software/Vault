@@ -30,9 +30,13 @@ range may break in any release.
   - New modules `app` (state + pure nav/filter logic, 6 unit tests), `ui`
     (rendering + a `#RRGGBB`→`Color` theme helper over `vault_theme::steelbore`,
     2 `TestBackend` render smoke tests), and `client` (UDS request helper).
-  - `deny.toml` ignores **RUSTSEC-2024-0436** (`paste` unmaintained) — a
-    build-time-only proc-macro with no runtime surface, pulled in transitively
-    by `ratatui`; documented with a revisit note.
+  - Supply-chain: `ratatui`'s tree adds two informational advisories with no fix
+    short of dropping ratatui — **RUSTSEC-2024-0436** (`paste`, unmaintained
+    build-time proc-macro) and **RUSTSEC-2026-0002** (`lru` 0.12.5, unsound
+    `IterMut`, transitive). `paste` is ignored in `deny.toml`; the
+    `rustsec/audit-check` CI job ignores both (it fails on any advisory, unlike
+    `cargo deny`) and gains `checks: write` so it can post its check-run
+    annotations. Both documented with revisit notes.
 
 - **M4 (slice 4) — `--json` on the lifecycle verbs + a real `vault sync`.**
   Closes the two remaining M4 items.
