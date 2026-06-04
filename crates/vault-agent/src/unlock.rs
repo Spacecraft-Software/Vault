@@ -74,7 +74,7 @@ pub async fn perform_unlock(server: &str, email: &str, password: &[u8]) -> Resul
 /// The server hands ciphers/folders to `vault-api` as `serde_json::Value`;
 /// here they are decoded into [`Cipher`] (dropping any that don't fit the
 /// schema) and folder names are decrypted eagerly — there are typically few.
-pub(crate) fn ciphers_and_folders(
+pub fn ciphers_and_folders(
     sync: &SyncResponse,
     user_enc: &[u8; 32],
     user_mac: &[u8; 32],
@@ -131,7 +131,7 @@ fn crypto_err(e: vault_core::Error) -> IpcError {
 }
 
 #[allow(clippy::many_single_char_names)] // h/m/s/y/d are the conventional date-field names
-pub(crate) fn now_iso() -> Option<String> {
+pub fn now_iso() -> Option<String> {
     use std::time::SystemTime;
     let now = SystemTime::now();
     let dur = now.duration_since(SystemTime::UNIX_EPOCH).ok()?;

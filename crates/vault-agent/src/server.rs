@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
-use vault_ipc::proto::{Error as IpcError, Request, Response};
+use vault_ipc::proto::{Request, Response};
 use vault_ipc::{read_frame, write_frame};
 
 use crate::state::AgentState;
@@ -234,7 +234,7 @@ pub async fn idle_lock_loop(state: Arc<Mutex<AgentState>>) {
 mod tests {
     use super::*;
     use tokio::net::UnixStream;
-    use vault_ipc::proto::{Field, Request, Response};
+    use vault_ipc::proto::{Error as IpcError, Field, Request, Response};
 
     /// End-to-end smoke: bind the listener at a tempdir socket, drive
     /// Status → Lock → Get (while locked) → Quit, and confirm clean shutdown.

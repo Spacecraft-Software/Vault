@@ -64,6 +64,14 @@ range may break in any release.
 
 ### Fixed
 
+- **`vault-agent` clippy debt from M4 slice 4 (the stale-artifact gremlin,
+  again).** A fresh full compile surfaced three findings a warm clippy cache had
+  masked at commit time: an `unused_import` (`Error as IpcError` in `server.rs`,
+  now only referenced from the test module, so moved there) and two
+  `redundant_pub_crate` hits (`unlock::ciphers_and_folders` / `now_iso` are
+  `pub` inside a private module, not `pub(crate)`). No behaviour change — purely
+  the lints CI's cold compile would have failed on.
+
 - **CI is green for the first time (M0–M3 had been red on every push).** Four
   jobs were failing independently of the code's behaviour:
   - **`clippy -D warnings`** — the workspace lints enable `clippy::pedantic` +
