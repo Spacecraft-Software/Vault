@@ -26,6 +26,7 @@ clap = { workspace = true }
 tokio = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+zeroize = { workspace = true }
 vault-core = { path = "../vault-core" }
 vault-ipc = { path = "../vault-ipc" }
 vault-theme = { path = "../vault-theme" }

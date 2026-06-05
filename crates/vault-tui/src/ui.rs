@@ -9,9 +9,13 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
+use vault_ipc::proto::Field;
 use vault_theme::steelbore;
 
 use crate::app::{App, Focus, Screen};
+
+/// Mask shown for a secret field that has not been revealed.
+const MASK: &str = "••••••••";
 
 /// Parse a `#RRGGBB` palette constant into a ratatui [`Color`]; falls back to
 /// the terminal default on anything malformed.
@@ -140,20 +144,30 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
         |e| {
             let folder = e.folder.clone().unwrap_or_else(|| "(unfiled)".to_owned());
             let username = e.username.clone().unwrap_or_else(|| "—".to_owned());
-            vec![
+            let mut lines = vec![
                 field_line("Name", &e.name, amber),
                 field_line("Type", type_label(e.cipher_type), info),
                 field_line("User", &username, info),
                 field_line("Folder", &folder, info),
                 field_line("Id", &e.id, info),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "reveal/copy land in the next slice",
-                    Style::default()
-                        .fg(hex(steelbore::STEEL_BLUE))
-                        .add_modifier(Modifier::ITALIC),
-                )),
-            ]
+            ];
+            // Logins carry a password; show it masked, revealed on demand.
+            if e.cipher_type == 1 {
+                if app.is_revealed(&e.id, Field::Password) {
+                    let value = app.revealed.as_ref().map_or(MASK, |r| r.value());
+                    lines.push(field_line("Pass", value, amber));
+                } else {
+                    lines.push(field_line("Pass", MASK, hex(steelbore::STEEL_BLUE)));
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Space reveal · c/u/o copy",
+                Style::default()
+                    .fg(hex(steelbore::STEEL_BLUE))
+                    .add_modifier(Modifier::ITALIC),
+            )));
+            lines
         },
     );
     let para = Paragraph::new(lines)
@@ -200,10 +214,21 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             spans.push(Span::raw("  "));
         }
     }
-    spans.push(Span::styled(
-        "q quit  j/k move  Tab pane  r refresh  ·  / c u o g : soon",
-        Style::default().fg(hex(steelbore::STEEL_BLUE)),
-    ));
+    // A transient toast (copy feedback / errors) takes the trailing slot;
+    // otherwise show the key hints.
+    if let Some(toast) = app.toast.as_deref() {
+        spans.push(Span::styled(
+            toast.to_owned(),
+            Style::default()
+                .fg(hex(steelbore::MOLTEN_AMBER))
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        spans.push(Span::styled(
+            "q quit  j/k move  Tab pane  Space reveal  c/u/o copy  r refresh  ·  / g : soon",
+            Style::default().fg(hex(steelbore::STEEL_BLUE)),
+        ));
+    }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(hex(steelbore::VOID_NAVY))),
         area,
@@ -266,7 +291,18 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::*;
+    use crate::app::RevealedSecret;
     use vault_ipc::proto::{ListEntry, Status};
+
+    fn login_entry() -> ListEntry {
+        ListEntry {
+            id: "c1".into(),
+            name: "github.com".into(),
+            cipher_type: 1,
+            username: Some("octocat".into()),
+            folder: Some("Work".into()),
+        }
+    }
 
     fn buffer_text(buf: &Buffer) -> String {
         let area = buf.area;
@@ -330,5 +366,36 @@ mod tests {
         let text = draw(&app);
         assert!(text.contains("Locked"), "banner title missing:\n{text}");
         assert!(text.contains("no agent") || text.contains("locked"));
+    }
+
+    #[test]
+    fn detail_masks_login_password_by_default() {
+        let app = App::browsing(status(), vec![login_entry()]);
+        let text = draw(&app);
+        assert!(text.contains(MASK), "password not masked:\n{text}");
+        assert!(!text.contains("hunter2"));
+    }
+
+    #[test]
+    fn detail_reveals_password_when_set() {
+        let mut app = App::browsing(status(), vec![login_entry()]);
+        app.reveal(RevealedSecret::new(
+            "c1".to_owned(),
+            Field::Password,
+            "hunter2".to_owned(),
+        ));
+        let text = draw(&app);
+        assert!(text.contains("hunter2"), "revealed value missing:\n{text}");
+    }
+
+    #[test]
+    fn toast_renders_in_status_bar() {
+        let mut app = App::browsing(status(), vec![login_entry()]);
+        app.set_toast("copied password · clears in 30s");
+        let text = draw(&app);
+        assert!(
+            text.contains("copied password"),
+            "toast missing from status bar:\n{text}"
+        );
     }
 }

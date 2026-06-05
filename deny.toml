@@ -38,6 +38,12 @@ allow = [
     "CC0-1.0",
     "MPL-2.0",
     "0BSD",
+    # Boost Software License 1.0 — permissive and FSF-confirmed GPL-compatible
+    # (https://www.gnu.org/licenses/license-list.html#boost). Reaches the tree
+    # via error-code → clipboard-win → arboard (the agent's clipboard backend);
+    # clipboard-win is Windows-only, surfaced here because deny checks all
+    # targets.
+    "BSL-1.0",
     # webpki-roots ships Mozilla's CA certificate bundle under CDLA-Permissive-2.0
     # (a permissive *data* licence, GPL-compatible — it imposes no copyleft on the
     # linking program). Required since webpki-roots 1.0 relicensed to it.

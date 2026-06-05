@@ -45,12 +45,42 @@ pub enum Request {
     /// List all items by decrypted name. Requires an unlocked agent.
     List,
 
-    /// Look up a single item by its decrypted name (case-insensitive).
+    /// Look up a single item and return one decrypted field.
+    ///
+    /// When `id` is `Some`, the agent targets that exact cipher id — the
+    /// reliable path for a client that already knows which item it means (the
+    /// TUI passes the selected row's id). When `id` is `None`, the agent falls
+    /// back to a case-insensitive match on `name`, which is ambiguous if two
+    /// items share a name. `name` is always carried for human-readable errors.
     Get {
-        /// Item name (decrypted form, e.g. `github.com`).
+        /// Exact cipher id to target, if known.
+        id: Option<String>,
+        /// Item name (decrypted form, e.g. `github.com`) — fallback selector
+        /// and error label.
         name: String,
         /// Optional field selector — `password` is the default.
         field: Option<Field>,
+    },
+
+    /// Decrypt one field of the targeted item and place it on the agent's own
+    /// clipboard, scheduling an auto-clear after `clear_after_secs`.
+    ///
+    /// Unlike [`Request::Get`], the plaintext value never crosses the socket:
+    /// the agent reads, copies, and forgets it, so a short-lived client (or one
+    /// that quits before the timer fires) can't leak or strand the secret.
+    /// Targeting mirrors `Get` — `id` is exact, `name` is the fallback / label.
+    /// On success the agent replies [`Response::Ok`]; a missing field, locked
+    /// agent, or absent clipboard surfaces as [`Response::Error`].
+    Copy {
+        /// Exact cipher id to target, if known.
+        id: Option<String>,
+        /// Item name — fallback selector and error label.
+        name: String,
+        /// Field to copy — `password` is the default.
+        field: Option<Field>,
+        /// Seconds before the agent clears the clipboard; `None` uses the
+        /// agent default, `Some(0)` disables auto-clear.
+        clear_after_secs: Option<u64>,
     },
 
     /// Soft-delete a cipher by id or decrypted name.

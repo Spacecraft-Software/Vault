@@ -79,6 +79,11 @@ fs2 = "0.4"
 ratatui = "0.29"
 crossterm = "0.28"
 
+# Clipboard — arboard (MIT/Apache-2.0; GPL-3.0-or-later compatible). Held by
+# the agent for `vault` copy. `wayland-data-control` lets a copied secret
+# persist after the writing process exits on wlroots compositors.
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+
 tempfile = "3"
 ciborium = "0.2"
 ciborium-io = "0.2"

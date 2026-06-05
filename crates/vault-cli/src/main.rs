@@ -709,6 +709,8 @@ async fn cmd_get(
 ) -> Result<(), u8> {
     let mut stream = connect(socket).await?;
     let req = Request::Get {
+        // The CLI selects by name only; id-targeting is a TUI affordance.
+        id: None,
         name,
         field: Some(field),
     };

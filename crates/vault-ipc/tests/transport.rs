@@ -131,13 +131,15 @@ async fn status_round_trip_preserves_optionals() {
 async fn get_request_defaults_to_password() {
     let (mut a, mut b) = duplex(8 * 1024);
     let req = Request::Get {
+        id: None,
         name: "github.com".into(),
         field: None,
     };
     write_frame(&mut a, &req).await.unwrap();
     let got: Request = read_frame(&mut b).await.unwrap();
     match got {
-        Request::Get { name, field } => {
+        Request::Get { id, name, field } => {
+            assert_eq!(id, None);
             assert_eq!(name, "github.com");
             assert_eq!(field.unwrap_or_default(), Field::Password);
         }
