@@ -2,11 +2,12 @@
 
 //! Vault TUI — `vault-tui` binary entry point.
 //!
-//! M5 slice 1: a read-only, cruxpass-style three-pane browser over the agent.
-//! It is just another UDS client (the user key never crosses into it) and drives
-//! only `Request::Status` + `Request::List`. Search / copy / generate land in
-//! later slices. Requires a pre-unlocked agent; a locked or absent agent shows a
-//! centered banner.
+//! A cruxpass-style three-pane browser over the agent. It is just another UDS
+//! client (the user key never crosses into it) and drives `Request::Status` +
+//! `Request::List` for browsing, `Request::Get` for reveal-on-demand, and
+//! `Request::Copy` for clipboard copies (the secret stays in the agent on that
+//! path). Search / generate / editing land in later slices. Requires a
+//! pre-unlocked agent; a locked or absent agent shows a centered banner.
 
 #![forbid(unsafe_code)]
 
@@ -28,12 +29,17 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
-use vault_ipc::proto::{Request, Response};
+use vault_ipc::proto::{Field, Request, Response};
 use vault_ipc::{default_socket_path, sanitize_socket_path};
 
-use app::App;
+use app::{App, RevealedSecret};
 
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Seconds the agent keeps a copied secret on the clipboard before wiping it.
+/// Mirrors the agent's own default and is surfaced in the copy toast so the
+/// user knows the window.
+const COPY_CLEAR_SECS: u64 = 30;
 
 /// Standard §13.2 attribution block — surfaced via `--version` and `--help`.
 const ATTRIBUTION: &str = "\
@@ -172,6 +178,8 @@ async fn handle_key(state: &mut App, key: KeyEvent, socket: &Path) {
         state.quit();
         return;
     }
+    // Each key press supersedes the previous transient message.
+    state.clear_toast();
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => state.quit(),
         KeyCode::Char('j') | KeyCode::Down => state.move_down(),
@@ -180,7 +188,71 @@ async fn handle_key(state: &mut App, key: KeyEvent, socket: &Path) {
             state.focus_next();
         }
         KeyCode::Char('r') => *state = load_app(socket).await,
+        KeyCode::Char(' ') => toggle_reveal(state, socket).await,
+        KeyCode::Char('c') => copy_field(state, socket, Field::Password, "password").await,
+        KeyCode::Char('u') => copy_field(state, socket, Field::Username, "username").await,
+        KeyCode::Char('o') => copy_field(state, socket, Field::Uri, "URI").await,
         _ => {}
+    }
+}
+
+/// Toggle reveal of the selected item's password in the detail pane. The first
+/// press fetches the plaintext from the agent (id-targeted, so duplicate names
+/// can't mislead it); the second re-masks. No-op unless the item list is
+/// focused and a row is selected.
+async fn toggle_reveal(state: &mut App, socket: &Path) {
+    if !state.items_focused() {
+        return;
+    }
+    let Some(sel) = state.selected_entry() else {
+        return;
+    };
+    if state.is_revealed(&sel.id, Field::Password) {
+        state.hide_revealed();
+        return;
+    }
+    let req = Request::Get {
+        id: Some(sel.id.clone()),
+        name: sel.name.clone(),
+        field: Some(Field::Password),
+    };
+    match client::request(socket, &req).await {
+        Ok(Response::Item(item)) => {
+            state.reveal(RevealedSecret::new(
+                sel.id,
+                Field::Password,
+                item.value.clone(),
+            ));
+        }
+        Ok(Response::Error(e)) => state.set_toast(format!("reveal failed: {e}")),
+        Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
+        Err(e) => state.set_toast(e.to_string()),
+    }
+}
+
+/// Ask the agent to copy `field` of the selected item to the clipboard, with a
+/// timed auto-clear. The secret stays in the agent and never enters this
+/// process. No-op unless the item list is focused and a row is selected.
+async fn copy_field(state: &mut App, socket: &Path, field: Field, label: &str) {
+    if !state.items_focused() {
+        return;
+    }
+    let Some(sel) = state.selected_entry() else {
+        return;
+    };
+    let req = Request::Copy {
+        id: Some(sel.id),
+        name: sel.name,
+        field: Some(field),
+        clear_after_secs: Some(COPY_CLEAR_SECS),
+    };
+    match client::request(socket, &req).await {
+        Ok(Response::Ok) => {
+            state.set_toast(format!("copied {label} · clears in {COPY_CLEAR_SECS}s"));
+        }
+        Ok(Response::Error(e)) => state.set_toast(format!("copy failed: {e}")),
+        Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
+        Err(e) => state.set_toast(e.to_string()),
     }
 }
 

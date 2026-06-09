@@ -125,10 +125,10 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
-        Request::Get { name, field } => {
+        Request::Get { id, name, field } => {
             let mut s = state.lock().await;
             let f = field.unwrap_or_default();
-            let res = s.get_item(&name, f);
+            let res = s.get_item(id.as_deref(), &name, f);
             s.touch();
             drop(s);
             match res {
@@ -136,6 +136,39 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        #[cfg(feature = "clipboard")]
+        Request::Copy {
+            id,
+            name,
+            field,
+            clear_after_secs,
+        } => {
+            let f = field.unwrap_or_default();
+            let mut s = state.lock().await;
+            // Decrypt the field, then hand it straight to the agent's own
+            // clipboard. `item` zeroises its copy on drop; `value` is the copy
+            // the clear task carries so it knows what to wipe.
+            let outcome = match s.get_item(id.as_deref(), &name, f) {
+                Ok(item) => {
+                    let value = zeroize::Zeroizing::new(item.value.clone());
+                    s.clipboard_set(&value).map(|()| value)
+                }
+                Err(e) => Err(e),
+            };
+            s.touch();
+            drop(s);
+            match outcome {
+                Ok(value) => {
+                    schedule_clipboard_clear(state.clone(), value, clear_after_secs);
+                    Response::Ok
+                }
+                Err(e) => Response::Error(e),
+            }
+        }
+        #[cfg(not(feature = "clipboard"))]
+        Request::Copy { .. } => Response::Error(vault_ipc::proto::Error::Internal(
+            "clipboard support not compiled in".to_owned(),
+        )),
         Request::Remove { selector } => {
             // Hold the agent mutex across the network call. Vault is
             // single-user / single-agent, so request concurrency is low and
@@ -214,6 +247,36 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
     }
 }
 
+/// Default seconds before the agent wipes a copied secret from the clipboard.
+///
+/// 30 s follows common password-manager practice (and Vault PRD §7.2): long
+/// enough to paste, short enough to bound exposure. `Request::Copy` overrides
+/// per call; config-driven tuning lands in a later slice.
+#[cfg(feature = "clipboard")]
+const DEFAULT_CLIPBOARD_CLEAR_SECS: u64 = 30;
+
+/// Spawn a one-shot task that wipes the clipboard after `clear_after_secs` (or
+/// the default), but only if it still holds the value we copied. `Some(0)`
+/// disables the auto-clear. The task carries the secret so the clear survives
+/// the requesting client quitting.
+#[cfg(feature = "clipboard")]
+fn schedule_clipboard_clear(
+    state: Arc<Mutex<AgentState>>,
+    value: zeroize::Zeroizing<String>,
+    clear_after_secs: Option<u64>,
+) {
+    use tokio::time::{Duration, sleep};
+    let secs = clear_after_secs.unwrap_or(DEFAULT_CLIPBOARD_CLEAR_SECS);
+    if secs == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        sleep(Duration::from_secs(secs)).await;
+        let mut s = state.lock().await;
+        s.clipboard_clear_if_ours(&value);
+    });
+}
+
 /// Optional periodic idle-lock task — caller spawns it after `run` starts.
 pub async fn idle_lock_loop(state: Arc<Mutex<AgentState>>) {
     use tokio::time::{Duration, sleep};
@@ -273,6 +336,7 @@ mod tests {
         write_frame(
             &mut wr,
             &Request::Get {
+                id: None,
                 name: "github.com".into(),
                 field: Some(Field::Password),
             },
@@ -281,6 +345,24 @@ mod tests {
         .unwrap();
         let resp: Response = read_frame(&mut rd).await.unwrap();
         assert!(matches!(resp, Response::Error(IpcError::Locked)));
+
+        // Copy-while-locked exercises the new dispatch arm. It must decline with
+        // an error before ever touching the clipboard (so it's deterministic on
+        // a headless CI box). With the clipboard feature it's `Locked`; without
+        // it's the "not compiled in" internal error — either way an error.
+        write_frame(
+            &mut wr,
+            &Request::Copy {
+                id: None,
+                name: "github.com".into(),
+                field: Some(Field::Password),
+                clear_after_secs: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+        let resp: Response = read_frame(&mut rd).await.unwrap();
+        assert!(matches!(resp, Response::Error(_)));
 
         write_frame(&mut wr, &Request::Quit).await.unwrap();
         let resp: Response = read_frame(&mut rd).await.unwrap();

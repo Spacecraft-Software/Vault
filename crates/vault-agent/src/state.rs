@@ -51,6 +51,12 @@ pub struct AgentState {
     pub idle_lock_secs: u64,
     /// Set by `Request::Quit` to ask the accept loop to exit cleanly.
     pub shutdown_requested: bool,
+    /// Clipboard handle for `Request::Copy`. `None` when no backend is
+    /// available (headless / init failed); copy requests then decline cleanly.
+    /// The handle must outlive its writes — on X11 the owning process serves
+    /// the selection — so it lives here for the agent's lifetime.
+    #[cfg(feature = "clipboard")]
+    pub clipboard: Option<arboard::Clipboard>,
 }
 
 /// Plaintext field overlay for `add_cipher` / `edit_cipher`. Every field is
@@ -84,6 +90,8 @@ impl AgentState {
             last_activity: Instant::now(),
             idle_lock_secs,
             shutdown_requested: false,
+            #[cfg(feature = "clipboard")]
+            clipboard: init_clipboard(),
         }
     }
 
@@ -343,8 +351,13 @@ impl AgentState {
         Ok(())
     }
 
-    /// Decrypt the named field on the cipher matching `query` (case-insensitive).
-    pub fn get_item(&self, query: &str, field: Field) -> Result<Item, IpcError> {
+    /// Decrypt one `field` on a single cipher.
+    ///
+    /// When `id` is `Some`, the lookup targets that exact cipher id — the only
+    /// reliable path when several items share a name. When `id` is `None`, it
+    /// falls back to a case-insensitive match on `query` and returns the first
+    /// hit (the long-standing CLI behavior). `query` is also the error label.
+    pub fn get_item(&self, id: Option<&str>, query: &str, field: Field) -> Result<Item, IpcError> {
         let v = self.vault.as_ref().ok_or(IpcError::Locked)?;
         let query_lower = query.to_lowercase();
         let mut matched: Option<(&Cipher, String)> = None;
@@ -352,10 +365,17 @@ impl AgentState {
             let name = c
                 .decrypt_name(&v.user_enc, &v.user_mac)
                 .map_err(|e| IpcError::Decrypt(e.to_string()))?;
-            if let Some(n) = name
-                && n.to_lowercase() == query_lower
-            {
-                matched = Some((c, n));
+            let hit = id.map_or_else(
+                || {
+                    name.as_deref()
+                        .is_some_and(|n| n.to_lowercase() == query_lower)
+                },
+                |want| c.id == want,
+            );
+            if hit {
+                // Fall back to the query string for the display name on the
+                // rare cipher with no decryptable name.
+                matched = Some((c, name.unwrap_or_else(|| query.to_owned())));
                 break;
             }
         }
@@ -405,6 +425,59 @@ impl AgentState {
             value,
         })
     }
+
+    /// Place `value` on the system clipboard. Errors if no backend is available
+    /// so the caller can report it instead of silently dropping the copy.
+    #[cfg(feature = "clipboard")]
+    pub fn clipboard_set(&mut self, value: &str) -> Result<(), IpcError> {
+        let cb = self
+            .clipboard
+            .as_mut()
+            .ok_or_else(|| IpcError::Internal("clipboard backend unavailable".to_owned()))?;
+        cb.set_text(value.to_owned())
+            .map_err(|e| IpcError::Internal(format!("clipboard write failed: {e}")))
+    }
+
+    /// Clear the clipboard if it still holds `written` (the value we copied), or
+    /// if its contents can't be read. Leaves anything the user has since copied
+    /// untouched. Invoked by the scheduled auto-clear task; never errors.
+    #[cfg(feature = "clipboard")]
+    pub fn clipboard_clear_if_ours(&mut self, written: &str) {
+        let Some(cb) = self.clipboard.as_mut() else {
+            return;
+        };
+        let current = cb.get_text().ok();
+        if should_clear_clipboard(current.as_deref(), written) {
+            // Best-effort: a failed clear is no worse than the timer never
+            // having run; the next copy will overwrite regardless.
+            let _ = cb.clear();
+        }
+    }
+}
+
+/// Build a clipboard handle, degrading to `None` (with a warning) when no
+/// backend is reachable — e.g. a headless server with no display. Copy requests
+/// then return a clean error rather than the agent failing to start.
+#[cfg(feature = "clipboard")]
+fn init_clipboard() -> Option<arboard::Clipboard> {
+    match arboard::Clipboard::new() {
+        Ok(cb) => Some(cb),
+        Err(e) => {
+            eprintln!("vault-agent: clipboard unavailable, copy will be declined: {e}");
+            None
+        }
+    }
+}
+
+/// Whether the auto-clear task should wipe the clipboard.
+///
+/// `current` is the clipboard's present contents (`None` if it couldn't be
+/// read). Clear when it still holds exactly what we wrote, and also when it
+/// can't be read — failing safe so a secret is never stranded. When it holds
+/// something else, the user (or another app) has replaced it, so leave it be.
+#[cfg(feature = "clipboard")]
+fn should_clear_clipboard(current: Option<&str>, written: &str) -> bool {
+    current.is_none_or(|c| c == written)
 }
 
 /// Decode an optional secret byte buffer into a `String`, zeroising the bytes
@@ -541,8 +614,69 @@ mod tests {
         let s = AgentState::new(900);
         assert!(matches!(s.list_entries(), Err(IpcError::Locked)));
         assert!(matches!(
-            s.get_item("anything", Field::Password),
+            s.get_item(None, "anything", Field::Password),
             Err(IpcError::Locked)
+        ));
+    }
+
+    #[test]
+    fn get_item_targets_exact_id_among_duplicate_names() {
+        let enc = [11u8; 32];
+        let mac = [12u8; 32];
+        let mut v = stub_vault();
+        v.user_enc = Zeroizing::new(enc);
+        v.user_mac = Zeroizing::new(mac);
+        v.ciphers.push(login_with_password(
+            "id-first",
+            "dup",
+            "first-secret",
+            &enc,
+            &mac,
+        ));
+        v.ciphers.push(login_with_password(
+            "id-second",
+            "dup",
+            "second-secret",
+            &enc,
+            &mac,
+        ));
+        let mut s = AgentState::new(900);
+        s.vault = Some(v);
+
+        // Id-targeting reaches the exact cipher, not the first by name.
+        let item = s
+            .get_item(Some("id-second"), "dup", Field::Password)
+            .unwrap();
+        assert_eq!(item.id, "id-second");
+        assert_eq!(item.value, "second-secret");
+
+        // Name-only fallback returns the first match (documents the footgun the
+        // id path exists to avoid).
+        let item = s.get_item(None, "dup", Field::Password).unwrap();
+        assert_eq!(item.id, "id-first");
+        assert_eq!(item.value, "first-secret");
+    }
+
+    #[cfg(feature = "clipboard")]
+    #[test]
+    fn should_clear_only_when_ours_or_unreadable() {
+        // Still holds our value → clear.
+        assert!(should_clear_clipboard(Some("secret"), "secret"));
+        // Holds something the user copied since → leave it.
+        assert!(!should_clear_clipboard(Some("other"), "secret"));
+        // Unreadable → fail safe and clear.
+        assert!(should_clear_clipboard(None, "secret"));
+    }
+
+    #[cfg(feature = "clipboard")]
+    #[test]
+    fn clipboard_set_errors_when_no_backend() {
+        // Headless / failed init: copy must decline cleanly, not panic.
+        let mut s = AgentState::new(900);
+        s.clipboard = None;
+        assert!(matches!(
+            s.clipboard_set("secret"),
+            Err(IpcError::Internal(_))
         ));
     }
 
@@ -722,6 +856,26 @@ mod tests {
             id: id.to_owned(),
             cipher_type: 1,
             name: Some(enc_name),
+            ..Cipher::default()
+        }
+    }
+
+    fn login_with_password(
+        id: &str,
+        plain_name: &str,
+        password: &str,
+        enc: &[u8; 32],
+        mac: &[u8; 32],
+    ) -> Cipher {
+        let e = |s: &str| vault_core::EncString::encrypt(enc, mac, s.as_bytes()).serialize();
+        Cipher {
+            id: id.to_owned(),
+            cipher_type: 1,
+            name: Some(e(plain_name)),
+            login: Some(Login {
+                password: Some(e(password)),
+                ..Login::default()
+            }),
             ..Cipher::default()
         }
     }

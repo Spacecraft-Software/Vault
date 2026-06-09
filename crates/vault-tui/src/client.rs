@@ -3,8 +3,9 @@
 //! Minimal UDS client — one request per fresh connection.
 //!
 //! Mirrors `vault-cli`'s `connect` / `exchange`: the TUI is just another agent
-//! client and never holds the user key. Slice 1 drives only [`Request::Status`]
-//! and [`Request::List`]; later slices add `Get` (copy) over the same path.
+//! client and never holds the user key. Drives [`Request::Status`],
+//! [`Request::List`], [`Request::Get`] (reveal), and [`Request::Copy`] over the
+//! same one-shot path.
 
 use std::path::Path;
 

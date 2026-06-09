@@ -20,6 +20,14 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+# `clipboard` (default) pulls arboard so `Request::Copy` can place secrets on
+# the system clipboard. A headless install can drop it with
+# `--no-default-features` to shed the X11/Wayland dependency tree; copy then
+# returns a clean "not compiled in" error.
+default = ["clipboard"]
+clipboard = ["dep:arboard"]
+
 [dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true }
@@ -29,6 +37,7 @@ zeroize = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
 thiserror = { workspace = true }
+arboard = { workspace = true, optional = true }
 vault-core = { path = "../vault-core" }
 vault-ipc = { path = "../vault-ipc" }
 vault-store = { path = "../vault-store" }

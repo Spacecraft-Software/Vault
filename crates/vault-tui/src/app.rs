@@ -3,13 +3,18 @@
 //! TUI application state and pure navigation / filter logic.
 //!
 //! Everything here is synchronous and crossterm-free so it unit-tests without a
-//! terminal: `main.rs` translates key events into calls on these methods, and
-//! `ui.rs` renders from this state. Slice 1 is read-only — the state holds only
-//! the non-secret [`ListEntry`] metadata the agent already returned.
+//! terminal: `main.rs` translates key events into calls on these methods (and
+//! performs the agent I/O for reveal/copy), and `ui.rs` renders from this state.
+//! The state holds the non-secret [`ListEntry`] metadata plus, transiently, a
+//! single revealed secret ([`RevealedSecret`], zeroised on drop and re-masked
+//! on any navigation).
 
 use std::collections::BTreeSet;
+use std::fmt;
 
-use vault_ipc::proto::{ListEntry, Status};
+use zeroize::Zeroizing;
+
+use vault_ipc::proto::{Field, ListEntry, Status};
 
 /// Which pane currently takes navigation keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +60,48 @@ pub struct FolderItem {
     pub filter: FolderFilter,
 }
 
+/// A secret currently shown in the detail pane: which item and field it
+/// belongs to, plus the plaintext. The value is zeroised on drop and never
+/// surfaced by `Debug`, so an `App` dump can't leak it.
+#[derive(Clone)]
+pub struct RevealedSecret {
+    /// Id of the item the secret belongs to; reveal is dropped when the
+    /// selection moves off this item.
+    pub entry_id: String,
+    /// Which field is revealed.
+    pub field: Field,
+    /// Plaintext value, held only while visible.
+    value: Zeroizing<String>,
+}
+
+impl RevealedSecret {
+    /// Wrap a freshly-fetched plaintext for display.
+    #[must_use]
+    pub fn new(entry_id: String, field: Field, value: String) -> Self {
+        Self {
+            entry_id,
+            field,
+            value: Zeroizing::new(value),
+        }
+    }
+
+    /// The plaintext to render.
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+impl fmt::Debug for RevealedSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RevealedSecret")
+            .field("entry_id", &self.entry_id)
+            .field("field", &self.field)
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Top-level TUI state.
 #[derive(Clone, Debug)]
 pub struct App {
@@ -72,6 +119,11 @@ pub struct App {
     pub item_sel: usize,
     /// Which pane has focus.
     pub focus: Focus,
+    /// Secret currently revealed in the detail pane, if any.
+    pub revealed: Option<RevealedSecret>,
+    /// Transient status-bar message (copy feedback / errors). Cleared on the
+    /// next key press.
+    pub toast: Option<String>,
     /// Set when the user asks to quit.
     pub should_quit: bool,
 }
@@ -89,6 +141,8 @@ impl App {
             folder_sel: 0,
             item_sel: 0,
             focus: Focus::Items,
+            revealed: None,
+            toast: None,
             should_quit: false,
         }
     }
@@ -111,6 +165,8 @@ impl App {
             folder_sel: 0,
             item_sel: 0,
             focus: Focus::Items,
+            revealed: None,
+            toast: None,
             should_quit: false,
         }
     }
@@ -145,6 +201,9 @@ impl App {
 
     /// Move the selection down by one in the focused pane (saturating).
     pub fn move_down(&mut self) {
+        // Any navigation re-masks: a revealed secret must never linger over a
+        // row the user has moved away from.
+        self.revealed = None;
         match self.focus {
             Focus::Folders => {
                 if self.folder_sel + 1 < self.folders.len() {
@@ -162,7 +221,8 @@ impl App {
     }
 
     /// Move the selection up by one in the focused pane (saturating).
-    pub const fn move_up(&mut self) {
+    pub fn move_up(&mut self) {
+        self.revealed = None;
         match self.focus {
             Focus::Folders => {
                 if self.folder_sel > 0 {
@@ -175,11 +235,47 @@ impl App {
     }
 
     /// Toggle focus between the folder pane and the item list.
-    pub const fn focus_next(&mut self) {
+    pub fn focus_next(&mut self) {
+        self.revealed = None;
         self.focus = match self.focus {
             Focus::Folders => Focus::Items,
             Focus::Items => Focus::Folders,
         };
+    }
+
+    /// Whether the item list currently has focus — the gate for copy / reveal
+    /// actions, which target the selected item.
+    #[must_use]
+    pub const fn items_focused(&self) -> bool {
+        matches!(self.focus, Focus::Items)
+    }
+
+    /// Whether `field` of the item with `entry_id` is currently revealed.
+    #[must_use]
+    pub fn is_revealed(&self, entry_id: &str, field: Field) -> bool {
+        self.revealed
+            .as_ref()
+            .is_some_and(|r| r.entry_id == entry_id && r.field == field)
+    }
+
+    /// Reveal a freshly-fetched secret in the detail pane.
+    pub fn reveal(&mut self, secret: RevealedSecret) {
+        self.revealed = Some(secret);
+    }
+
+    /// Re-mask any revealed secret.
+    pub fn hide_revealed(&mut self) {
+        self.revealed = None;
+    }
+
+    /// Set the transient status-bar message.
+    pub fn set_toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some(msg.into());
+    }
+
+    /// Clear the transient status-bar message (called before each key press).
+    pub fn clear_toast(&mut self) {
+        self.toast = None;
     }
 
     /// Request shutdown on the next loop iteration.
@@ -335,5 +431,79 @@ mod tests {
         app.focus = Focus::Folders;
         app.move_down(); // change folder -> item_sel reset
         assert_eq!(app.item_sel, 0);
+    }
+
+    #[test]
+    fn reveal_is_tracked_per_item_and_field() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        assert!(!app.is_revealed("id-a", Field::Password));
+        app.reveal(RevealedSecret::new(
+            "id-a".to_owned(),
+            Field::Password,
+            "hunter2".to_owned(),
+        ));
+        assert!(app.is_revealed("id-a", Field::Password));
+        // A different item or field is not considered revealed.
+        assert!(!app.is_revealed("id-b", Field::Password));
+        assert!(!app.is_revealed("id-a", Field::Username));
+        app.hide_revealed();
+        assert!(!app.is_revealed("id-a", Field::Password));
+    }
+
+    #[test]
+    fn navigation_remasks_a_revealed_secret() {
+        let entries = vec![entry("a", None), entry("b", None)];
+        let mut app = App::browsing(status(), entries);
+        app.reveal(RevealedSecret::new(
+            "id-a".to_owned(),
+            Field::Password,
+            "secret".to_owned(),
+        ));
+        assert!(app.revealed.is_some());
+        app.move_down();
+        assert!(app.revealed.is_none(), "moving selection must re-mask");
+
+        // Re-reveal, then a focus switch must also re-mask.
+        app.reveal(RevealedSecret::new(
+            "id-a".to_owned(),
+            Field::Password,
+            "secret".to_owned(),
+        ));
+        app.focus_next();
+        assert!(app.revealed.is_none(), "switching panes must re-mask");
+    }
+
+    #[test]
+    fn toast_set_and_clear() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        assert!(app.toast.is_none());
+        app.set_toast("copied password");
+        assert_eq!(app.toast.as_deref(), Some("copied password"));
+        app.clear_toast();
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn items_focused_gates_on_focus() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        assert!(app.items_focused()); // browsing starts on the item list
+        app.focus_next();
+        assert!(!app.items_focused());
+    }
+
+    #[test]
+    fn revealed_secret_debug_redacts_plaintext() {
+        let secret = RevealedSecret::new(
+            "id-a".to_owned(),
+            Field::Password,
+            "super-secret-value".to_owned(),
+        );
+        let rendered = format!("{secret:?}");
+        assert!(rendered.contains("RevealedSecret"));
+        assert!(rendered.contains("<redacted>"));
+        assert!(
+            !rendered.contains("super-secret-value"),
+            "Debug leaked the plaintext: {rendered}"
+        );
     }
 }

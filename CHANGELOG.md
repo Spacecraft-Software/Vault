@@ -10,6 +10,40 @@ range may break in any release.
 
 ### Added
 
+- **M5 (slice 2) — TUI reveal + clipboard copy.** The detail pane is no longer
+  secret-free: `Space` reveals the selected login's password on demand and
+  `c` / `u` / `o` copy the password / username / URI to the clipboard, with a
+  status-bar toast (`copied password · clears in 30s`) and a 30-second
+  auto-clear. Copy/reveal act only when the item list is focused.
+  - **Clipboard lives in the agent**, not the TUI. A new `Request::Copy { id,
+    name, field, clear_after_secs }` has the agent decrypt the field, place it on
+    its own clipboard (`arboard`, `wayland-data-control`), and schedule the
+    clear — so the secret never crosses the socket on the copy path, the copy
+    survives the TUI quitting, and a future `vault get --copy` becomes possible.
+    The auto-clear task only wipes the clipboard if it still holds what we wrote
+    (or can't read it back, failing safe), leaving anything the user copied since
+    untouched. Behind a default-on `clipboard` feature on `vault-agent`; a
+    `--no-default-features` headless build drops the X11/Wayland tree and answers
+    `Copy` with a clean "not compiled in" error.
+  - **Reveal uses `Request::Get`**, which gains an `id: Option<String>` field.
+    The TUI targets the *exact* selected cipher id, closing a real footgun:
+    `get_item` matched by name only, so a duplicate item name could reveal/copy
+    the wrong item. Name remains the fallback selector and error label; the CLI
+    passes `id: None` (unchanged behavior). Revealed plaintext is held in a
+    `RevealedSecret` newtype (zeroised on drop, redacted in `Debug`) and
+    re-masked on any navigation.
+  - Tests: `vault-agent` gains an id-targeting-among-duplicate-names regression
+    test and a pure `should_clear_clipboard` unit; `vault-tui` adds reveal /
+    re-mask / toast / `Debug`-redaction units and `TestBackend` smokes for the
+    masked-by-default, revealed, and toast states.
+  - Supply-chain: `arboard` pulls `error-code` (`BSL-1.0`, via Windows-only
+    `clipboard-win`) — added to `deny.toml`'s allow-list (FSF-confirmed
+    GPL-compatible). No new advisories (`cargo deny check advisories` clean).
+  - Known limitation: on `Quit` / `stop-agent` a pending auto-clear task dies
+    with the runtime, so a just-copied secret can linger on the clipboard until
+    overwritten (notably under `wayland-data-control`'s serving process). A
+    clear-on-shutdown sweep is a tracked follow-up.
+
 - **M5 (slice 1) — `vault-tui` skeleton (read-only browser).** The TUI stub is
   now a real cruxpass-style three-pane interface (`ratatui` + `crossterm`):
   **left** folder list, **center** filterable item list, **right** item detail,
