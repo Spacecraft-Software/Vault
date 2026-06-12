@@ -10,6 +10,39 @@ range may break in any release.
 
 ### Added
 
+- **M5 (slice 3) — TUI search, generator overlay, and `:` command line.** The
+  three previewed keys go live: `/` filters the item list as you type, `g`
+  opens a password-generator overlay, and `:` opens a small vim-style command
+  line.
+  - **Search (`/`).** Live, case-insensitive substring match on item name and
+    username, composed on top of the active folder filter. Enter accepts the
+    query (filter stays, shown in the `Items (n) /query` pane title), Esc in
+    search mode drops it, and Esc in normal mode peels an active filter back
+    before quitting. Every query edit re-anchors the selection and re-masks any
+    revealed secret. Arrow keys still move the selection mid-search.
+  - **Generator (`g`).** A centered overlay over the browser showing a freshly
+    generated password (`vault-core`'s `generate_password`, same engine as
+    `vault generate`): `g`/`r` regenerate, `+`/`-` adjust length (clamped
+    8–128, Bitwarden's ceiling), `s` toggles symbols, `c` copies, `Esc` closes.
+    The password lives in a `GeneratorState` (zeroised on drop, redacted in
+    `Debug`).
+  - **Copying a generated password** uses a new `Request::CopyText { text,
+    clear_after_secs }`: the value rides the local UDS once (exactly like
+    `Unlock`'s password already does), and the agent writes it to its own
+    clipboard with the same 30-second auto-clear machinery as `Request::Copy`.
+    Requires an unlocked agent; headless (`--no-default-features`) builds
+    decline it cleanly.
+  - **Command line (`:`).** Deliberately tiny vocabulary: `q`/`quit`,
+    `r`/`refresh`, `sync` (agent re-pulls `/sync`, list reloads), `lock` (agent
+    drops keys, screen flips to the Locked banner). Unknown commands toast the
+    vocabulary. The status bar echoes the line being edited (`/query▌` /
+    `:cmd▌`) ahead of toasts and hints.
+  - Tests: `vault-tui` adds search/compose/re-anchor, command-buffer, and
+    generator (defaults, regenerate, clamp, symbols, `Debug`-redaction) units
+    plus `TestBackend` smokes for the query title/status echo, command echo,
+    and generator overlay; `vault-agent`'s locked-session test now covers
+    `CopyText`-while-locked. No new dependencies.
+
 - **M5 (slice 2) — TUI reveal + clipboard copy.** The detail pane is no longer
   secret-free: `Space` reveals the selected login's password on demand and
   `c` / `u` / `o` copy the password / username / URI to the clipboard, with a

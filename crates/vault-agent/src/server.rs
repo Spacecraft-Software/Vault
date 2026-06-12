@@ -169,6 +169,43 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
         Request::Copy { .. } => Response::Error(vault_ipc::proto::Error::Internal(
             "clipboard support not compiled in".to_owned(),
         )),
+        #[cfg(feature = "clipboard")]
+        Request::CopyText {
+            text,
+            clear_after_secs,
+        } => {
+            // The wrapper zeroises the inbound bytes no matter which way the
+            // arm exits; `value` is the copy the clear task carries.
+            let text = zeroize::Zeroizing::new(text);
+            let mut s = state.lock().await;
+            let outcome = if s.is_unlocked() {
+                std::str::from_utf8(&text)
+                    .map_err(|e| {
+                        vault_ipc::proto::Error::Internal(format!(
+                            "copy text is not valid UTF-8: {e}"
+                        ))
+                    })
+                    .and_then(|v| {
+                        let value = zeroize::Zeroizing::new(v.to_owned());
+                        s.clipboard_set(&value).map(|()| value)
+                    })
+            } else {
+                Err(vault_ipc::proto::Error::Locked)
+            };
+            s.touch();
+            drop(s);
+            match outcome {
+                Ok(value) => {
+                    schedule_clipboard_clear(state.clone(), value, clear_after_secs);
+                    Response::Ok
+                }
+                Err(e) => Response::Error(e),
+            }
+        }
+        #[cfg(not(feature = "clipboard"))]
+        Request::CopyText { .. } => Response::Error(vault_ipc::proto::Error::Internal(
+            "clipboard support not compiled in".to_owned(),
+        )),
         Request::Remove { selector } => {
             // Hold the agent mutex across the network call. Vault is
             // single-user / single-agent, so request concurrency is low and
@@ -356,6 +393,20 @@ mod tests {
                 id: None,
                 name: "github.com".into(),
                 field: Some(Field::Password),
+                clear_after_secs: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+        let resp: Response = read_frame(&mut rd).await.unwrap();
+        assert!(matches!(resp, Response::Error(_)));
+
+        // CopyText-while-locked must likewise decline before touching the
+        // clipboard (Locked with the feature, "not compiled in" without).
+        write_frame(
+            &mut wr,
+            &Request::CopyText {
+                text: b"generated-password".to_vec(),
                 clear_after_secs: Some(0),
             },
         )

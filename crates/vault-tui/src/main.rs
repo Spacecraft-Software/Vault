@@ -5,9 +5,13 @@
 //! A cruxpass-style three-pane browser over the agent. It is just another UDS
 //! client (the user key never crosses into it) and drives `Request::Status` +
 //! `Request::List` for browsing, `Request::Get` for reveal-on-demand, and
-//! `Request::Copy` for clipboard copies (the secret stays in the agent on that
-//! path). Search / generate / editing land in later slices. Requires a
-//! pre-unlocked agent; a locked or absent agent shows a centered banner.
+//! `Request::Copy` / `Request::CopyText` for clipboard copies (the secret
+//! stays in the agent on the `Copy` path; `CopyText` carries the locally
+//! generated password the other way, like `Unlock`'s does). `/` filters the
+//! item list live, `g` opens the password-generator overlay, and `:` opens a
+//! small command line (`q` / `r` / `sync` / `lock`). Item editing lands in a
+//! later slice. Requires a pre-unlocked agent; a locked or absent agent shows
+//! a centered banner.
 
 #![forbid(unsafe_code)]
 
@@ -32,7 +36,7 @@ use tokio::sync::mpsc;
 use vault_ipc::proto::{Field, Request, Response};
 use vault_ipc::{default_socket_path, sanitize_socket_path};
 
-use app::{App, RevealedSecret};
+use app::{App, InputMode, RevealedSecret};
 
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -167,21 +171,40 @@ async fn load_app(socket: &Path) -> App {
     }
 }
 
-/// Translate one key press into an [`App`] action. Non-press events (key release
-/// on Windows) are ignored; unbound keys are no-ops.
+/// Translate one key press into an [`App`] action, routed by input mode.
+/// Non-press events (key release on Windows) are ignored; unbound keys are
+/// no-ops.
 async fn handle_key(state: &mut App, key: KeyEvent, socket: &Path) {
     if key.kind != KeyEventKind::Press {
         return;
     }
-    // Ctrl+C always quits, regardless of which character key carries it.
+    // Ctrl+C always quits, regardless of mode or which key carries it.
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         state.quit();
         return;
     }
     // Each key press supersedes the previous transient message.
     state.clear_toast();
+    match state.mode {
+        InputMode::Normal => handle_normal_key(state, key, socket).await,
+        InputMode::Search => handle_search_key(state, key),
+        InputMode::Command => handle_command_key(state, key, socket).await,
+        InputMode::Generate => handle_generate_key(state, key, socket).await,
+    }
+}
+
+/// Normal-mode keys — navigation, reveal/copy, and mode entry.
+async fn handle_normal_key(state: &mut App, key: KeyEvent, socket: &Path) {
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => state.quit(),
+        KeyCode::Char('q') => state.quit(),
+        // Esc peels back one layer: an active search filter first, then quit.
+        KeyCode::Esc => {
+            if state.has_search() {
+                state.clear_search();
+            } else {
+                state.quit();
+            }
+        }
         KeyCode::Char('j') | KeyCode::Down => state.move_down(),
         KeyCode::Char('k') | KeyCode::Up => state.move_up(),
         KeyCode::Tab | KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') => {
@@ -192,7 +215,114 @@ async fn handle_key(state: &mut App, key: KeyEvent, socket: &Path) {
         KeyCode::Char('c') => copy_field(state, socket, Field::Password, "password").await,
         KeyCode::Char('u') => copy_field(state, socket, Field::Username, "username").await,
         KeyCode::Char('o') => copy_field(state, socket, Field::Uri, "URI").await,
+        KeyCode::Char('/') => state.open_search(),
+        KeyCode::Char(':') => state.open_command(),
+        KeyCode::Char('g') => state.open_generator(),
         _ => {}
+    }
+}
+
+/// Search-mode keys — live query editing; arrows still move the selection so
+/// the user can pick a hit without leaving the mode.
+fn handle_search_key(state: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => state.cancel_search(),
+        KeyCode::Enter => state.accept_search(),
+        KeyCode::Backspace => state.search_pop(),
+        KeyCode::Down => state.move_down(),
+        KeyCode::Up => state.move_up(),
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.search_push(c);
+        }
+        _ => {}
+    }
+}
+
+/// Command-mode keys — edit the `:` buffer; Enter executes it.
+async fn handle_command_key(state: &mut App, key: KeyEvent, socket: &Path) {
+    match key.code {
+        KeyCode::Esc => state.cancel_command(),
+        KeyCode::Backspace => state.command_pop(),
+        KeyCode::Enter => {
+            let cmd = state.take_command();
+            execute_command(state, socket, &cmd).await;
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.command_push(c);
+        }
+        _ => {}
+    }
+}
+
+/// Generator-overlay keys.
+async fn handle_generate_key(state: &mut App, key: KeyEvent, socket: &Path) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => state.close_generator(),
+        KeyCode::Char('g' | 'r') => state.regenerate(),
+        KeyCode::Char('+' | '=') => state.gen_adjust_length(1),
+        KeyCode::Char('-') => state.gen_adjust_length(-1),
+        KeyCode::Char('s') => state.gen_toggle_symbols(),
+        KeyCode::Char('c') => copy_generated(state, socket).await,
+        _ => {}
+    }
+}
+
+/// Run one `:` command. The vocabulary is deliberately tiny — anything that
+/// needs arguments or confirmation belongs to a dedicated key or later slice.
+async fn execute_command(state: &mut App, socket: &Path, cmd: &str) {
+    match cmd.trim() {
+        "" => {}
+        "q" | "quit" => state.quit(),
+        "r" | "refresh" => {
+            *state = load_app(socket).await;
+            state.set_toast("refreshed");
+        }
+        "sync" => match client::request(socket, &Request::Sync).await {
+            Ok(Response::Status(_)) => {
+                *state = load_app(socket).await;
+                state.set_toast("synced");
+            }
+            Ok(Response::Error(e)) => state.set_toast(format!("sync failed: {e}")),
+            Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
+            Err(e) => state.set_toast(e.to_string()),
+        },
+        "lock" => {
+            match client::request(socket, &Request::Lock).await {
+                // Reload so the screen flips to the Locked banner.
+                Ok(Response::Ok) => *state = load_app(socket).await,
+                Ok(Response::Error(e)) => state.set_toast(format!("lock failed: {e}")),
+                Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
+                Err(e) => state.set_toast(e.to_string()),
+            }
+        }
+        other => state.set_toast(format!("unknown command: {other} (q · r · sync · lock)")),
+    }
+}
+
+/// Ask the agent to put the overlay's generated password on the clipboard via
+/// `CopyText`, with the same timed auto-clear as item copies. The value rides
+/// the local UDS once, exactly like `Unlock`'s password does.
+async fn copy_generated(state: &mut App, socket: &Path) {
+    let Some(text) = state
+        .generator
+        .as_ref()
+        .map(|g| g.password().as_bytes().to_vec())
+    else {
+        return;
+    };
+    let req = Request::CopyText {
+        text,
+        clear_after_secs: Some(COPY_CLEAR_SECS),
+    };
+    match client::request(socket, &req).await {
+        Ok(Response::Ok) => {
+            state.set_toast(format!(
+                "copied generated password · clears in {COPY_CLEAR_SECS}s"
+            ));
+        }
+        Ok(Response::Error(e)) => state.set_toast(format!("copy failed: {e}")),
+        Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
+        Err(e) => state.set_toast(e.to_string()),
     }
 }
 

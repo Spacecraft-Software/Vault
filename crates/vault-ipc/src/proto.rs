@@ -83,6 +83,22 @@ pub enum Request {
         clear_after_secs: Option<u64>,
     },
 
+    /// Place caller-supplied text on the agent's clipboard with the same
+    /// timed auto-clear as [`Request::Copy`].
+    ///
+    /// This is the copy path for values that don't live in the vault — e.g. a
+    /// freshly generated password the user hasn't saved yet. The plaintext
+    /// rides the local UDS exactly like `Unlock`'s password does, and the
+    /// agent zeroises it after the clipboard write. Requires an unlocked
+    /// agent, mirroring every other data verb.
+    CopyText {
+        /// The value to copy; secret, wiped by the agent after use.
+        text: Vec<u8>,
+        /// Seconds before the agent clears the clipboard; `None` uses the
+        /// agent default, `Some(0)` disables auto-clear.
+        clear_after_secs: Option<u64>,
+    },
+
     /// Soft-delete a cipher by id or decrypted name.
     ///
     /// `selector` is matched against `Cipher.id` first (exact); if no id
