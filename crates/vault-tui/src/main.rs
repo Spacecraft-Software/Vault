@@ -8,10 +8,11 @@
 //! `Request::Copy` / `Request::CopyText` for clipboard copies (the secret
 //! stays in the agent on the `Copy` path; `CopyText` carries the locally
 //! generated password the other way, like `Unlock`'s does). `/` filters the
-//! item list live, `g` opens the password-generator overlay, and `:` opens a
-//! small command line (`q` / `r` / `sync` / `lock`). Item editing lands in a
-//! later slice. Requires a pre-unlocked agent; a locked or absent agent shows
-//! a centered banner.
+//! item list live, `g` opens the password-generator overlay, `:` opens a
+//! small command line (`q` / `r` / `sync` / `lock`), and `a` / `e` / `d`
+//! drive `Request::Add` / `Edit` / `Remove` through a form overlay and a
+//! delete confirm. Requires a pre-unlocked agent; a locked or absent agent
+//! shows a centered banner.
 
 #![forbid(unsafe_code)]
 
@@ -36,7 +37,7 @@ use tokio::sync::mpsc;
 use vault_ipc::proto::{Field, Request, Response};
 use vault_ipc::{default_socket_path, sanitize_socket_path};
 
-use app::{App, InputMode, RevealedSecret};
+use app::{App, FormKind, FormSubmit, InputMode, RevealedSecret};
 
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -190,6 +191,8 @@ async fn handle_key(state: &mut App, key: KeyEvent, socket: &Path) {
         InputMode::Search => handle_search_key(state, key),
         InputMode::Command => handle_command_key(state, key, socket).await,
         InputMode::Generate => handle_generate_key(state, key, socket).await,
+        InputMode::Form => handle_form_key(state, key, socket).await,
+        InputMode::ConfirmDelete => handle_confirm_key(state, key, socket).await,
     }
 }
 
@@ -218,6 +221,110 @@ async fn handle_normal_key(state: &mut App, key: KeyEvent, socket: &Path) {
         KeyCode::Char('/') => state.open_search(),
         KeyCode::Char(':') => state.open_command(),
         KeyCode::Char('g') => state.open_generator(),
+        KeyCode::Char('a') => state.open_add_form(),
+        KeyCode::Char('e') => state.open_edit_form(),
+        KeyCode::Char('d') => state.open_confirm_delete(),
+        _ => {}
+    }
+}
+
+/// Form-overlay keys — field navigation and editing; Enter submits.
+async fn handle_form_key(state: &mut App, key: KeyEvent, socket: &Path) {
+    // Ctrl+G fills the focused Pass field with a generated password; other
+    // Ctrl chords are reserved (PRD's CUA layer is a tracked follow-up).
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.code == KeyCode::Char('g') {
+            state.gen_into_password();
+        }
+        return;
+    }
+    match key.code {
+        KeyCode::Esc => state.cancel_form(),
+        KeyCode::Tab | KeyCode::Down => state.form_focus_next(),
+        KeyCode::BackTab | KeyCode::Up => state.form_focus_prev(),
+        KeyCode::Left | KeyCode::Right => state.form_toggle_type(),
+        KeyCode::Enter => submit_form(state, socket).await,
+        KeyCode::Backspace => state.form_pop(),
+        // Space toggles on the Type row, types a literal space elsewhere.
+        KeyCode::Char(' ') if state.form_on_type_row() => state.form_toggle_type(),
+        KeyCode::Char(c) => state.form_push(c),
+        _ => {}
+    }
+}
+
+/// Validate, diff, and send the open form as `Request::Add` / `Request::Edit`.
+/// On success the vault is reloaded (the agent already patched its cache); on
+/// any error the form stays open so nothing typed is lost.
+async fn submit_form(state: &mut App, socket: &Path) {
+    let data = match state.form_submit_data() {
+        Ok(d) => d,
+        Err(msg) => {
+            state.set_toast(msg);
+            return;
+        }
+    };
+    let FormSubmit {
+        kind,
+        cipher_type,
+        name,
+        username,
+        password,
+        uri,
+        folder,
+        notes,
+    } = data;
+    let req = match kind {
+        FormKind::Add => Request::Add {
+            name: name.unwrap_or_default(),
+            cipher_type,
+            folder,
+            notes,
+            username,
+            password: password.map(String::into_bytes),
+            totp: None,
+            uri,
+        },
+        FormKind::Edit { id, .. } => Request::Edit {
+            selector: id,
+            name,
+            folder,
+            notes,
+            username,
+            password: password.map(String::into_bytes),
+            totp: None,
+            uri,
+        },
+    };
+    match client::request(socket, &req).await {
+        Ok(Response::Saved(s)) => {
+            *state = load_app(socket).await;
+            state.set_toast(format!("saved '{}'", s.name));
+        }
+        Ok(Response::Error(e)) => state.set_toast(format!("save failed: {e}")),
+        Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
+        Err(e) => state.set_toast(e.to_string()),
+    }
+}
+
+/// Delete-confirm keys — `y`/Enter deletes the captured target, `n`/Esc backs
+/// out untouched.
+async fn handle_confirm_key(state: &mut App, key: KeyEvent, socket: &Path) {
+    match key.code {
+        KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+            let Some((id, _)) = state.take_confirm_delete() else {
+                return;
+            };
+            match client::request(socket, &Request::Remove { selector: id }).await {
+                Ok(Response::Removed(r)) => {
+                    *state = load_app(socket).await;
+                    state.set_toast(format!("deleted '{}'", r.name));
+                }
+                Ok(Response::Error(e)) => state.set_toast(format!("delete failed: {e}")),
+                Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
+                Err(e) => state.set_toast(e.to_string()),
+            }
+        }
+        KeyCode::Char('n' | 'N') | KeyCode::Esc => state.cancel_confirm(),
         _ => {}
     }
 }

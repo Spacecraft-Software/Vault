@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use vault_ipc::proto::Field;
 use vault_theme::steelbore;
 
-use crate::app::{App, Focus, InputMode, Screen};
+use crate::app::{App, Focus, FormKind, InputMode, Screen};
 
 /// Mask shown for a secret field that has not been revealed.
 const MASK: &str = "••••••••";
@@ -59,8 +59,11 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Message { title, body: text } => render_message(frame, body, title, text),
         Screen::Browsing => render_browser(frame, app, body),
     }
-    if app.mode == InputMode::Generate {
-        render_generator(frame, app, body);
+    match app.mode {
+        InputMode::Generate => render_generator(frame, app, body),
+        InputMode::Form => render_form(frame, app, body),
+        InputMode::ConfirmDelete => render_confirm(frame, app, body),
+        InputMode::Normal | InputMode::Search | InputMode::Command => {}
     }
     render_status_bar(frame, app, status_bar);
 }
@@ -238,6 +241,93 @@ const fn onoff(b: bool) -> &'static str {
     if b { "on" } else { "off" }
 }
 
+/// Centered add/edit form overlay, drawn over the browser.
+fn render_form(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(form) = app.form.as_ref() else {
+        return;
+    };
+    let amber = hex(steelbore::MOLTEN_AMBER);
+    let info = hex(steelbore::INFO);
+    let steel = hex(steelbore::STEEL_BLUE);
+    let title = match &form.kind {
+        FormKind::Add => " Add ".to_owned(),
+        FormKind::Edit { name, .. } => format!(" Edit '{name}' "),
+    };
+    let mut lines = vec![Line::from("")];
+    for row in form.rows() {
+        let (value_txt, value_color) = if row.is_type {
+            (format!("\u{25b8} {} \u{25c2}", row.value), amber)
+        } else if row.secret && !row.focused && !row.value.is_empty() {
+            // Compose secrets visibly only while their field has focus.
+            (MASK.to_owned(), steel)
+        } else if row.focused {
+            (format!("{}\u{258c}", row.value), amber)
+        } else {
+            (row.value.to_owned(), info)
+        };
+        let label_color = if row.focused { amber } else { steel };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {:<8}", row.label),
+                Style::default()
+                    .fg(label_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(value_txt, Style::default().fg(value_color)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Enter save · Tab next · Space type · Ctrl+G gen · Esc cancel",
+        Style::default().fg(steel).add_modifier(Modifier::ITALIC),
+    )));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(amber))
+        .title(title)
+        .style(Style::default().bg(hex(steelbore::VOID_NAVY)));
+    let overlay = centered(area, 70, 70);
+    frame.render_widget(ratatui::widgets::Clear, overlay);
+    frame.render_widget(Paragraph::new(lines).block(block), overlay);
+}
+
+/// Small centered delete-confirm overlay.
+fn render_confirm(frame: &mut Frame, app: &App, area: Rect) {
+    let Some((_, name)) = app.confirm_delete.as_ref() else {
+        return;
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Delete '{name}'?"),
+            Style::default()
+                .fg(hex(steelbore::MOLTEN_AMBER))
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "y delete · n cancel",
+            Style::default()
+                .fg(hex(steelbore::STEEL_BLUE))
+                .add_modifier(Modifier::ITALIC),
+        )),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(hex(steelbore::ERROR)))
+        .title(" Delete ")
+        .style(Style::default().bg(hex(steelbore::VOID_NAVY)));
+    let overlay = centered(area, 44, 28);
+    frame.render_widget(ratatui::widgets::Clear, overlay);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(block),
+        overlay,
+    );
+}
+
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let amber = hex(steelbore::MOLTEN_AMBER);
     let (state_txt, state_color) = app.status.as_ref().map_or_else(
@@ -281,7 +371,9 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let editing = match app.mode {
         InputMode::Search => Some(format!("/{}\u{258c}", app.search)),
         InputMode::Command => Some(format!(":{}\u{258c}", app.command)),
-        InputMode::Normal | InputMode::Generate => None,
+        InputMode::Normal | InputMode::Generate | InputMode::Form | InputMode::ConfirmDelete => {
+            None
+        }
     };
     if let Some(input) = editing {
         spans.push(Span::styled(
@@ -297,7 +389,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         ));
     } else {
         spans.push(Span::styled(
-            "q quit  j/k move  Tab pane  Space reveal  c/u/o copy  / search  g generate  : cmd  r refresh",
+            "q quit  j/k move  Space reveal  c/u/o copy  / search  g gen  a/e/d edit  : cmd  r refresh",
             Style::default().fg(hex(steelbore::STEEL_BLUE)),
         ));
     }
@@ -501,6 +593,47 @@ mod tests {
             text.contains(":sync\u{258c}"),
             "command line missing from status bar:\n{text}"
         );
+    }
+
+    #[test]
+    fn form_overlay_renders_rows_and_masks_unfocused_pass() {
+        let mut app = App::browsing(status(), vec![login_entry()]);
+        app.open_add_form();
+        // Focus Pass (Type → Name → User → Pass), type a secret, focus away.
+        for _ in 0..3 {
+            app.form_focus_next();
+        }
+        for c in "hunter2".chars() {
+            app.form_push(c);
+        }
+        app.form_focus_next(); // → URI; Pass is now unfocused
+        let text = draw(&app);
+        assert!(text.contains(" Add "), "form title missing:\n{text}");
+        assert!(
+            text.contains("\u{25b8} login \u{25c2}"),
+            "type row missing:\n{text}"
+        );
+        assert!(text.contains(MASK), "unfocused Pass not masked:\n{text}");
+        assert!(
+            !text.contains("hunter2"),
+            "unfocused Pass leaked plaintext:\n{text}"
+        );
+        assert!(
+            text.contains('\u{258c}'),
+            "focused-field cursor missing:\n{text}"
+        );
+    }
+
+    #[test]
+    fn confirm_overlay_renders_target_name() {
+        let mut app = App::browsing(status(), vec![login_entry()]);
+        app.open_confirm_delete();
+        let text = draw(&app);
+        assert!(
+            text.contains("Delete 'github.com'?"),
+            "confirm prompt missing:\n{text}"
+        );
+        assert!(text.contains("y delete"), "confirm hint missing:\n{text}");
     }
 
     #[test]

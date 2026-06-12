@@ -10,6 +10,41 @@ range may break in any release.
 
 ### Added
 
+- **M5 (slice 4) — TUI mutations: `a` add, `e` edit, `d` delete (confirm).**
+  PRD §7.2's Mutation row goes live, completing the daily-driver loop (browse
+  → search → reveal/copy → mutate) without falling back to the CLI. Pure TUI
+  slice: the agent's M4 write paths (`Request::Add` / `Edit` / `Remove`) are
+  driven as-is — no protocol changes, no agent changes, no new dependencies.
+  - **Add (`a`).** A centered form overlay with a Type row (login ⇄ secure
+    note, toggled with Space/←/→) over Name / User / Pass / URI / Folder /
+    Notes (notes expose only Name / Folder / Notes). Tab/↓ and Shift-Tab/↑
+    cycle fields (wrapping); Enter validates (name required) and submits;
+    Esc discards. **Ctrl+G in the Pass field** fills it with a fresh
+    default-options password (PRD's "generate into the active field" story).
+    Values typed under one type survive a toggle, but hidden login fields
+    never leak into a secure-note submit.
+  - **Edit (`e`).** Same form, prefilled with the metadata the list already
+    has (name / username / folder); type is fixed. Submit diffs against the
+    prefill: untouched fields ride as "unchanged" on the wire (so an edit
+    never re-encrypts a password it didn't see), a cleared field submits
+    empty. The selected row's exact cipher id is the selector, so duplicate
+    names can't mislead it. An edit with no changes is rejected in-form.
+  - **Delete (`d`).** A small confirm overlay (`Delete 'name'? y/N`);
+    `y`/Enter sends `Request::Remove` with the exact id, `n`/Esc backs out.
+  - On success the vault reloads and a toast reports `saved '…'` /
+    `deleted '…'`; on any error the form stays open so nothing typed is lost.
+    Opening any mutation overlay re-masks a revealed secret. The unfocused
+    Pass field renders masked; form secrets are redacted in `Debug`
+    (`FormState` / `FormSubmit`).
+  - Known deviation (tracked): PRD §7.2's full CUA bindings
+    (Ctrl+C/X/V/Z/S/F) and bracketed paste in text inputs are deferred —
+    fields accept typed input only this slice.
+  - Tests: 11 new `vault-tui` units (form open/prefill/gating, focus wrap,
+    type-toggle value preservation, Ctrl+G targeting, submit diff/validation,
+    note-residue exclusion, confirm gating/take/cancel, overlay re-masking,
+    `Debug` redaction) plus `TestBackend` smokes for the form overlay
+    (masked unfocused Pass) and the confirm overlay.
+
 - **M5 (slice 3) — TUI search, generator overlay, and `:` command line.** The
   three previewed keys go live: `/` filters the item list as you type, `g`
   opens a password-generator overlay, and `:` opens a small vim-style command

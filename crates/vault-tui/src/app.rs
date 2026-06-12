@@ -7,8 +7,10 @@
 //! performs the agent I/O for reveal/copy), and `ui.rs` renders from this state.
 //! The state holds the non-secret [`ListEntry`] metadata plus, transiently, a
 //! single revealed secret ([`RevealedSecret`], zeroised on drop and re-masked
-//! on any navigation), a live search query, a pending `:` command line, and
-//! the password-generator overlay ([`GeneratorState`], zeroised on drop).
+//! on any navigation), a live search query, a pending `:` command line, the
+//! password-generator overlay ([`GeneratorState`], zeroised on drop), the
+//! add/edit form ([`FormState`], secrets redacted in `Debug`), and the
+//! delete-confirm target.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -39,6 +41,10 @@ pub enum InputMode {
     Command,
     /// `g` pressed — the password-generator overlay is open.
     Generate,
+    /// `a`/`e` pressed — the add/edit form overlay is open.
+    Form,
+    /// `d` pressed — the delete-confirm overlay is open.
+    ConfirmDelete,
 }
 
 /// Which pane currently takes navigation keys.
@@ -155,6 +161,325 @@ impl fmt::Debug for GeneratorState {
     }
 }
 
+/// Index of each field in [`FormState::fields`]. All six fields always exist;
+/// the *visible* subset depends on the cipher type, so values typed under one
+/// type survive a toggle to the other.
+const F_NAME: usize = 0;
+const F_USER: usize = 1;
+const F_PASS: usize = 2;
+const F_URI: usize = 3;
+const F_FOLDER: usize = 4;
+const F_NOTES: usize = 5;
+
+/// Which mutation the form drives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FormKind {
+    /// Create a new cipher; the form carries a Type row (login ⇄ secure note).
+    Add,
+    /// Edit an existing cipher. The type is fixed; `name` labels titles/toasts.
+    Edit {
+        /// Exact cipher id the edit targets.
+        id: String,
+        /// Decrypted name at the time the form opened.
+        name: String,
+    },
+}
+
+/// One editable row in the mutation form.
+#[derive(Clone)]
+pub struct FormField {
+    /// Display label (`Name`, `User`, `Pass`, …).
+    pub label: &'static str,
+    /// Current text.
+    pub value: String,
+    /// Value the form opened with — submit sends only fields that differ.
+    initial: String,
+    /// Mask the value while the field is unfocused, redact it in `Debug`.
+    pub secret: bool,
+}
+
+impl fmt::Debug for FormField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value: &dyn fmt::Debug = if self.secret {
+            &"<redacted>"
+        } else {
+            &self.value
+        };
+        f.debug_struct("FormField")
+            .field("label", &self.label)
+            .field("value", value)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One row of the form as the renderer sees it.
+#[derive(Debug)]
+pub struct FormRowView<'a> {
+    /// Display label.
+    pub label: &'static str,
+    /// Text to show (for the Type row, the type's human name).
+    pub value: &'a str,
+    /// Mask this value while the row is unfocused.
+    pub secret: bool,
+    /// Whether this row currently has focus.
+    pub focused: bool,
+    /// Whether this is the Type toggle row rather than a text field.
+    pub is_type: bool,
+}
+
+/// The add/edit form overlay's state. Pure data + navigation/edit logic;
+/// `main.rs` turns a submit into a `Request::Add` / `Request::Edit`.
+#[derive(Clone, Debug)]
+pub struct FormState {
+    /// Add or edit, with the edit target baked in.
+    pub kind: FormKind,
+    /// Bitwarden cipher type the form is composing (1 = login, 2 = note).
+    pub cipher_type: u8,
+    /// All six fields, in [`F_NAME`]..=[`F_NOTES`] order.
+    fields: Vec<FormField>,
+    /// Focused row index — `0` is the Type row on add forms.
+    pub focus: usize,
+}
+
+/// What a validated form submit carries; `None` fields ride as "unchanged"
+/// (edit) or "not set" (add) on the wire.
+pub struct FormSubmit {
+    /// Add or edit, with the edit target baked in.
+    pub kind: FormKind,
+    /// Cipher type for `Request::Add`.
+    pub cipher_type: u8,
+    /// Display name.
+    pub name: Option<String>,
+    /// Login username.
+    pub username: Option<String>,
+    /// Login password (secret).
+    pub password: Option<String>,
+    /// Primary login URI.
+    pub uri: Option<String>,
+    /// Folder name (agent resolves to an id).
+    pub folder: Option<String>,
+    /// Free-form notes.
+    pub notes: Option<String>,
+}
+
+impl fmt::Debug for FormSubmit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FormSubmit")
+            .field("kind", &self.kind)
+            .field("cipher_type", &self.cipher_type)
+            .field("name", &self.name)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("uri", &self.uri)
+            .field("folder", &self.folder)
+            .field("notes", &self.notes)
+            .finish()
+    }
+}
+
+impl FormState {
+    /// Blank field set shared by both constructors.
+    fn blank_fields() -> Vec<FormField> {
+        ["Name", "User", "Pass", "URI", "Folder", "Notes"]
+            .into_iter()
+            .map(|label| FormField {
+                label,
+                value: String::new(),
+                initial: String::new(),
+                secret: label == "Pass",
+            })
+            .collect()
+    }
+
+    /// An empty add form, composing a login by default.
+    #[must_use]
+    pub fn new_add() -> Self {
+        Self {
+            kind: FormKind::Add,
+            cipher_type: 1,
+            fields: Self::blank_fields(),
+            focus: 0,
+        }
+    }
+
+    /// An edit form for `entry`, prefilled with the metadata the list already
+    /// carries (name / username / folder). Secrets stay blank — blank means
+    /// "leave unchanged" on submit.
+    #[must_use]
+    pub fn new_edit(entry: &ListEntry) -> Self {
+        let mut fields = Self::blank_fields();
+        let mut prefill = |idx: usize, v: &str| {
+            v.clone_into(&mut fields[idx].value);
+            v.clone_into(&mut fields[idx].initial);
+        };
+        prefill(F_NAME, &entry.name);
+        if let Some(u) = entry.username.as_deref() {
+            prefill(F_USER, u);
+        }
+        if let Some(fo) = entry.folder.as_deref() {
+            prefill(F_FOLDER, fo);
+        }
+        Self {
+            kind: FormKind::Edit {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+            },
+            cipher_type: entry.cipher_type,
+            fields,
+            focus: 0,
+        }
+    }
+
+    /// Whether the form carries a Type toggle row (add forms only).
+    #[must_use]
+    pub const fn has_type_row(&self) -> bool {
+        matches!(self.kind, FormKind::Add)
+    }
+
+    /// Whether the Type row currently has focus.
+    #[must_use]
+    pub const fn on_type_row(&self) -> bool {
+        self.has_type_row() && self.focus == 0
+    }
+
+    /// Indices of the fields the current cipher type exposes.
+    fn visible_fields(&self) -> Vec<usize> {
+        if self.cipher_type == 1 {
+            (F_NAME..=F_NOTES).collect()
+        } else {
+            // Secure notes (and anything that isn't a login) edit only the
+            // metadata fields every cipher type carries.
+            vec![F_NAME, F_FOLDER, F_NOTES]
+        }
+    }
+
+    /// Total focusable rows (Type row + visible fields).
+    fn row_count(&self) -> usize {
+        usize::from(self.has_type_row()) + self.visible_fields().len()
+    }
+
+    /// Index into `fields` of the focused row, `None` on the Type row.
+    fn focused_field_index(&self) -> Option<usize> {
+        let off = usize::from(self.has_type_row());
+        self.focus
+            .checked_sub(off)
+            .and_then(|i| self.visible_fields().get(i).copied())
+    }
+
+    /// Mutable handle on the focused text field, `None` on the Type row.
+    fn focused_field_mut(&mut self) -> Option<&mut FormField> {
+        self.focused_field_index().map(|i| &mut self.fields[i])
+    }
+
+    /// Move focus down one row, wrapping.
+    pub fn focus_next(&mut self) {
+        self.focus = (self.focus + 1) % self.row_count();
+    }
+
+    /// Move focus up one row, wrapping.
+    pub fn focus_prev(&mut self) {
+        self.focus = self
+            .focus
+            .checked_sub(1)
+            .unwrap_or_else(|| self.row_count() - 1);
+    }
+
+    /// Flip login ⇄ secure note (no-op unless the Type row has focus).
+    pub const fn toggle_type(&mut self) {
+        if self.on_type_row() {
+            self.cipher_type = if self.cipher_type == 1 { 2 } else { 1 };
+        }
+    }
+
+    /// Human name of the cipher type being composed.
+    #[must_use]
+    pub const fn type_label(&self) -> &'static str {
+        if self.cipher_type == 1 {
+            "login"
+        } else {
+            "secure note"
+        }
+    }
+
+    /// The rows in display order, ready to render.
+    #[must_use]
+    pub fn rows(&self) -> Vec<FormRowView<'_>> {
+        let mut out = Vec::with_capacity(self.row_count());
+        if self.has_type_row() {
+            out.push(FormRowView {
+                label: "Type",
+                value: self.type_label(),
+                secret: false,
+                focused: self.focus == 0,
+                is_type: true,
+            });
+        }
+        let off = usize::from(self.has_type_row());
+        for (row, idx) in self.visible_fields().into_iter().enumerate() {
+            let f = &self.fields[idx];
+            out.push(FormRowView {
+                label: f.label,
+                value: &f.value,
+                secret: f.secret,
+                focused: self.focus == off + row,
+                is_type: false,
+            });
+        }
+        out
+    }
+
+    /// Validate and diff the form into a [`FormSubmit`].
+    ///
+    /// A field is carried only when its value differs from what the form
+    /// opened with, and only when the current type exposes it — so an edit
+    /// leaves untouched fields alone on the wire, clearing a prefilled field
+    /// submits an empty string, and login-only residue never leaks into a
+    /// secure note.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing message when an add form has no name, or when an
+    /// edit form has no changes to send.
+    pub fn submit(&self) -> Result<FormSubmit, String> {
+        let vis = self.visible_fields();
+        let take = |idx: usize| -> Option<String> {
+            let f = &self.fields[idx];
+            (vis.contains(&idx) && f.value != f.initial).then(|| f.value.clone())
+        };
+        let name = take(F_NAME);
+        let username = take(F_USER);
+        let password = take(F_PASS);
+        let uri = take(F_URI);
+        let folder = take(F_FOLDER);
+        let notes = take(F_NOTES);
+        match self.kind {
+            FormKind::Add => {
+                if name.as_deref().is_none_or(str::is_empty) {
+                    return Err("name is required".to_owned());
+                }
+            }
+            FormKind::Edit { .. } => {
+                if [&name, &username, &password, &uri, &folder, &notes]
+                    .iter()
+                    .all(|o| o.is_none())
+                {
+                    return Err("no changes to save".to_owned());
+                }
+            }
+        }
+        Ok(FormSubmit {
+            kind: self.kind.clone(),
+            cipher_type: self.cipher_type,
+            name,
+            username,
+            password,
+            uri,
+            folder,
+            notes,
+        })
+    }
+}
+
 /// Top-level TUI state.
 #[derive(Clone, Debug)]
 pub struct App {
@@ -182,6 +507,11 @@ pub struct App {
     pub command: String,
     /// Generator overlay state, `Some` while [`InputMode::Generate`] is open.
     pub generator: Option<GeneratorState>,
+    /// Add/edit form state, `Some` while [`InputMode::Form`] is open.
+    pub form: Option<FormState>,
+    /// Delete target `(id, name)`, `Some` while [`InputMode::ConfirmDelete`]
+    /// is open.
+    pub confirm_delete: Option<(String, String)>,
     /// Secret currently revealed in the detail pane, if any.
     pub revealed: Option<RevealedSecret>,
     /// Transient status-bar message (copy feedback / errors). Cleared on the
@@ -208,6 +538,8 @@ impl App {
             search: String::new(),
             command: String::new(),
             generator: None,
+            form: None,
+            confirm_delete: None,
             revealed: None,
             toast: None,
             should_quit: false,
@@ -236,6 +568,8 @@ impl App {
             search: String::new(),
             command: String::new(),
             generator: None,
+            form: None,
+            confirm_delete: None,
             revealed: None,
             toast: None,
             should_quit: false,
@@ -490,6 +824,139 @@ impl App {
             g.opts.symbols = !g.opts.symbols;
             self.regenerate();
         }
+    }
+
+    // --- mutation form -----------------------------------------------------
+
+    /// Open an empty add form (login by default). Re-masks any revealed
+    /// secret, like every other overlay/navigation.
+    pub fn open_add_form(&mut self) {
+        self.revealed = None;
+        self.form = Some(FormState::new_add());
+        self.mode = InputMode::Form;
+    }
+
+    /// Open an edit form prefilled from the selected item. No-op unless the
+    /// item list is focused and a row is selected (same gate as copy/reveal).
+    pub fn open_edit_form(&mut self) {
+        if !self.items_focused() {
+            return;
+        }
+        let Some(sel) = self.selected_entry() else {
+            return;
+        };
+        self.revealed = None;
+        self.form = Some(FormState::new_edit(&sel));
+        self.mode = InputMode::Form;
+    }
+
+    /// Abandon the form, discarding everything typed into it.
+    pub fn cancel_form(&mut self) {
+        self.form = None;
+        self.mode = InputMode::Normal;
+    }
+
+    /// Whether the form's Type toggle row has focus (drives Space routing:
+    /// toggle there, type a literal space in text fields).
+    #[must_use]
+    pub fn form_on_type_row(&self) -> bool {
+        self.form.as_ref().is_some_and(FormState::on_type_row)
+    }
+
+    /// Append a character to the focused form field (no-op on the Type row).
+    pub fn form_push(&mut self, c: char) {
+        if let Some(f) = self.form.as_mut().and_then(FormState::focused_field_mut) {
+            f.value.push(c);
+        }
+    }
+
+    /// Delete the last character of the focused form field.
+    pub fn form_pop(&mut self) {
+        if let Some(f) = self.form.as_mut().and_then(FormState::focused_field_mut) {
+            f.value.pop();
+        }
+    }
+
+    /// Move the form focus down one row, wrapping.
+    pub fn form_focus_next(&mut self) {
+        if let Some(form) = self.form.as_mut() {
+            form.focus_next();
+        }
+    }
+
+    /// Move the form focus up one row, wrapping.
+    pub fn form_focus_prev(&mut self) {
+        if let Some(form) = self.form.as_mut() {
+            form.focus_prev();
+        }
+    }
+
+    /// Flip the add form between login and secure note (Type row only).
+    pub const fn form_toggle_type(&mut self) {
+        if let Some(form) = self.form.as_mut() {
+            form.toggle_type();
+        }
+    }
+
+    /// Fill the focused Pass field with a freshly generated default-options
+    /// password (Ctrl+G). No-op when any other row has focus.
+    pub fn gen_into_password(&mut self) {
+        let Some(form) = self.form.as_mut() else {
+            return;
+        };
+        if form.focused_field_index() != Some(F_PASS) {
+            return;
+        }
+        match generate_password(&GenerateOptions::default()) {
+            Ok(pw) => {
+                if let Some(f) = form.focused_field_mut() {
+                    f.value = pw.to_string();
+                }
+            }
+            Err(e) => self.toast = Some(format!("generate failed: {e}")),
+        }
+    }
+
+    /// Validate and diff the open form for submission.
+    ///
+    /// # Errors
+    ///
+    /// Returns the user-facing message to toast (no form open, missing name
+    /// on add, or an edit with nothing changed); the form stays open.
+    pub fn form_submit_data(&self) -> Result<FormSubmit, String> {
+        self.form
+            .as_ref()
+            .ok_or_else(|| "no form open".to_owned())
+            .and_then(FormState::submit)
+    }
+
+    // --- delete confirm ----------------------------------------------------
+
+    /// Open the delete-confirm overlay for the selected item. Gated like
+    /// edit: item list focused + a row selected.
+    pub fn open_confirm_delete(&mut self) {
+        if !self.items_focused() {
+            return;
+        }
+        let Some(sel) = self.selected_entry() else {
+            return;
+        };
+        self.revealed = None;
+        self.confirm_delete = Some((sel.id, sel.name));
+        self.mode = InputMode::ConfirmDelete;
+    }
+
+    /// Dismiss the delete confirm without deleting.
+    pub fn cancel_confirm(&mut self) {
+        self.confirm_delete = None;
+        self.mode = InputMode::Normal;
+    }
+
+    /// Take the confirmed delete target `(id, name)`, closing the overlay.
+    #[must_use]
+    pub const fn take_confirm_delete(&mut self) -> Option<(String, String)> {
+        self.mode = InputMode::Normal;
+        self.confirm_delete.take()
     }
 }
 
@@ -888,6 +1355,248 @@ mod tests {
         assert!(
             !rendered.contains(&pw),
             "Debug leaked the generated password: {rendered}"
+        );
+    }
+
+    #[test]
+    fn add_form_opens_with_login_defaults() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_add_form();
+        assert_eq!(app.mode, InputMode::Form);
+        let form = app.form.as_ref().expect("form open");
+        assert_eq!(form.kind, FormKind::Add);
+        assert_eq!(form.cipher_type, 1);
+        let labels: Vec<&str> = form.rows().iter().map(|r| r.label).collect();
+        assert_eq!(
+            labels,
+            ["Type", "Name", "User", "Pass", "URI", "Folder", "Notes"]
+        );
+        assert!(form.rows().iter().skip(1).all(|r| r.value.is_empty()));
+    }
+
+    #[test]
+    fn edit_form_prefills_and_is_gated() {
+        let mut app = App::browsing(status(), vec![entry("github", Some("Work"))]);
+        // Gated: folders pane focus → no-op.
+        app.focus = Focus::Folders;
+        app.open_edit_form();
+        assert!(app.form.is_none());
+
+        app.focus = Focus::Items;
+        app.open_edit_form();
+        let form = app.form.as_ref().expect("form open");
+        assert_eq!(
+            form.kind,
+            FormKind::Edit {
+                id: "id-github".to_owned(),
+                name: "github".to_owned()
+            }
+        );
+        assert!(!form.has_type_row(), "edit forms can't change the type");
+        let rows = form.rows();
+        let value_of = |label: &str| {
+            rows.iter()
+                .find(|r| r.label == label)
+                .map(|r| r.value.to_owned())
+                .expect("row exists")
+        };
+        assert_eq!(value_of("Name"), "github");
+        assert_eq!(value_of("User"), "github@example.org");
+        assert_eq!(value_of("Folder"), "Work");
+        assert_eq!(value_of("Pass"), "");
+    }
+
+    #[test]
+    fn form_focus_wraps_both_directions() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_add_form();
+        // 7 rows: Type + 6 fields.
+        app.form_focus_prev();
+        assert_eq!(app.form.as_ref().map(|f| f.focus), Some(6), "wraps up");
+        app.form_focus_next();
+        assert_eq!(app.form.as_ref().map(|f| f.focus), Some(0), "wraps down");
+    }
+
+    #[test]
+    fn type_toggle_swaps_visible_fields_preserving_values() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_add_form();
+        // Type a username under the login type (focus row 2 = User).
+        app.form_focus_next();
+        app.form_focus_next();
+        app.form_push('u');
+        // Back to the Type row and flip to secure note.
+        app.form_focus_prev();
+        app.form_focus_prev();
+        assert!(app.form_on_type_row());
+        app.form_toggle_type();
+        let form = app.form.as_ref().expect("form open");
+        assert_eq!(form.cipher_type, 2);
+        let labels: Vec<&str> = form.rows().iter().map(|r| r.label).collect();
+        assert_eq!(labels, ["Type", "Name", "Folder", "Notes"]);
+        // Flip back — the typed username survived the round trip.
+        app.form_toggle_type();
+        let form = app.form.as_ref().expect("form open");
+        let user = form
+            .rows()
+            .into_iter()
+            .find(|r| r.label == "User")
+            .map(|r| r.value.to_owned());
+        assert_eq!(user.as_deref(), Some("u"));
+    }
+
+    #[test]
+    fn ctrl_g_fills_only_the_pass_field() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_add_form();
+        // On the Type row: no-op.
+        app.gen_into_password();
+        assert!(app.form.as_ref().expect("form").rows()[3].value.is_empty());
+        // Focus Name: still a no-op.
+        app.form_focus_next();
+        app.gen_into_password();
+        let name_val = app.form.as_ref().expect("form").rows()[1].value.to_owned();
+        assert!(name_val.is_empty(), "Ctrl+G must not touch Name");
+        // Focus Pass (Type → Name → User → Pass): fills 20 chars.
+        app.form_focus_next();
+        app.form_focus_next();
+        app.gen_into_password();
+        let pass_val = app.form.as_ref().expect("form").rows()[3].value.to_owned();
+        assert_eq!(pass_val.chars().count(), 20);
+    }
+
+    #[test]
+    fn submit_diff_carries_only_changed_fields() {
+        let mut app = App::browsing(status(), vec![entry("github", Some("Work"))]);
+        app.open_edit_form();
+        // Edit rows: Name User Pass URI Folder Notes (no Type row).
+        // Change User; clear Name; leave the rest untouched.
+        app.form_focus_next(); // → User
+        app.form_push('x');
+        app.form_focus_prev(); // → Name
+        for _ in 0.."github".len() {
+            app.form_pop();
+        }
+        let data = app.form_submit_data().expect("valid edit");
+        assert_eq!(
+            data.name.as_deref(),
+            Some(""),
+            "cleared field submits empty"
+        );
+        assert_eq!(data.username.as_deref(), Some("github@example.orgx"));
+        assert_eq!(data.password, None, "untouched secret stays unchanged");
+        assert_eq!(data.folder, None, "untouched prefill stays unchanged");
+    }
+
+    #[test]
+    fn add_requires_a_name_and_edit_requires_a_change() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_add_form();
+        assert_eq!(
+            app.form_submit_data().expect_err("add must be rejected"),
+            "name is required"
+        );
+
+        app.cancel_form();
+        assert_eq!(app.mode, InputMode::Normal);
+        app.open_edit_form();
+        assert_eq!(
+            app.form_submit_data().expect_err("edit must be rejected"),
+            "no changes to save"
+        );
+    }
+
+    #[test]
+    fn note_submit_excludes_login_field_residue() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_add_form();
+        // Type into Pass under the login type…
+        app.form_focus_next();
+        app.form_push('n'); // Name (required)
+        app.form_focus_next();
+        app.form_focus_next();
+        app.form_push('p'); // Pass
+        // …then flip to secure note and submit.
+        for _ in 0..3 {
+            app.form_focus_prev();
+        }
+        app.form_toggle_type();
+        let data = app.form_submit_data().expect("valid add");
+        assert_eq!(data.cipher_type, 2);
+        assert_eq!(data.name.as_deref(), Some("n"));
+        assert_eq!(data.password, None, "hidden login fields must not leak");
+    }
+
+    #[test]
+    fn confirm_delete_gates_takes_and_cancels() {
+        let mut app = App::browsing(status(), vec![entry("github", None)]);
+        app.focus = Focus::Folders;
+        app.open_confirm_delete();
+        assert!(app.confirm_delete.is_none(), "gated on items focus");
+
+        app.focus = Focus::Items;
+        app.open_confirm_delete();
+        assert_eq!(app.mode, InputMode::ConfirmDelete);
+        assert_eq!(
+            app.confirm_delete,
+            Some(("id-github".to_owned(), "github".to_owned()))
+        );
+        app.cancel_confirm();
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.confirm_delete.is_none());
+
+        app.open_confirm_delete();
+        let took = app.take_confirm_delete();
+        assert_eq!(took, Some(("id-github".to_owned(), "github".to_owned())));
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.confirm_delete.is_none());
+    }
+
+    #[test]
+    fn overlays_remask_revealed_secret() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        let reveal = |app: &mut App| {
+            app.reveal(RevealedSecret::new(
+                "id-a".to_owned(),
+                Field::Password,
+                "s".to_owned(),
+            ));
+        };
+        reveal(&mut app);
+        app.open_add_form();
+        assert!(app.revealed.is_none(), "add form must re-mask");
+        app.cancel_form();
+        reveal(&mut app);
+        app.open_edit_form();
+        assert!(app.revealed.is_none(), "edit form must re-mask");
+        app.cancel_form();
+        reveal(&mut app);
+        app.open_confirm_delete();
+        assert!(app.revealed.is_none(), "delete confirm must re-mask");
+    }
+
+    #[test]
+    fn form_debug_redacts_the_pass_value() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_add_form();
+        for _ in 0..3 {
+            app.form_focus_next(); // → Pass
+        }
+        for c in "hunter2".chars() {
+            app.form_push(c);
+        }
+        let form = app.form.as_ref().expect("form open");
+        let rendered = format!("{form:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(
+            !rendered.contains("hunter2"),
+            "Debug leaked the password: {rendered}"
+        );
+        let data = form.submit();
+        let rendered = format!("{data:?}");
+        assert!(
+            !rendered.contains("hunter2"),
+            "FormSubmit Debug leaked the password: {rendered}"
         );
     }
 
