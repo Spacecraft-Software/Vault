@@ -7,14 +7,39 @@
 //! performs the agent I/O for reveal/copy), and `ui.rs` renders from this state.
 //! The state holds the non-secret [`ListEntry`] metadata plus, transiently, a
 //! single revealed secret ([`RevealedSecret`], zeroised on drop and re-masked
-//! on any navigation).
+//! on any navigation), a live search query, a pending `:` command line, and
+//! the password-generator overlay ([`GeneratorState`], zeroised on drop).
 
 use std::collections::BTreeSet;
 use std::fmt;
 
 use zeroize::Zeroizing;
 
+use vault_core::{GenerateOptions, generate_password};
 use vault_ipc::proto::{Field, ListEntry, Status};
+
+/// Smallest password the generator overlay will produce. Comfortably above the
+/// four-character floor `generate_password` needs to seat one character from
+/// every enabled class, and below it a generated password isn't worth copying.
+const GEN_MIN_LEN: usize = 8;
+
+/// Largest password the generator overlay will produce — matches Bitwarden's
+/// own generator ceiling so saved values round-trip everywhere.
+const GEN_MAX_LEN: usize = 128;
+
+/// What keyboard input currently drives.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InputMode {
+    /// Normal browsing — keys are commands.
+    #[default]
+    Normal,
+    /// `/` pressed — keys edit the live search query.
+    Search,
+    /// `:` pressed — keys edit a pending command line.
+    Command,
+    /// `g` pressed — the password-generator overlay is open.
+    Generate,
+}
 
 /// Which pane currently takes navigation keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +127,34 @@ impl fmt::Debug for RevealedSecret {
     }
 }
 
+/// The password-generator overlay's state: the options in force and the
+/// password generated under them. The password is zeroised on drop and never
+/// surfaced by `Debug`.
+#[derive(Clone)]
+pub struct GeneratorState {
+    /// Options the current password was generated under.
+    pub opts: GenerateOptions,
+    /// The freshly generated password.
+    password: Zeroizing<String>,
+}
+
+impl GeneratorState {
+    /// The generated password, for display and copy.
+    #[must_use]
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+}
+
+impl fmt::Debug for GeneratorState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GeneratorState")
+            .field("opts", &self.opts)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Top-level TUI state.
 #[derive(Clone, Debug)]
 pub struct App {
@@ -119,6 +172,16 @@ pub struct App {
     pub item_sel: usize,
     /// Which pane has focus.
     pub focus: Focus,
+    /// What keyboard input currently drives.
+    pub mode: InputMode,
+    /// Live search query, applied on top of the folder filter. Persists after
+    /// the user accepts it with Enter; cleared by Esc.
+    pub search: String,
+    /// Pending `:` command-line buffer, only meaningful in
+    /// [`InputMode::Command`].
+    pub command: String,
+    /// Generator overlay state, `Some` while [`InputMode::Generate`] is open.
+    pub generator: Option<GeneratorState>,
     /// Secret currently revealed in the detail pane, if any.
     pub revealed: Option<RevealedSecret>,
     /// Transient status-bar message (copy feedback / errors). Cleared on the
@@ -141,6 +204,10 @@ impl App {
             folder_sel: 0,
             item_sel: 0,
             focus: Focus::Items,
+            mode: InputMode::Normal,
+            search: String::new(),
+            command: String::new(),
+            generator: None,
             revealed: None,
             toast: None,
             should_quit: false,
@@ -165,6 +232,10 @@ impl App {
             folder_sel: 0,
             item_sel: 0,
             focus: Focus::Items,
+            mode: InputMode::Normal,
+            search: String::new(),
+            command: String::new(),
+            generator: None,
             revealed: None,
             toast: None,
             should_quit: false,
@@ -179,10 +250,12 @@ impl App {
             .map_or(&FolderFilter::All, |f| &f.filter)
     }
 
-    /// Items visible under the selected folder, in `entries` order.
+    /// Items visible under the selected folder — and, when a search query is
+    /// active, matching it — in `entries` order.
     #[must_use]
     pub fn filtered(&self) -> Vec<&ListEntry> {
         let filter = self.active_filter();
+        let query = self.search.to_lowercase();
         self.entries
             .iter()
             .filter(|e| match filter {
@@ -190,6 +263,7 @@ impl App {
                 FolderFilter::Unfiled => e.folder.is_none(),
                 FolderFilter::Named(n) => e.folder.as_deref() == Some(n.as_str()),
             })
+            .filter(|e| query.is_empty() || matches_search(e, &query))
             .collect()
     }
 
@@ -282,6 +356,150 @@ impl App {
     pub const fn quit(&mut self) {
         self.should_quit = true;
     }
+
+    // --- search ---------------------------------------------------------
+
+    /// Enter search mode, editing the current query in place.
+    pub const fn open_search(&mut self) {
+        self.mode = InputMode::Search;
+    }
+
+    /// Append a character to the live search query.
+    pub fn search_push(&mut self, c: char) {
+        self.search.push(c);
+        self.on_query_changed();
+    }
+
+    /// Delete the last character of the live search query.
+    pub fn search_pop(&mut self) {
+        self.search.pop();
+        self.on_query_changed();
+    }
+
+    /// Accept the query as-is and return to normal mode; the filter stays
+    /// applied until cleared.
+    pub const fn accept_search(&mut self) {
+        self.mode = InputMode::Normal;
+    }
+
+    /// Abandon search mode and drop the query entirely.
+    pub fn cancel_search(&mut self) {
+        self.mode = InputMode::Normal;
+        self.clear_search();
+    }
+
+    /// Drop any active search query (also reachable from normal mode via Esc).
+    pub fn clear_search(&mut self) {
+        self.search.clear();
+        self.on_query_changed();
+    }
+
+    /// Whether a search query is currently narrowing the item list.
+    #[must_use]
+    pub const fn has_search(&self) -> bool {
+        !self.search.is_empty()
+    }
+
+    /// Every query edit re-anchors the selection at the top of the (new)
+    /// filtered list and re-masks — the selected row just changed identity.
+    fn on_query_changed(&mut self) {
+        self.item_sel = 0;
+        self.revealed = None;
+    }
+
+    // --- command line ----------------------------------------------------
+
+    /// Enter command mode with an empty buffer.
+    pub fn open_command(&mut self) {
+        self.command.clear();
+        self.mode = InputMode::Command;
+    }
+
+    /// Append a character to the pending command.
+    pub fn command_push(&mut self, c: char) {
+        self.command.push(c);
+    }
+
+    /// Delete the last character of the pending command.
+    pub fn command_pop(&mut self) {
+        self.command.pop();
+    }
+
+    /// Abandon the command line.
+    pub fn cancel_command(&mut self) {
+        self.command.clear();
+        self.mode = InputMode::Normal;
+    }
+
+    /// Take the pending command for execution, leaving normal mode behind.
+    #[must_use]
+    pub fn take_command(&mut self) -> String {
+        self.mode = InputMode::Normal;
+        std::mem::take(&mut self.command)
+    }
+
+    // --- generator overlay -----------------------------------------------
+
+    /// Open the generator overlay with a fresh default-options password.
+    pub fn open_generator(&mut self) {
+        let opts = GenerateOptions::default();
+        match generate_password(&opts) {
+            Ok(password) => {
+                self.generator = Some(GeneratorState { opts, password });
+                self.mode = InputMode::Generate;
+            }
+            Err(e) => self.set_toast(format!("generate failed: {e}")),
+        }
+    }
+
+    /// Close the generator overlay, dropping (and zeroising) its password.
+    pub fn close_generator(&mut self) {
+        self.generator = None;
+        self.mode = InputMode::Normal;
+    }
+
+    /// Replace the overlay's password with a fresh one under the same options.
+    pub fn regenerate(&mut self) {
+        if let Some(g) = self.generator.as_mut() {
+            match generate_password(&g.opts) {
+                Ok(password) => g.password = password,
+                Err(e) => self.toast = Some(format!("generate failed: {e}")),
+            }
+        }
+    }
+
+    /// Grow or shrink the generated length by `delta`, clamped to
+    /// [`GEN_MIN_LEN`]..=[`GEN_MAX_LEN`], regenerating on change.
+    pub fn gen_adjust_length(&mut self, delta: isize) {
+        if let Some(g) = self.generator.as_mut() {
+            let len = g
+                .opts
+                .length
+                .saturating_add_signed(delta)
+                .clamp(GEN_MIN_LEN, GEN_MAX_LEN);
+            if len != g.opts.length {
+                g.opts.length = len;
+                self.regenerate();
+            }
+        }
+    }
+
+    /// Toggle the symbol class on the generator, regenerating immediately.
+    pub fn gen_toggle_symbols(&mut self) {
+        if let Some(g) = self.generator.as_mut() {
+            g.opts.symbols = !g.opts.symbols;
+            self.regenerate();
+        }
+    }
+}
+
+/// Case-insensitive substring match of `query` (already lower-cased) against
+/// an entry's name and username — the two columns the item list displays.
+fn matches_search(e: &ListEntry, query: &str) -> bool {
+    e.name.to_lowercase().contains(query)
+        || e.username
+            .as_deref()
+            .is_some_and(|u| u.to_lowercase().contains(query))
 }
 
 /// Build the folder pane from a set of entries: a leading `All`, an `Unfiled`
@@ -489,6 +707,188 @@ mod tests {
         assert!(app.items_focused()); // browsing starts on the item list
         app.focus_next();
         assert!(!app.items_focused());
+    }
+
+    #[test]
+    fn search_matches_name_and_username_case_insensitively() {
+        let entries = vec![
+            entry("GitHub", None),
+            entry("gitlab", None),
+            entry("bank", None),
+        ];
+        let mut app = App::browsing(status(), entries);
+        app.open_search();
+        for c in "git".chars() {
+            app.search_push(c);
+        }
+        let names: Vec<&str> = app.filtered().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["GitHub", "gitlab"]);
+
+        // Username matches too: "bank@example.org" contains "bank@".
+        app.cancel_search();
+        app.open_search();
+        for c in "BANK@".chars() {
+            app.search_push(c);
+        }
+        let names: Vec<&str> = app.filtered().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["bank"]);
+    }
+
+    #[test]
+    fn search_composes_with_folder_filter() {
+        let entries = vec![
+            entry("github", Some("Work")),
+            entry("gitlab", None),
+            entry("bank", None),
+        ];
+        let mut app = App::browsing(status(), entries);
+        // Select Unfiled (folders: All, Unfiled, Work), then search "git".
+        app.focus = Focus::Folders;
+        app.move_down();
+        assert_eq!(app.active_filter(), &FolderFilter::Unfiled);
+        app.open_search();
+        for c in "git".chars() {
+            app.search_push(c);
+        }
+        let names: Vec<&str> = app.filtered().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["gitlab"], "search must apply within the folder");
+    }
+
+    #[test]
+    fn query_edits_reset_selection_and_remask() {
+        let entries = vec![entry("aa", None), entry("ab", None), entry("zz", None)];
+        let mut app = App::browsing(status(), entries);
+        app.move_down(); // item_sel -> 1
+        app.reveal(RevealedSecret::new(
+            "id-ab".to_owned(),
+            Field::Password,
+            "secret".to_owned(),
+        ));
+        app.open_search();
+        app.search_push('a');
+        assert_eq!(app.item_sel, 0, "query edit must re-anchor the selection");
+        assert!(app.revealed.is_none(), "query edit must re-mask");
+        app.search_pop();
+        assert_eq!(app.item_sel, 0);
+    }
+
+    #[test]
+    fn accept_keeps_query_cancel_and_clear_drop_it() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_search();
+        app.search_push('a');
+        app.accept_search();
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.has_search(), "Enter must keep the filter applied");
+
+        app.clear_search(); // Esc from normal mode
+        assert!(!app.has_search());
+
+        app.open_search();
+        app.search_push('a');
+        app.cancel_search(); // Esc from search mode
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(!app.has_search(), "Esc must drop the query");
+    }
+
+    #[test]
+    fn command_buffer_take_and_cancel() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_command();
+        assert_eq!(app.mode, InputMode::Command);
+        for c in "syncx".chars() {
+            app.command_push(c);
+        }
+        app.command_pop();
+        assert_eq!(app.command, "sync");
+        assert_eq!(app.take_command(), "sync");
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.command.is_empty());
+
+        app.open_command();
+        app.command_push('q');
+        app.cancel_command();
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.command.is_empty());
+    }
+
+    #[test]
+    fn generator_opens_with_defaults_and_regenerates() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_generator();
+        assert_eq!(app.mode, InputMode::Generate);
+        let first = app
+            .generator
+            .as_ref()
+            .map(|g| g.password().to_owned())
+            .expect("generator open");
+        assert_eq!(first.chars().count(), 20, "default length is 20");
+
+        app.regenerate();
+        let second = app
+            .generator
+            .as_ref()
+            .map(|g| g.password().to_owned())
+            .expect("generator still open");
+        // 62^20 keyspace — a collision here means the RNG is broken.
+        assert_ne!(first, second, "regenerate must draw a fresh password");
+
+        app.close_generator();
+        assert!(app.generator.is_none());
+        assert_eq!(app.mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn generator_length_adjusts_and_clamps() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_generator();
+        app.gen_adjust_length(1);
+        assert_eq!(app.generator.as_ref().map(|g| g.opts.length), Some(21));
+        assert_eq!(
+            app.generator.as_ref().map(|g| g.password().chars().count()),
+            Some(21)
+        );
+        app.gen_adjust_length(-1000);
+        assert_eq!(
+            app.generator.as_ref().map(|g| g.opts.length),
+            Some(GEN_MIN_LEN),
+            "length clamps at the floor"
+        );
+        app.gen_adjust_length(1000);
+        assert_eq!(
+            app.generator.as_ref().map(|g| g.opts.length),
+            Some(GEN_MAX_LEN),
+            "length clamps at the ceiling"
+        );
+    }
+
+    #[test]
+    fn generator_symbols_toggle_regenerates() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_generator();
+        assert_eq!(app.generator.as_ref().map(|g| g.opts.symbols), Some(false));
+        app.gen_toggle_symbols();
+        let g = app.generator.as_ref().expect("generator open");
+        assert!(g.opts.symbols);
+        assert!(
+            g.password().chars().any(|c| "!@#$%^&*".contains(c)),
+            "an enabled class is guaranteed at least one character"
+        );
+    }
+
+    #[test]
+    fn generator_debug_redacts_password() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_generator();
+        let g = app.generator.as_ref().expect("generator open");
+        let pw = g.password().to_owned();
+        let rendered = format!("{g:?}");
+        assert!(rendered.contains("GeneratorState"));
+        assert!(rendered.contains("<redacted>"));
+        assert!(
+            !rendered.contains(&pw),
+            "Debug leaked the generated password: {rendered}"
+        );
     }
 
     #[test]

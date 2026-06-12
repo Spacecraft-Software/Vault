@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use vault_ipc::proto::Field;
 use vault_theme::steelbore;
 
-use crate::app::{App, Focus, Screen};
+use crate::app::{App, Focus, InputMode, Screen};
 
 /// Mask shown for a secret field that has not been revealed.
 const MASK: &str = "••••••••";
@@ -58,6 +58,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     match &app.screen {
         Screen::Message { title, body: text } => render_message(frame, body, title, text),
         Screen::Browsing => render_browser(frame, app, body),
+    }
+    if app.mode == InputMode::Generate {
+        render_generator(frame, app, body);
     }
     render_status_bar(frame, app, status_bar);
 }
@@ -123,7 +126,13 @@ fn render_items(frame: &mut Frame, app: &App, area: Rect) {
             ListItem::new(format!("{marker}{}", e.name))
         })
         .collect();
-    let title = format!("Items ({})", filtered.len());
+    // Surface an active search query in the pane title so a narrowed list is
+    // never mistaken for the full vault.
+    let title = if app.search.is_empty() {
+        format!("Items ({})", filtered.len())
+    } else {
+        format!("Items ({}) /{}", filtered.len(), app.search)
+    };
     let list = List::new(items)
         .block(pane_block(&title, app.focus == Focus::Items))
         .highlight_style(highlight(app.focus == Focus::Items));
@@ -176,6 +185,59 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(para, area);
 }
 
+/// Centered password-generator overlay, drawn over the browser.
+fn render_generator(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(g) = app.generator.as_ref() else {
+        return;
+    };
+    let amber = hex(steelbore::MOLTEN_AMBER);
+    let info = hex(steelbore::INFO);
+    let classes = format!(
+        "Length {:<4} a-z {}  A-Z {}  0-9 {}  !@# {}",
+        g.opts.length,
+        onoff(g.opts.lowercase),
+        onoff(g.opts.uppercase),
+        onoff(g.opts.digits),
+        onoff(g.opts.symbols),
+    );
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            g.password().to_owned(),
+            Style::default().fg(amber).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(classes, Style::default().fg(info))),
+        Line::from(""),
+        Line::from(Span::styled(
+            "g regen · +/- length · s symbols · c copy · Esc close",
+            Style::default()
+                .fg(hex(steelbore::STEEL_BLUE))
+                .add_modifier(Modifier::ITALIC),
+        )),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(amber))
+        .title(" Generate ")
+        .style(Style::default().bg(hex(steelbore::VOID_NAVY)));
+    let overlay = centered(area, 70, 40);
+    // Clear whatever the browser drew underneath so the overlay reads cleanly.
+    frame.render_widget(ratatui::widgets::Clear, overlay);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(block),
+        overlay,
+    );
+}
+
+/// `on` / `off` chip text for a generator class toggle.
+const fn onoff(b: bool) -> &'static str {
+    if b { "on" } else { "off" }
+}
+
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let amber = hex(steelbore::MOLTEN_AMBER);
     let (state_txt, state_color) = app.status.as_ref().map_or_else(
@@ -214,9 +276,19 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             spans.push(Span::raw("  "));
         }
     }
-    // A transient toast (copy feedback / errors) takes the trailing slot;
-    // otherwise show the key hints.
-    if let Some(toast) = app.toast.as_deref() {
+    // The trailing slot shows, in priority order: the line being edited
+    // (search / command input), a transient toast, or the key hints.
+    let editing = match app.mode {
+        InputMode::Search => Some(format!("/{}\u{258c}", app.search)),
+        InputMode::Command => Some(format!(":{}\u{258c}", app.command)),
+        InputMode::Normal | InputMode::Generate => None,
+    };
+    if let Some(input) = editing {
+        spans.push(Span::styled(
+            input,
+            Style::default().fg(amber).add_modifier(Modifier::BOLD),
+        ));
+    } else if let Some(toast) = app.toast.as_deref() {
         spans.push(Span::styled(
             toast.to_owned(),
             Style::default()
@@ -225,7 +297,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         ));
     } else {
         spans.push(Span::styled(
-            "q quit  j/k move  Tab pane  Space reveal  c/u/o copy  r refresh  ·  / g : soon",
+            "q quit  j/k move  Tab pane  Space reveal  c/u/o copy  / search  g generate  : cmd  r refresh",
             Style::default().fg(hex(steelbore::STEEL_BLUE)),
         ));
     }
@@ -397,5 +469,52 @@ mod tests {
             text.contains("copied password"),
             "toast missing from status bar:\n{text}"
         );
+    }
+
+    #[test]
+    fn search_query_renders_in_title_and_status_bar() {
+        let mut app = App::browsing(status(), vec![login_entry()]);
+        app.open_search();
+        for c in "git".chars() {
+            app.search_push(c);
+        }
+        let text = draw(&app);
+        assert!(
+            text.contains("Items (1) /git"),
+            "query missing from items title:\n{text}"
+        );
+        assert!(
+            text.contains("/git\u{258c}"),
+            "live query missing from status bar:\n{text}"
+        );
+    }
+
+    #[test]
+    fn command_line_renders_in_status_bar() {
+        let mut app = App::browsing(status(), vec![login_entry()]);
+        app.open_command();
+        for c in "sync".chars() {
+            app.command_push(c);
+        }
+        let text = draw(&app);
+        assert!(
+            text.contains(":sync\u{258c}"),
+            "command line missing from status bar:\n{text}"
+        );
+    }
+
+    #[test]
+    fn generator_overlay_renders_password_and_options() {
+        let mut app = App::browsing(status(), vec![login_entry()]);
+        app.open_generator();
+        let pw = app
+            .generator
+            .as_ref()
+            .map(|g| g.password().to_owned())
+            .expect("generator open");
+        let text = draw(&app);
+        assert!(text.contains("Generate"), "overlay title missing:\n{text}");
+        assert!(text.contains(&pw), "generated password missing:\n{text}");
+        assert!(text.contains("Length 20"), "options line missing:\n{text}");
     }
 }
