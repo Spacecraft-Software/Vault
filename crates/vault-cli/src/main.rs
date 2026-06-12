@@ -2,15 +2,18 @@
 
 //! Vault CLI — `vault` binary entry point.
 //!
-//! M3 surface: `status`, `unlock`, `lock`, `sync`, `list`, `get`, `stop-agent`.
 //! Every subcommand opens a fresh UDS connection to the agent, sends one
-//! CBOR-framed request, and prints the response. The CLI never touches the
-//! master key directly — it is only relayed to the agent during `unlock`.
+//! CBOR-framed request, and prints the response. When the socket is dead the
+//! CLI auto-starts `vault-agent` first (PRD §7.3; disable with
+//! `--no-auto-spawn`). The CLI never touches the master key directly — it is
+//! only relayed to the agent during `unlock`.
 
 #![forbid(unsafe_code)]
 
+mod spawn;
+
 use std::io::{self, BufRead, IsTerminal, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use tokio::net::UnixStream;
@@ -57,8 +60,33 @@ struct Cli {
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
 
+    /// Do not auto-start `vault-agent` when the socket is dead.
+    #[arg(long, global = true)]
+    no_auto_spawn: bool,
+
     #[command(subcommand)]
     cmd: Option<Cmd>,
+}
+
+/// Resolved agent endpoint: where the socket lives and whether a dead socket
+/// should auto-start `vault-agent` (PRD §7.3).
+#[derive(Clone, Copy, Debug)]
+struct Endpoint<'a> {
+    /// Socket path the agent is (or will be) bound to.
+    socket: &'a Path,
+    /// Start the agent when nothing is accepting on `socket`.
+    auto_spawn: bool,
+}
+
+impl Endpoint<'_> {
+    /// The same endpoint with auto-spawn off — `stop-agent` must never start
+    /// an agent just to stop it.
+    const fn no_spawn(self) -> Self {
+        Self {
+            auto_spawn: false,
+            ..self
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -262,7 +290,11 @@ async fn main() -> std::process::ExitCode {
         eprintln!("vault: missing subcommand. Try `vault --help`.");
         return std::process::ExitCode::from(2);
     };
-    match run(cmd, &socket).await {
+    let ep = Endpoint {
+        socket: &socket,
+        auto_spawn: !cli.no_auto_spawn,
+    };
+    match run(cmd, ep).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(code) => std::process::ExitCode::from(code),
     }
@@ -282,18 +314,18 @@ fn resolve_socket(cli: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     default_socket_path().ok_or_else(|| anyhow::anyhow!("no XDG_RUNTIME_DIR / TMPDIR available"))
 }
 
-async fn run(cmd: Cmd, socket: &std::path::Path) -> Result<(), u8> {
+async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
     match cmd {
-        Cmd::Status { json } => cmd_status(socket, json).await,
+        Cmd::Status { json } => cmd_status(ep, json).await,
         Cmd::Unlock {
             server,
             email,
             json,
-        } => cmd_unlock(socket, server, email, json).await,
-        Cmd::Lock { json } => cmd_ack(socket, Request::Lock, "locked", json).await,
-        Cmd::Sync { json } => cmd_sync(socket, json).await,
-        Cmd::List { json } => cmd_list(socket, json).await,
-        Cmd::Get { name, field, json } => cmd_get(socket, name, field.into(), json).await,
+        } => cmd_unlock(ep, server, email, json).await,
+        Cmd::Lock { json } => cmd_ack(ep, Request::Lock, "locked", json).await,
+        Cmd::Sync { json } => cmd_sync(ep, json).await,
+        Cmd::List { json } => cmd_list(ep, json).await,
+        Cmd::Get { name, field, json } => cmd_get(ep, name, field.into(), json).await,
         Cmd::Add {
             name,
             kind,
@@ -305,7 +337,7 @@ async fn run(cmd: Cmd, socket: &std::path::Path) -> Result<(), u8> {
             json,
         } => {
             cmd_add(
-                socket,
+                ep,
                 AddArgs {
                     name,
                     kind,
@@ -331,7 +363,7 @@ async fn run(cmd: Cmd, socket: &std::path::Path) -> Result<(), u8> {
             json,
         } => {
             cmd_edit(
-                socket,
+                ep,
                 EditArgs {
                     selector,
                     name,
@@ -350,8 +382,8 @@ async fn run(cmd: Cmd, socket: &std::path::Path) -> Result<(), u8> {
             selector,
             force,
             json,
-        } => cmd_remove(socket, selector, force, json).await,
-        Cmd::StopAgent { json } => cmd_ack(socket, Request::Quit, "stopped", json).await,
+        } => cmd_remove(ep, selector, force, json).await,
+        Cmd::StopAgent { json } => cmd_ack(ep.no_spawn(), Request::Quit, "stopped", json).await,
         Cmd::Generate {
             length,
             symbols,
@@ -404,8 +436,8 @@ fn cmd_generate(
     Ok(())
 }
 
-async fn cmd_status(socket: &std::path::Path, json: bool) -> Result<(), u8> {
-    let mut stream = connect(socket).await?;
+async fn cmd_status(ep: Endpoint<'_>, json: bool) -> Result<(), u8> {
+    let mut stream = connect(ep).await?;
     let resp = exchange(&mut stream, &Request::Status).await?;
     match resp {
         Response::Status(s) => {
@@ -418,7 +450,7 @@ async fn cmd_status(socket: &std::path::Path, json: bool) -> Result<(), u8> {
 }
 
 async fn cmd_unlock(
-    socket: &std::path::Path,
+    ep: Endpoint<'_>,
     server: Option<String>,
     email: Option<String>,
     json: bool,
@@ -426,7 +458,7 @@ async fn cmd_unlock(
     let server = resolve_arg(server, "VAULT_SERVER", "--server")?;
     let email = resolve_arg(email, "VAULT_EMAIL", "--email")?;
     let password = read_password()?;
-    let mut stream = connect(socket).await?;
+    let mut stream = connect(ep).await?;
     let req = Request::Unlock {
         server,
         email,
@@ -450,13 +482,8 @@ async fn cmd_unlock(
 /// Fire-and-acknowledge: send `req`, expect a bare `Ok`, and (only under
 /// `--json`) print a `{ "<action>": true }` envelope. Human mode stays silent
 /// on success, matching the pre-`--json` behaviour of `lock`/`stop-agent`.
-async fn cmd_ack(
-    socket: &std::path::Path,
-    req: Request,
-    action: &str,
-    json: bool,
-) -> Result<(), u8> {
-    let mut stream = connect(socket).await?;
+async fn cmd_ack(ep: Endpoint<'_>, req: Request, action: &str, json: bool) -> Result<(), u8> {
+    let mut stream = connect(ep).await?;
     let resp = exchange(&mut stream, &req).await?;
     match resp {
         Response::Ok => {
@@ -468,8 +495,8 @@ async fn cmd_ack(
     }
 }
 
-async fn cmd_sync(socket: &std::path::Path, json: bool) -> Result<(), u8> {
-    let mut stream = connect(socket).await?;
+async fn cmd_sync(ep: Endpoint<'_>, json: bool) -> Result<(), u8> {
+    let mut stream = connect(ep).await?;
     let resp = exchange(&mut stream, &Request::Sync).await?;
     match resp {
         // The agent answers a successful re-sync with a fresh Status snapshot.
@@ -495,8 +522,8 @@ async fn cmd_sync(socket: &std::path::Path, json: bool) -> Result<(), u8> {
     }
 }
 
-async fn cmd_list(socket: &std::path::Path, json: bool) -> Result<(), u8> {
-    let mut stream = connect(socket).await?;
+async fn cmd_list(ep: Endpoint<'_>, json: bool) -> Result<(), u8> {
+    let mut stream = connect(ep).await?;
     let resp = exchange(&mut stream, &Request::List).await?;
     match resp {
         Response::List(items) => {
@@ -508,12 +535,7 @@ async fn cmd_list(socket: &std::path::Path, json: bool) -> Result<(), u8> {
     }
 }
 
-async fn cmd_remove(
-    socket: &std::path::Path,
-    selector: String,
-    force: bool,
-    json: bool,
-) -> Result<(), u8> {
+async fn cmd_remove(ep: Endpoint<'_>, selector: String, force: bool, json: bool) -> Result<(), u8> {
     if !force {
         if !io::stdin().is_terminal() {
             eprintln!("vault: refusing to remove without --force when stdin is not a TTY");
@@ -535,7 +557,7 @@ async fn cmd_remove(
             return Err(2);
         }
     }
-    let mut stream = connect(socket).await?;
+    let mut stream = connect(ep).await?;
     let req = Request::Remove { selector };
     let resp = exchange(&mut stream, &req).await?;
     match resp {
@@ -560,7 +582,7 @@ struct AddArgs {
     json: bool,
 }
 
-async fn cmd_add(socket: &std::path::Path, args: AddArgs) -> Result<(), u8> {
+async fn cmd_add(ep: Endpoint<'_>, args: AddArgs) -> Result<(), u8> {
     let cipher_type = args.kind.cipher_type();
     let is_login = matches!(args.kind, KindArg::Login);
 
@@ -595,7 +617,7 @@ async fn cmd_add(socket: &std::path::Path, args: AddArgs) -> Result<(), u8> {
         totp: None,
         uri,
     };
-    let mut stream = connect(socket).await?;
+    let mut stream = connect(ep).await?;
     let resp = exchange(&mut stream, &req).await?;
     match resp {
         Response::Saved(s) => {
@@ -620,7 +642,7 @@ struct EditArgs {
     json: bool,
 }
 
-async fn cmd_edit(socket: &std::path::Path, args: EditArgs) -> Result<(), u8> {
+async fn cmd_edit(ep: Endpoint<'_>, args: EditArgs) -> Result<(), u8> {
     let mut generated: Option<Zeroizing<String>> = None;
     let password = if let Some(len) = args.generate {
         let pw = generate_pw(len)?;
@@ -647,7 +669,7 @@ async fn cmd_edit(socket: &std::path::Path, args: EditArgs) -> Result<(), u8> {
         totp: None,
         uri: args.uri,
     };
-    let mut stream = connect(socket).await?;
+    let mut stream = connect(ep).await?;
     let resp = exchange(&mut stream, &req).await?;
     match resp {
         Response::Saved(s) => {
@@ -701,13 +723,8 @@ fn read_secret(prompt: &str) -> Result<Option<Vec<u8>>, u8> {
     Ok(Some(bytes))
 }
 
-async fn cmd_get(
-    socket: &std::path::Path,
-    name: String,
-    field: Field,
-    json: bool,
-) -> Result<(), u8> {
-    let mut stream = connect(socket).await?;
+async fn cmd_get(ep: Endpoint<'_>, name: String, field: Field, json: bool) -> Result<(), u8> {
+    let mut stream = connect(ep).await?;
     let req = Request::Get {
         // The CLI selects by name only; id-targeting is a TUI affordance.
         id: None,
@@ -725,14 +742,26 @@ async fn cmd_get(
     }
 }
 
-async fn connect(socket: &std::path::Path) -> Result<UnixStream, u8> {
-    match UnixStream::connect(socket).await {
+async fn connect(ep: Endpoint<'_>) -> Result<UnixStream, u8> {
+    match UnixStream::connect(ep.socket).await {
         Ok(s) => Ok(s),
+        // A missing or stale socket means no live agent — start one (PRD
+        // §7.3) unless the user opted out.
+        Err(e) if ep.auto_spawn && spawn::socket_is_dead(&e) => {
+            spawn::spawn_and_connect(ep.socket).await.map_err(|msg| {
+                eprintln!(
+                    "vault: {msg}\n\
+                     vault: could not connect to agent at {}: {e}",
+                    ep.socket.display()
+                );
+                3
+            })
+        }
         Err(e) => {
             eprintln!(
                 "vault: could not connect to agent at {}: {e}\n\
-                 hint: start the daemon with `vault-agent &` first.",
-                socket.display()
+                 hint: start the daemon with `vault-agent &` if it is not running.",
+                ep.socket.display()
             );
             Err(3)
         }
