@@ -16,6 +16,10 @@ readme.workspace = true
 [[bin]]
 name = "vault"
 path = "src/main.rs"
+# The headless gate (PRD G6): `cargo install --path crates/vault-cli
+# --no-default-features --features cli` is the supported server install;
+# with no features at all there is nothing to build.
+required-features = ["cli"]
 
 [lints]
 workspace = true
@@ -23,6 +27,9 @@ workspace = true
 [features]
 default = ["cli"]
 cli = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [dependencies]
 anyhow = { workspace = true }

@@ -10,6 +10,35 @@ range may break in any release.
 
 ### Added
 
+- **M5 (slice 5) — CLI agent auto-spawn + headless feature gate.** The two
+  non-TUI M5 items, closing out the milestone.
+  - **Auto-spawn (PRD §7.3).** Any `vault` verb now starts `vault-agent`
+    itself when the socket is dead (missing file or stale, connection-refused
+    socket — other errors, e.g. permissions, still surface directly). The CLI
+    locates the agent via `$VAULT_AGENT_BIN`, then a `vault-agent` sibling of
+    the `vault` binary, then `$PATH`; starts it in its own process group
+    (`--socket` passed explicitly, stdin/stdout null, stderr appended to
+    `agent.log` beside the socket in the 0700 runtime dir); and poll-connects
+    until the agent accepts (2 s deadline, 25 ms interval), reusing the first
+    accepted stream. Opt out per-call with the global `--no-auto-spawn`;
+    `stop-agent` never spawns (stopping a dead agent shouldn't start one).
+    New `vault-cli/src/spawn.rs` module; the old "start the daemon with
+    `vault-agent &`" hint remains only on the no-spawn paths.
+  - **Headless gate (PRD G6).** The `vault` bin now carries
+    `required-features = ["cli"]`, making the documented server install
+    literal: `cargo install --path crates/vault-cli --no-default-features
+    --features cli` (pair with `cargo install --path crates/vault-agent
+    --no-default-features` to drop the clipboard's X11/Wayland tree). A new
+    CI `headless` job builds both combos so the gate can't rot. README's
+    Status and headless sections updated to match reality.
+  - Known limitation: two racing CLI invocations can each spawn an agent; the
+    second bind steals the socket path (the listener removes a pre-existing
+    socket file) and the first agent is orphaned until its idle lock. Benign
+    for the single-user posture; a flock around spawn is a possible follow-up.
+  - Tests: binary-resolution precedence (override > sibling > `$PATH`,
+    empty override ignored), dead-socket error classification, and poll-loop
+    behavior (picks up a late listener; gives up at the deadline).
+
 - **M5 (slice 4) — TUI mutations: `a` add, `e` edit, `d` delete (confirm).**
   PRD §7.2's Mutation row goes live, completing the daily-driver loop (browse
   → search → reveal/copy → mutate) without falling back to the CLI. Pure TUI

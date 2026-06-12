@@ -47,6 +47,19 @@ jobs:
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace --all-targets
 
+  headless:
+    name: headless build (no TUI / clipboard deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # PRD G6: the server install path must keep building — the CLI behind
+      # its `cli` feature gate, and the agent without the clipboard's
+      # X11/Wayland dependency tree.
+      - run: cargo build -p vault-cli --no-default-features --features cli
+      - run: cargo build -p vault-agent --no-default-features
+
   version-gate:
     name: vault --version emits §13.2 attribution
     runs-on: ubuntu-latest

@@ -4,9 +4,10 @@
 //!
 //! Run with no arguments to bind the default socket
 //! (`$XDG_RUNTIME_DIR/vault/agent.sock`). Override with `--socket PATH` or
-//! `VAULT_AGENT_SOCK`. The agent does NOT yet daemonise itself — start it
-//! with `nohup vault-agent &` or run it under a systemd user unit. M5 adds
-//! auto-spawn from the CLI.
+//! `VAULT_AGENT_SOCK`. The agent does not daemonise itself: the normal start
+//! path is the CLI's auto-spawn — any `vault` verb starts it detached when
+//! the socket is dead, logging to `agent.log` beside the socket — and a
+//! systemd user unit works too.
 
 #![forbid(unsafe_code)]
 

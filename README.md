@@ -15,9 +15,14 @@ The full product requirements live in [`PRD.md`](./PRD.md).
 
 ## Status
 
-Pre-alpha — M0 scaffolding only. The `vault` binary builds and emits the
-Standard §13.2 attribution block via `--version`; nothing else is wired up
-yet. See [PRD §12](./PRD.md#12-milestones) for the roadmap (M0 → v0.1).
+Pre-alpha, M5. The read and write paths are wired end-to-end against a live
+agent: `status` / `unlock` / `lock` / `sync` / `list` / `get` / `add` /
+`edit` / `remove` / `generate` / `stop-agent` on the CLI (with `--json`
+everywhere), and a three-pane `vault-tui` with search, reveal/copy
+(agent-side clipboard, 30 s auto-clear), a generator overlay, a `:` command
+line, and add/edit/delete. The CLI auto-starts the agent when needed. See
+[PRD §12](./PRD.md#12-milestones) for the roadmap (M0 → v0.1) and
+[`CHANGELOG.md`](./CHANGELOG.md) for per-slice detail.
 
 ## Build
 
@@ -26,11 +31,18 @@ cargo build --release
 ./target/release/vault --version
 ```
 
-Headless install (no TUI dependencies) — once the feature gate lands in M5:
+Headless install (no TUI dependencies; the agent additionally drops the
+clipboard's X11/Wayland tree):
 
 ```sh
 cargo install --path crates/vault-cli --no-default-features --features cli
+cargo install --path crates/vault-agent --no-default-features
 ```
+
+The CLI auto-starts `vault-agent` when the socket is dead: it looks for a
+sibling of the `vault` binary, then `$PATH` (override with
+`$VAULT_AGENT_BIN`; opt out per-call with `--no-auto-spawn`). A spawned
+agent logs to `agent.log` beside the socket.
 
 ## Repository layout
 
