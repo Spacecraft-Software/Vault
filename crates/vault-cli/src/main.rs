@@ -543,7 +543,7 @@ struct Account {
 
 /// Resolve the account for `login` / `unlock`: an explicit flag or env var
 /// wins; otherwise the registered `[account]` profile supplies it. The
-/// device_id only ever comes from the profile. Errors (exit 2) when a field
+/// `device_id` only ever comes from the profile. Errors (exit 2) when a field
 /// can be found nowhere.
 fn resolve_account(server: Option<String>, email: Option<String>) -> Result<Account, u8> {
     let profile = load_config()?;
@@ -1198,6 +1198,7 @@ fn print_ack(action: &str, json: bool) {
 /// Verbose `login` success: who we're authenticated as plus the post-sync
 /// item count / timestamp from the agent's status snapshot.
 fn print_login_summary(email: &str, s: &Status, json: bool) {
+    use std::fmt::Write as _;
     if json {
         println!(
             "{}",
@@ -1212,10 +1213,10 @@ fn print_login_summary(email: &str, s: &Status, json: bool) {
     }
     let mut line = format!("logged in as {email}");
     if let Some(n) = s.items {
-        line.push_str(&format!(" · {n} items"));
+        let _ = write!(line, " · {n} items");
     }
     if let Some(ts) = s.last_sync.as_deref() {
-        line.push_str(&format!(" · synced {ts}"));
+        let _ = write!(line, " · synced {ts}");
     }
     println!("{line}");
 }
