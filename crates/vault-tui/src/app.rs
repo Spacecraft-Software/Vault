@@ -514,6 +514,10 @@ pub struct App {
     pub confirm_delete: Option<(String, String)>,
     /// Secret currently revealed in the detail pane, if any.
     pub revealed: Option<RevealedSecret>,
+    /// When a pending OSC52 fallback copy should be cleared from the terminal
+    /// clipboard. The TUI owns this timer (the agent can't — it has no
+    /// terminal); the run loop races it against input.
+    pub osc52_clear_at: Option<std::time::Instant>,
     /// Transient status-bar message (copy feedback / errors). Cleared on the
     /// next key press.
     pub toast: Option<String>,
@@ -541,6 +545,7 @@ impl App {
             form: None,
             confirm_delete: None,
             revealed: None,
+            osc52_clear_at: None,
             toast: None,
             should_quit: false,
         }
@@ -571,6 +576,7 @@ impl App {
             form: None,
             confirm_delete: None,
             revealed: None,
+            osc52_clear_at: None,
             toast: None,
             should_quit: false,
         }
@@ -1026,6 +1032,7 @@ mod tests {
             items: Some(3),
             last_sync: Some("2026-06-04T00:00:00Z".into()),
             agent_version: "0.0.1".into(),
+            clipboard_backend: None,
         }
     }
 

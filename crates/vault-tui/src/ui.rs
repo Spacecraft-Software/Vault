@@ -495,6 +495,7 @@ mod tests {
             items: Some(2),
             last_sync: Some("2026-06-04T00:00:00Z".into()),
             agent_version: "0.0.1".into(),
+            clipboard_backend: None,
         }
     }
 

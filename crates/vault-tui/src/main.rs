@@ -18,6 +18,7 @@
 
 mod app;
 mod client;
+mod osc52;
 mod ui;
 
 use std::io;
@@ -34,16 +35,17 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
-use vault_ipc::proto::{Field, Request, Response};
+use vault_ipc::proto::{Error as IpcError, Field, Request, Response};
 use vault_ipc::{default_socket_path, sanitize_socket_path};
 
 use app::{App, FormKind, FormSubmit, InputMode, RevealedSecret};
 
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Seconds the agent keeps a copied secret on the clipboard before wiping it.
-/// Mirrors the agent's own default and is surfaced in the copy toast so the
-/// user knows the window.
+/// Seconds before the TUI's own OSC52 fallback clear fires. Agent-side copies
+/// use the agent's configured default (`--clipboard-clear-secs`, reported back
+/// in `Response::Copied`); this constant only governs the terminal-clipboard
+/// path, where the TUI runs the timer itself.
 const COPY_CLEAR_SECS: u64 = 30;
 
 /// Standard §13.2 attribution block — surfaced via `--version` and `--help`.
@@ -139,11 +141,32 @@ async fn run(socket: &Path) -> anyhow::Result<()> {
         if state.should_quit {
             break;
         }
-        match rx.recv().await {
+        // When an OSC52 fallback copy is pending its timed clear, race the
+        // input channel against the deadline so the clear fires even while
+        // the user is idle.
+        let ev = if let Some(at) = state.osc52_clear_at {
+            tokio::select! {
+                ev = rx.recv() => ev,
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(at)) => {
+                    let _ = osc52::clear();
+                    state.osc52_clear_at = None;
+                    state.set_toast("clipboard cleared (OSC52)");
+                    continue;
+                }
+            }
+        } else {
+            rx.recv().await
+        };
+        match ev {
             Some(Event::Key(key)) => handle_key(&mut state, key, socket).await,
             Some(_) => {}  // resize / mouse / focus — redraw on next iteration
             None => break, // input thread gone
         }
+    }
+    // Quitting with an OSC52 clear still pending: sweep before the terminal
+    // is restored — mirrors the agent's own clear-on-shutdown.
+    if state.osc52_clear_at.is_some() {
+        let _ = osc52::clear();
     }
     Ok(())
 }
@@ -419,13 +442,19 @@ async fn copy_generated(state: &mut App, socket: &Path) {
     };
     let req = Request::CopyText {
         text,
-        clear_after_secs: Some(COPY_CLEAR_SECS),
+        clear_after_secs: None,
     };
     match client::request(socket, &req).await {
-        Ok(Response::Ok) => {
-            state.set_toast(format!(
-                "copied generated password · clears in {COPY_CLEAR_SECS}s"
-            ));
+        Ok(Response::Copied(c)) => {
+            state.set_toast(copied_toast("generated password", c.clear_after_secs));
+        }
+        // No agent clipboard — the password is already local, so hand it
+        // straight to the terminal.
+        Ok(Response::Error(IpcError::ClipboardUnavailable)) => {
+            let Some(pw) = state.generator.as_ref().map(|g| g.password().to_owned()) else {
+                return;
+            };
+            osc52_copy(state, &pw, "generated password");
         }
         Ok(Response::Error(e)) => state.set_toast(format!("copy failed: {e}")),
         Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
@@ -468,8 +497,11 @@ async fn toggle_reveal(state: &mut App, socket: &Path) {
 }
 
 /// Ask the agent to copy `field` of the selected item to the clipboard, with a
-/// timed auto-clear. The secret stays in the agent and never enters this
-/// process. No-op unless the item list is focused and a row is selected.
+/// timed auto-clear (the agent's configured default). The secret stays in the
+/// agent and never enters this process — except on the OSC52 fallback, where
+/// the agent has no clipboard and the TUI fetches the value to hand it to the
+/// terminal instead. No-op unless the item list is focused and a row is
+/// selected.
 async fn copy_field(state: &mut App, socket: &Path, field: Field, label: &str) {
     if !state.items_focused() {
         return;
@@ -478,18 +510,66 @@ async fn copy_field(state: &mut App, socket: &Path, field: Field, label: &str) {
         return;
     };
     let req = Request::Copy {
-        id: Some(sel.id),
-        name: sel.name,
+        id: Some(sel.id.clone()),
+        name: sel.name.clone(),
         field: Some(field),
-        clear_after_secs: Some(COPY_CLEAR_SECS),
+        clear_after_secs: None,
     };
     match client::request(socket, &req).await {
-        Ok(Response::Ok) => {
-            state.set_toast(format!("copied {label} · clears in {COPY_CLEAR_SECS}s"));
+        Ok(Response::Copied(c)) => state.set_toast(copied_toast(label, c.clear_after_secs)),
+        Ok(Response::Error(IpcError::ClipboardUnavailable)) => {
+            osc52_field_fallback(state, socket, &sel.id, &sel.name, field, label).await;
         }
         Ok(Response::Error(e)) => state.set_toast(format!("copy failed: {e}")),
         Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
         Err(e) => state.set_toast(e.to_string()),
+    }
+}
+
+/// Toast for a successful agent-side copy.
+fn copied_toast(label: &str, clear_after_secs: u64) -> String {
+    if clear_after_secs == 0 {
+        format!("copied {label} · auto-clear off")
+    } else {
+        format!("copied {label} · clears in {clear_after_secs}s")
+    }
+}
+
+/// OSC52 fallback for an item field: the agent has no clipboard, so fetch the
+/// value (id-targeted `Get`) and hand it to the terminal, scheduling the
+/// TUI-side timed clear.
+async fn osc52_field_fallback(
+    state: &mut App,
+    socket: &Path,
+    id: &str,
+    name: &str,
+    field: Field,
+    label: &str,
+) {
+    let req = Request::Get {
+        id: Some(id.to_owned()),
+        name: name.to_owned(),
+        field: Some(field),
+    };
+    match client::request(socket, &req).await {
+        Ok(Response::Item(item)) => osc52_copy(state, &item.value, label),
+        Ok(Response::Error(e)) => state.set_toast(format!("copy failed: {e}")),
+        Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
+        Err(e) => state.set_toast(e.to_string()),
+    }
+}
+
+/// Emit an OSC52 copy and arm the TUI-side timed clear.
+fn osc52_copy(state: &mut App, value: &str, label: &str) {
+    match osc52::copy(value) {
+        Ok(()) => {
+            state.osc52_clear_at =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(COPY_CLEAR_SECS));
+            state.set_toast(format!(
+                "copied {label} via OSC52 · clears in {COPY_CLEAR_SECS}s"
+            ));
+        }
+        Err(e) => state.set_toast(format!("OSC52 copy failed: {e}")),
     }
 }
 

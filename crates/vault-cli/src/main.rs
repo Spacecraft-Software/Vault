@@ -791,7 +791,10 @@ fn report_error(e: &IpcError) -> Result<(), u8> {
         IpcError::NoSuchItem(_) => 7,
         IpcError::NoSuchField { .. } => 8,
         IpcError::AmbiguousItem { .. } => 10,
-        IpcError::Network(_) | IpcError::Internal(_) | IpcError::Decrypt(_) => 9,
+        IpcError::Network(_)
+        | IpcError::Internal(_)
+        | IpcError::Decrypt(_)
+        | IpcError::ClipboardUnavailable => 9,
     };
     eprintln!("vault: {e}");
     Err(code)
@@ -869,6 +872,7 @@ fn print_status(s: &Status, json: bool) {
             "items": s.items,
             "last_sync": s.last_sync,
             "agent_version": s.agent_version,
+            "clipboard_backend": s.clipboard_backend,
         });
         println!("{v}");
         return;
@@ -891,6 +895,9 @@ fn print_status(s: &Status, json: bool) {
         println!("last sync:     {v}");
     }
     println!("agent version: {}", s.agent_version);
+    if let Some(v) = s.clipboard_backend.as_deref() {
+        println!("clipboard:     {v}");
+    }
 }
 
 fn print_list(items: &[ListEntry], json: bool) {

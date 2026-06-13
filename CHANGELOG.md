@@ -10,6 +10,44 @@ range may break in any release.
 
 ### Added
 
+- **Clipboard hardening — clear-on-lock sweep, backend trait, OSC52 fallback,
+  configurable interval.** Closes the secret-can-outlive-the-agent limitation
+  tracked since the M5 copy slice, and delivers PRD §7.5 in its
+  architecturally honest shape.
+  - **Clear-on-lock sweep.** The agent remembers the last value it copied
+    (`Zeroizing`, dropped once a timer clears it) and `lock()` now sweeps it
+    off the clipboard — covering `vault lock`, `Quit`/`stop-agent`,
+    idle-lock, and the new **SIGTERM handler** (PRD §7.3: the agent locks,
+    sweeps, removes its socket, and exits on SIGTERM). The sweep keeps the
+    only-if-still-ours rule: a newer copy by the user is never clobbered.
+  - **Backend trait (PRD §7.5).** New `vault-agent/src/clipboard.rs` defines
+    a `Backend` trait (`arboard` is the one system implementation; detection
+    unchanged) so tests inject a fake clipboard — the sweep logic is now
+    exercised end-to-end on headless CI — and a config-selected backend can
+    slot in later. `Status` gains a serde-defaulted `clipboard_backend`
+    field (`"arboard"` / absent) so clients can see what they're talking to;
+    old-agent frames still decode (regression-tested).
+  - **OSC52 fallback (client-side, by design).** OSC52 copies by escaping to
+    the user's *terminal* — something the detached agent fundamentally cannot
+    do, so PRD §7.5's SSH/tmux fallback lives in the TUI: when the agent
+    declines with the new typed `Error::ClipboardUnavailable`, the TUI
+    fetches the value (id-targeted `Get` — the one path where the secret
+    crosses the local UDS, same as `vault get`) and emits the OSC52 sequence
+    itself, with tmux DCS-passthrough wrapping when `$TMUX` is set
+    (`set-clipboard on` required). The TUI runs its own 30 s timed clear
+    (OSC52 `!` payload) while it lives, and sweeps on quit; a generated
+    password falls back without any `Get` since it's already local.
+  - **Configurable interval.** `vault-agent --clipboard-clear-secs N` (then
+    `$VAULT_CLIPBOARD_CLEAR_SECS`, then 30; `0` disables) sets the agent's
+    default; `Request::Copy`/`CopyText` still override per call. The new
+    `Response::Copied { clear_after_secs }` reports the *effective* window,
+    so the TUI's toast now shows the agent's real interval instead of a
+    hardcoded 30. The future `vault config` file maps onto the same knob.
+  - Tests: fake-backend units for sweep-on-lock, never-clobber-newer-copy,
+    and timer/sweep marker interplay; `Status` backend-name reporting;
+    interval-resolution precedence; OSC52 sequence/clear/tmux-wrapping
+    units; and the old-agent `Status` decode regression.
+
 - **M5 (slice 5) — CLI agent auto-spawn + headless feature gate.** The two
   non-TUI M5 items, closing out the milestone.
   - **Auto-spawn (PRD §7.3).** Any `vault` verb now starts `vault-agent`
