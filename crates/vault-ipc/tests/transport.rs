@@ -23,6 +23,7 @@ async fn unlock_round_trip_preserves_password_bytes() {
         server: "https://vault.example.org".into(),
         email: "user@example.org".into(),
         password: pw.clone(),
+        device_id: Some("11111111-2222-3333-4444-555555555555".into()),
     };
     write_frame(&mut a, &req).await.unwrap();
     let got: Request = read_frame(&mut b).await.unwrap();
@@ -31,11 +32,44 @@ async fn unlock_round_trip_preserves_password_bytes() {
             server,
             email,
             password,
+            device_id,
         } => {
             assert_eq!(server, "https://vault.example.org");
             assert_eq!(email, "user@example.org");
             assert_eq!(password, pw);
+            assert_eq!(
+                device_id.as_deref(),
+                Some("11111111-2222-3333-4444-555555555555")
+            );
         }
+        other => panic!("expected Unlock, got {other:?}"),
+    }
+}
+
+/// An `Unlock` frame from a client built before `device_id` existed must still
+/// decode — the field is serde-defaulted, the protocol's forward-compat rule
+/// for added optional fields.
+#[tokio::test]
+async fn unlock_without_device_id_field_still_decodes() {
+    #[derive(serde::Serialize)]
+    #[serde(tag = "op", content = "args", rename_all = "snake_case")]
+    enum OldRequest {
+        Unlock {
+            server: String,
+            email: String,
+            password: Vec<u8>,
+        },
+    }
+    let (mut a, mut b) = duplex(64 * 1024);
+    let old = OldRequest::Unlock {
+        server: "https://vault.example.org".into(),
+        email: "user@example.org".into(),
+        password: b"pw".to_vec(),
+    };
+    write_frame(&mut a, &old).await.unwrap();
+    let got: Request = read_frame(&mut b).await.unwrap();
+    match got {
+        Request::Unlock { device_id, .. } => assert_eq!(device_id, None, "absent → None"),
         other => panic!("expected Unlock, got {other:?}"),
     }
 }

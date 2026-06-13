@@ -44,6 +44,20 @@ sibling of the `vault` binary, then `$PATH` (override with
 `$VAULT_AGENT_BIN`; opt out per-call with `--no-auto-spawn`). A spawned
 agent logs to `agent.log` beside the socket.
 
+## Getting started
+
+```sh
+vault register --server https://vault.example.org --email me@example.org
+vault login      # master password → authenticate + confirm a sync
+vault list       # browse; server/email come from the registered profile
+```
+
+`register` records the account (server, email, and a stable device id) in the
+config file; `login` and `unlock` then resolve those from the profile, so their
+`--server`/`--email` flags (and `$VAULT_SERVER`/`$VAULT_EMAIL`) are optional
+once registered. `login` is the first-time "authenticate and verify sync";
+`unlock` is the routine "hand the agent my key again".
+
 ## Configuration
 
 Persistent settings live at `$XDG_CONFIG_HOME/vault/config.toml`, managed with

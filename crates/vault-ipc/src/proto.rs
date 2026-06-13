@@ -33,6 +33,12 @@ pub enum Request {
         email: String,
         /// Master password, sent only on the local UDS.
         password: Vec<u8>,
+        /// Stable device identifier (uuid) from the registered account
+        /// profile, if any. The agent uses it as the Bitwarden
+        /// `deviceIdentifier` instead of minting a fresh one each unlock.
+        /// Serde-defaulted so frames from older clients still decode.
+        #[serde(default)]
+        device_id: Option<String>,
     },
 
     /// Drop all in-memory keys and access tokens. Idempotent.

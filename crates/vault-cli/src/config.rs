@@ -33,6 +33,11 @@ pub struct Config {
     pub clipboard: ClipboardCfg,
     /// Agent settings.
     pub agent: AgentCfg,
+    /// Registered account profile (written by `vault register`). Skipped from
+    /// the file until something is set, so an unregistered config carries no
+    /// empty `[account]` table.
+    #[serde(skip_serializing_if = "AccountCfg::is_empty")]
+    pub account: AccountCfg,
 }
 
 /// `[clipboard]` table.
@@ -51,6 +56,31 @@ pub struct AgentCfg {
     pub idle_lock_secs: Option<u64>,
 }
 
+/// `[account]` table — the registered account, written by `vault register`
+/// and read by `login`/`unlock` to default `server`/`email`/`device_id`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AccountCfg {
+    /// Server origin (`https://vault.example.org`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// Account email (lower-cased on write).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Stable per-account device identifier (uuid v4), minted once at register
+    /// time so the agent stops registering a fresh device each unlock.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+}
+
+impl AccountCfg {
+    /// Whether no account field is set (drives skipping the table on write).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.server.is_none() && self.email.is_none() && self.device_id.is_none()
+    }
+}
+
 impl Config {
     /// Effective `clipboard.clear_secs`, if set.
     #[must_use]
@@ -62,6 +92,23 @@ impl Config {
     #[must_use]
     pub const fn idle_lock_secs(&self) -> Option<u64> {
         self.agent.idle_lock_secs
+    }
+
+    /// The registered account profile.
+    #[must_use]
+    pub const fn account(&self) -> &AccountCfg {
+        &self.account
+    }
+
+    /// Record the account `server` + `email`, lower-casing the email and
+    /// minting a `device_id` once (a pre-existing id is preserved so the
+    /// account keeps its identity across re-registration).
+    pub fn set_account(&mut self, server: &str, email: &str) {
+        self.account.server = Some(server.to_owned());
+        self.account.email = Some(email.trim().to_lowercase());
+        if self.account.device_id.is_none() {
+            self.account.device_id = Some(uuid::Uuid::new_v4().to_string());
+        }
     }
 
     /// Current value of `key` as a display string, `None` when unset. Errors
@@ -260,6 +307,39 @@ mod tests {
         let text = toml::to_string_pretty(&c).expect("serialise");
         let back: Config = toml::from_str(&text).expect("parse");
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn set_account_lowercases_email_and_mints_device_id_once() {
+        let mut c = Config::default();
+        c.set_account("https://vault.example.org", "Me@Example.org");
+        assert_eq!(
+            c.account().server.as_deref(),
+            Some("https://vault.example.org")
+        );
+        assert_eq!(c.account().email.as_deref(), Some("me@example.org"));
+        let id = c.account().device_id.clone().expect("device_id minted");
+        // Re-registering a different server/email keeps the same device id.
+        c.set_account("https://other.example.org", "Other@Example.org");
+        assert_eq!(c.account().device_id.as_deref(), Some(id.as_str()));
+        assert_eq!(c.account().email.as_deref(), Some("other@example.org"));
+    }
+
+    #[test]
+    fn account_round_trips_and_absent_until_set() {
+        // A config with nothing set must not emit an [account] table.
+        let empty = toml::to_string_pretty(&Config::default()).expect("serialise");
+        assert!(
+            !empty.contains("[account]"),
+            "empty config grew [account]:\n{empty}"
+        );
+
+        let mut c = Config::default();
+        c.set_account("https://vault.example.org", "me@example.org");
+        let text = toml::to_string_pretty(&c).expect("serialise");
+        assert!(text.contains("[account]"), "account table missing:\n{text}");
+        let back: Config = toml::from_str(&text).expect("parse");
+        assert_eq!(back.account(), c.account());
     }
 
     #[test]
