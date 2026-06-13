@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+mod config;
 mod spawn;
 
 use std::io::{self, BufRead, IsTerminal, Read, Write};
@@ -213,6 +214,20 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Get, set, or unset a persistent configuration key.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+    /// Wipe the local item cache from disk (and lock a running agent).
+    Purge {
+        /// Skip the confirmation prompt. Required when stdin is not a TTY.
+        #[arg(long, short = 'f')]
+        force: bool,
+        /// Emit JSON instead of a human-readable confirmation.
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate a password locally (no agent or server interaction).
     Generate {
         /// Password length in characters.
@@ -231,6 +246,36 @@ enum Cmd {
         #[arg(long)]
         no_digits: bool,
         /// Emit JSON instead of the raw password.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigAction {
+    /// Print one key's value, or every known key when no key is given.
+    Get {
+        /// Dotted key, e.g. `clipboard.clear_secs`. Omit to list all.
+        key: Option<String>,
+        /// Emit JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set a key to a value (validated against the key's type).
+    Set {
+        /// Dotted key, e.g. `clipboard.clear_secs`.
+        key: String,
+        /// New value.
+        value: String,
+        /// Emit JSON instead of staying silent on success.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Clear a key, reverting it to the consumer's default.
+    Unset {
+        /// Dotted key, e.g. `clipboard.clear_secs`.
+        key: String,
+        /// Emit JSON instead of staying silent on success.
         #[arg(long)]
         json: bool,
     },
@@ -384,6 +429,8 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
             json,
         } => cmd_remove(ep, selector, force, json).await,
         Cmd::StopAgent { json } => cmd_ack(ep.no_spawn(), Request::Quit, "stopped", json).await,
+        Cmd::Config { action } => cmd_config(action),
+        Cmd::Purge { force, json } => cmd_purge(ep, force, json).await,
         Cmd::Generate {
             length,
             symbols,
@@ -568,6 +615,146 @@ async fn cmd_remove(ep: Endpoint<'_>, selector: String, force: bool, json: bool)
         Response::Error(e) => report_error(&e),
         other => unexpected(&other),
     }
+}
+
+/// `vault config get/set/unset`. No agent or server interaction — pure local
+/// file I/O against `$XDG_CONFIG_HOME/vault/config.toml`.
+fn cmd_config(action: ConfigAction) -> Result<(), u8> {
+    match action {
+        ConfigAction::Get { key, json } => cmd_config_get(key.as_deref(), json),
+        ConfigAction::Set { key, value, json } => {
+            let mut cfg = load_config()?;
+            if let Err(msg) = cfg.set(&key, &value) {
+                eprintln!("vault: {msg}");
+                return Err(2);
+            }
+            save_config(&cfg)?;
+            if json {
+                println!("{}", serde_json::json!({ "set": key, "value": value }));
+            }
+            Ok(())
+        }
+        ConfigAction::Unset { key, json } => {
+            let mut cfg = load_config()?;
+            if let Err(msg) = cfg.unset(&key) {
+                eprintln!("vault: {msg}");
+                return Err(2);
+            }
+            save_config(&cfg)?;
+            if json {
+                println!("{}", serde_json::json!({ "unset": key }));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn cmd_config_get(key: Option<&str>, json: bool) -> Result<(), u8> {
+    let cfg = load_config()?;
+    if let Some(key) = key {
+        let value = match cfg.get(key) {
+            Ok(v) => v,
+            Err(bad) => {
+                eprintln!("vault: unknown config key '{bad}'");
+                return Err(2);
+            }
+        };
+        if json {
+            println!("{}", serde_json::json!({ "key": key, "value": value }));
+        } else if let Some(v) = value {
+            println!("{v}");
+        } else {
+            println!("(unset)");
+        }
+        return Ok(());
+    }
+    // No key: list every known key with its effective value.
+    if json {
+        let map: serde_json::Map<String, serde_json::Value> = config::KNOWN_KEYS
+            .iter()
+            .map(|k| {
+                let v = cfg.get(k).ok().flatten();
+                (
+                    (*k).to_owned(),
+                    v.map_or(serde_json::Value::Null, Into::into),
+                )
+            })
+            .collect();
+        println!("{}", serde_json::Value::Object(map));
+    } else {
+        for k in config::KNOWN_KEYS {
+            let v = cfg.get(k).ok().flatten();
+            println!("{k} = {}", v.as_deref().unwrap_or("(unset)"));
+        }
+    }
+    Ok(())
+}
+
+fn load_config() -> Result<config::Config, u8> {
+    config::load().map_err(|msg| {
+        eprintln!("vault: {msg}");
+        2
+    })
+}
+
+fn save_config(cfg: &config::Config) -> Result<(), u8> {
+    config::save(cfg).map(|_| ()).map_err(|msg| {
+        eprintln!("vault: {msg}");
+        2
+    })
+}
+
+/// `vault purge` — drop the agent's in-memory keys (best-effort, no spawn) and
+/// remove the on-disk item cache. Confirmation-gated like `remove`.
+async fn cmd_purge(ep: Endpoint<'_>, force: bool, json: bool) -> Result<(), u8> {
+    let Some(dir) = vault_store::default_data_dir() else {
+        eprintln!("vault: could not locate the data directory");
+        return Err(2);
+    };
+    if !force {
+        if !io::stdin().is_terminal() {
+            eprintln!("vault: refusing to purge without --force when stdin is not a TTY");
+            return Err(2);
+        }
+        let mut stderr = io::stderr();
+        let _ = write!(stderr, "Purge local cache at {}? [y/N]: ", dir.display());
+        let _ = stderr.flush();
+        let mut buf = String::new();
+        if io::stdin().lock().read_line(&mut buf).is_err() {
+            eprintln!("vault: failed to read confirmation");
+            return Err(2);
+        }
+        if !matches!(buf.trim(), "y" | "Y" | "yes") {
+            eprintln!("vault: aborted");
+            return Err(2);
+        }
+    }
+
+    // Best-effort: drop in-memory keys if an agent is already up. Connect
+    // directly (not via `connect`, which prints a start-the-daemon hint) so a
+    // down agent stays silent; never auto-spawn one just to lock it.
+    if let Ok(mut stream) = UnixStream::connect(ep.socket).await {
+        let _ = exchange(&mut stream, &Request::Lock).await;
+    }
+
+    // Removing the cache dir is the actual purge; an absent dir is success.
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!("vault: could not remove {}: {e}", dir.display());
+            return Err(9);
+        }
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "purged": true, "path": dir.display().to_string() })
+        );
+    } else {
+        println!("purged {}", dir.display());
+    }
+    Ok(())
 }
 
 /// Parsed `vault add` arguments (bundled to keep the handler signature small).

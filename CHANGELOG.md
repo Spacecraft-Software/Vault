@@ -10,6 +10,35 @@ range may break in any release.
 
 ### Added
 
+- **`vault config` + `vault purge` (PRD §7.1).** A persistent, typed config
+  file and the two remaining settings/maintenance verbs.
+  - **Config file** at `$XDG_CONFIG_HOME/vault/config.toml`, modeled as a
+    *known-key registry*: `vault config set <key> <value>` validates the key
+    and parses the value to its type (a typo or non-numeric value is rejected,
+    not silently kept), `vault config unset <key>` clears it, and
+    `vault config get` with no key lists every known key with its effective
+    value (`--json` on all three). Writes are atomic (tempfile + rename).
+    Recognised keys this release: `clipboard.clear_secs` and
+    `agent.idle_lock_secs` (both `u64`, `0` disables).
+  - **Wired into auto-spawn.** When the CLI starts the agent, it sources those
+    two knobs from the config and passes them as launch flags — so a saved
+    `clipboard.clear_secs` finally has a persistent home instead of being
+    flag/env-only. On the auto-spawn path the config value populates the agent
+    flag (winning over `$VAULT_CLIPBOARD_CLEAR_SECS`); a manually launched
+    agent is unaffected, and a malformed config is reported and skipped rather
+    than blocking the spawn.
+  - **`vault purge`** drops a running agent's in-memory keys (best-effort
+    `Lock`, never auto-spawning) and removes the on-disk item cache
+    (`$XDG_DATA_HOME/vault`). Confirmation-gated like `remove` (`--force` to
+    skip; required when stdin isn't a TTY); an absent cache is success.
+  - CLI-only slice — no protocol, agent, or TUI changes; the agent still
+    receives knobs as the launch flags it already accepted. New `toml`
+    dependency (MIT/Apache, within the `deny.toml` allow-list).
+  - Tests: config registry units (set/get/unset round-trips, unknown-key and
+    bad-value rejection, `0` accepted, `KNOWN_KEYS` reachable by all three
+    ops, TOML serde round-trip) and a pure `agent_args` test for the
+    config→launch-flags mapping (both set / one set / none).
+
 - **Clipboard hardening — clear-on-lock sweep, backend trait, OSC52 fallback,
   configurable interval.** Closes the secret-can-outlive-the-agent limitation
   tracked since the M5 copy slice, and delivers PRD §7.5 in its

@@ -44,6 +44,23 @@ sibling of the `vault` binary, then `$PATH` (override with
 `$VAULT_AGENT_BIN`; opt out per-call with `--no-auto-spawn`). A spawned
 agent logs to `agent.log` beside the socket.
 
+## Configuration
+
+Persistent settings live at `$XDG_CONFIG_HOME/vault/config.toml`, managed with
+`vault config`:
+
+```sh
+vault config get                          # list every known key + value
+vault config set clipboard.clear_secs 45  # validated; writes config.toml
+vault config set agent.idle_lock_secs 600
+vault config unset clipboard.clear_secs
+```
+
+Recognised keys: `clipboard.clear_secs` (auto-clear window, `0` disables) and
+`agent.idle_lock_secs` (idle-lock timeout, `0` disables). When the CLI
+auto-starts the agent, these populate its launch flags. Wipe the on-disk item
+cache (and drop a running agent's keys) with `vault purge`.
+
 ## Repository layout
 
 ```

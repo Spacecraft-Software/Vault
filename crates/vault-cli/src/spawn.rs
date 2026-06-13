@@ -71,9 +71,20 @@ fn resolve_binary(overridden: Option<OsString>, sibling: Option<PathBuf>) -> Pat
 /// agent doesn't come up within the deadline.
 pub async fn spawn_and_connect(socket: &Path) -> Result<UnixStream, String> {
     let bin = agent_binary();
+    // Source the agent's tunable knobs from the user config. On this path the
+    // config-derived flags populate the agent's launch args, so a saved
+    // `clipboard.clear_secs` / `agent.idle_lock_secs` wins over the agent's own
+    // env/default precedence. A manually launched agent is unaffected. A
+    // malformed config shouldn't block bringing the agent up, so fall back to
+    // no extra args (the agent then keeps its defaults).
+    let extra = crate::config::load().map(|c| crate::config::agent_args(&c));
+    if let Err(msg) = &extra {
+        eprintln!("vault: ignoring config for auto-spawn: {msg}");
+    }
     let child = Command::new(&bin)
         .arg("--socket")
         .arg(socket)
+        .args(extra.unwrap_or_default())
         // Own process group: a Ctrl+C aimed at the CLI must not take the
         // freshly started daemon down with it.
         .process_group(0)
