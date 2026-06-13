@@ -51,12 +51,22 @@ pub struct AgentState {
     pub idle_lock_secs: u64,
     /// Set by `Request::Quit` to ask the accept loop to exit cleanly.
     pub shutdown_requested: bool,
-    /// Clipboard handle for `Request::Copy`. `None` when no backend is
+    /// Clipboard backend for `Request::Copy`. `None` when no backend is
     /// available (headless / init failed); copy requests then decline cleanly.
     /// The handle must outlive its writes — on X11 the owning process serves
     /// the selection — so it lives here for the agent's lifetime.
     #[cfg(feature = "clipboard")]
-    pub clipboard: Option<arboard::Clipboard>,
+    pub clipboard: Option<Box<dyn crate::clipboard::Backend>>,
+    /// The last value we placed on the clipboard, kept so `lock()` (and thus
+    /// `Quit`, idle-lock, and SIGTERM) can sweep a still-pending copy before
+    /// the timer task would have fired. Zeroised on drop.
+    #[cfg(feature = "clipboard")]
+    last_copied: Option<Zeroizing<String>>,
+    /// Seconds before an auto-clear fires when the client doesn't specify
+    /// (`--clipboard-clear-secs` / `$VAULT_CLIPBOARD_CLEAR_SECS`); `0`
+    /// disables the default auto-clear.
+    #[cfg(feature = "clipboard")]
+    pub clipboard_clear_secs: u64,
 }
 
 /// Plaintext field overlay for `add_cipher` / `edit_cipher`. Every field is
@@ -91,7 +101,13 @@ impl AgentState {
             idle_lock_secs,
             shutdown_requested: false,
             #[cfg(feature = "clipboard")]
-            clipboard: init_clipboard(),
+            clipboard: crate::clipboard::detect(),
+            #[cfg(feature = "clipboard")]
+            last_copied: None,
+            // 30 s follows common password-manager practice (and Vault PRD
+            // §7.2): long enough to paste, short enough to bound exposure.
+            #[cfg(feature = "clipboard")]
+            clipboard_clear_secs: 30,
         }
     }
 
@@ -112,9 +128,14 @@ impl AgentState {
         self.is_unlocked() && self.last_activity.elapsed().as_secs() >= self.idle_lock_secs
     }
 
-    /// Zero out the vault keys and access token.
+    /// Zero out the vault keys and access token — and sweep any still-pending
+    /// clipboard copy, so a secret can't outlive the session that copied it.
+    /// Covers `Lock`, `Quit`, idle-lock, and the SIGTERM path, which all
+    /// funnel through here.
     pub fn lock(&mut self) {
         self.vault = None;
+        #[cfg(feature = "clipboard")]
+        self.clipboard_sweep();
     }
 
     /// Build a `Status` snapshot for `Request::Status` / `Request::Ping`.
@@ -136,6 +157,10 @@ impl AgentState {
             items,
             last_sync,
             agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+            #[cfg(feature = "clipboard")]
+            clipboard_backend: self.clipboard_backend_name(),
+            #[cfg(not(feature = "clipboard"))]
+            clipboard_backend: None,
         }
     }
 
@@ -426,16 +451,19 @@ impl AgentState {
         })
     }
 
-    /// Place `value` on the system clipboard. Errors if no backend is available
-    /// so the caller can report it instead of silently dropping the copy.
+    /// Place `value` on the system clipboard and remember it for the
+    /// shutdown/lock sweep. Errors with the typed `ClipboardUnavailable` when
+    /// no backend exists, so clients can fall back (OSC52) instead of
+    /// string-matching.
     #[cfg(feature = "clipboard")]
     pub fn clipboard_set(&mut self, value: &str) -> Result<(), IpcError> {
         let cb = self
             .clipboard
             .as_mut()
-            .ok_or_else(|| IpcError::Internal("clipboard backend unavailable".to_owned()))?;
-        cb.set_text(value.to_owned())
-            .map_err(|e| IpcError::Internal(format!("clipboard write failed: {e}")))
+            .ok_or(IpcError::ClipboardUnavailable)?;
+        cb.set_text(value)?;
+        self.last_copied = Some(Zeroizing::new(value.to_owned()));
+        Ok(())
     }
 
     /// Clear the clipboard if it still holds `written` (the value we copied), or
@@ -446,26 +474,31 @@ impl AgentState {
         let Some(cb) = self.clipboard.as_mut() else {
             return;
         };
-        let current = cb.get_text().ok();
-        if should_clear_clipboard(current.as_deref(), written) {
+        if should_clear_clipboard(cb.get_text().as_deref(), written) {
             // Best-effort: a failed clear is no worse than the timer never
             // having run; the next copy will overwrite regardless.
-            let _ = cb.clear();
+            cb.clear();
+        }
+        // The sweep only needs to remember a copy newer timers still own.
+        if self.last_copied.as_deref().map(String::as_str) == Some(written) {
+            self.last_copied = None;
         }
     }
-}
 
-/// Build a clipboard handle, degrading to `None` (with a warning) when no
-/// backend is reachable — e.g. a headless server with no display. Copy requests
-/// then return a clean error rather than the agent failing to start.
-#[cfg(feature = "clipboard")]
-fn init_clipboard() -> Option<arboard::Clipboard> {
-    match arboard::Clipboard::new() {
-        Ok(cb) => Some(cb),
-        Err(e) => {
-            eprintln!("vault-agent: clipboard unavailable, copy will be declined: {e}");
-            None
+    /// Sweep a still-pending copy off the clipboard. Runs on `lock()` so a
+    /// copied secret never outlives the keys: the detached timer task dies
+    /// with the runtime on `Quit`/SIGTERM, and this closes that gap.
+    #[cfg(feature = "clipboard")]
+    pub fn clipboard_sweep(&mut self) {
+        if let Some(pending) = self.last_copied.take() {
+            self.clipboard_clear_if_ours(&pending);
         }
+    }
+
+    /// Name of the live clipboard backend, for `Status`.
+    #[cfg(feature = "clipboard")]
+    fn clipboard_backend_name(&self) -> Option<String> {
+        self.clipboard.as_ref().map(|cb| cb.name().to_owned())
     }
 }
 
@@ -671,13 +704,102 @@ mod tests {
     #[cfg(feature = "clipboard")]
     #[test]
     fn clipboard_set_errors_when_no_backend() {
-        // Headless / failed init: copy must decline cleanly, not panic.
+        // Headless / failed init: copy must decline with the *typed* error so
+        // clients can route to their OSC52 fallback.
         let mut s = AgentState::new(900);
         s.clipboard = None;
         assert!(matches!(
             s.clipboard_set("secret"),
-            Err(IpcError::Internal(_))
+            Err(IpcError::ClipboardUnavailable)
         ));
+    }
+
+    /// In-memory clipboard standing in for the system one, so the sweep and
+    /// clear logic is testable on a headless CI box.
+    #[cfg(feature = "clipboard")]
+    struct FakeClipboard {
+        content: Option<String>,
+    }
+
+    #[cfg(feature = "clipboard")]
+    impl crate::clipboard::Backend for FakeClipboard {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn set_text(&mut self, value: &str) -> Result<(), IpcError> {
+            self.content = Some(value.to_owned());
+            Ok(())
+        }
+        fn get_text(&mut self) -> Option<String> {
+            self.content.clone()
+        }
+        fn clear(&mut self) {
+            self.content = None;
+        }
+    }
+
+    #[cfg(feature = "clipboard")]
+    fn state_with_fake_clipboard() -> AgentState {
+        let mut s = AgentState::new(900);
+        s.clipboard = Some(Box::new(FakeClipboard { content: None }));
+        s
+    }
+
+    #[cfg(feature = "clipboard")]
+    fn fake_content(s: &mut AgentState) -> Option<String> {
+        s.clipboard.as_mut().and_then(|cb| cb.get_text())
+    }
+
+    #[cfg(feature = "clipboard")]
+    #[test]
+    fn lock_sweeps_a_pending_copy() {
+        let mut s = state_with_fake_clipboard();
+        s.clipboard_set("hunter2").expect("set");
+        assert_eq!(fake_content(&mut s).as_deref(), Some("hunter2"));
+        s.lock();
+        assert_eq!(fake_content(&mut s), None, "lock must sweep our copy");
+    }
+
+    #[cfg(feature = "clipboard")]
+    #[test]
+    fn sweep_leaves_foreign_clipboard_content_alone() {
+        let mut s = state_with_fake_clipboard();
+        s.clipboard_set("hunter2").expect("set");
+        // The user copied something else after us.
+        if let Some(cb) = s.clipboard.as_mut() {
+            cb.set_text("user-data").expect("set");
+        }
+        s.lock();
+        assert_eq!(
+            fake_content(&mut s).as_deref(),
+            Some("user-data"),
+            "sweep must never clobber a newer copy"
+        );
+    }
+
+    #[cfg(feature = "clipboard")]
+    #[test]
+    fn timer_clear_drops_the_sweep_marker() {
+        let mut s = state_with_fake_clipboard();
+        s.clipboard_set("hunter2").expect("set");
+        // The timed clear fires (what schedule_clipboard_clear's task does).
+        s.clipboard_clear_if_ours("hunter2");
+        assert_eq!(fake_content(&mut s), None);
+        // A later sweep has nothing left to do — and must not panic.
+        s.clipboard_sweep();
+        s.lock();
+    }
+
+    #[cfg(feature = "clipboard")]
+    #[test]
+    fn status_reports_backend_name() {
+        let mut s = state_with_fake_clipboard();
+        assert_eq!(
+            s.status_snapshot().clipboard_backend.as_deref(),
+            Some("fake")
+        );
+        s.clipboard = None;
+        assert_eq!(s.status_snapshot().clipboard_backend, None);
     }
 
     #[test]

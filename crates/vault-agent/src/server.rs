@@ -155,20 +155,21 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
                 }
                 Err(e) => Err(e),
             };
+            let secs = clear_after_secs.unwrap_or(s.clipboard_clear_secs);
             s.touch();
             drop(s);
             match outcome {
                 Ok(value) => {
-                    schedule_clipboard_clear(state.clone(), value, clear_after_secs);
-                    Response::Ok
+                    schedule_clipboard_clear(state.clone(), value, secs);
+                    Response::Copied(vault_ipc::proto::Copied {
+                        clear_after_secs: secs,
+                    })
                 }
                 Err(e) => Response::Error(e),
             }
         }
         #[cfg(not(feature = "clipboard"))]
-        Request::Copy { .. } => Response::Error(vault_ipc::proto::Error::Internal(
-            "clipboard support not compiled in".to_owned(),
-        )),
+        Request::Copy { .. } => Response::Error(vault_ipc::proto::Error::ClipboardUnavailable),
         #[cfg(feature = "clipboard")]
         Request::CopyText {
             text,
@@ -192,20 +193,21 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
             } else {
                 Err(vault_ipc::proto::Error::Locked)
             };
+            let secs = clear_after_secs.unwrap_or(s.clipboard_clear_secs);
             s.touch();
             drop(s);
             match outcome {
                 Ok(value) => {
-                    schedule_clipboard_clear(state.clone(), value, clear_after_secs);
-                    Response::Ok
+                    schedule_clipboard_clear(state.clone(), value, secs);
+                    Response::Copied(vault_ipc::proto::Copied {
+                        clear_after_secs: secs,
+                    })
                 }
                 Err(e) => Response::Error(e),
             }
         }
         #[cfg(not(feature = "clipboard"))]
-        Request::CopyText { .. } => Response::Error(vault_ipc::proto::Error::Internal(
-            "clipboard support not compiled in".to_owned(),
-        )),
+        Request::CopyText { .. } => Response::Error(vault_ipc::proto::Error::ClipboardUnavailable),
         Request::Remove { selector } => {
             // Hold the agent mutex across the network call. Vault is
             // single-user / single-agent, so request concurrency is low and
@@ -284,26 +286,18 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
     }
 }
 
-/// Default seconds before the agent wipes a copied secret from the clipboard.
-///
-/// 30 s follows common password-manager practice (and Vault PRD §7.2): long
-/// enough to paste, short enough to bound exposure. `Request::Copy` overrides
-/// per call; config-driven tuning lands in a later slice.
-#[cfg(feature = "clipboard")]
-const DEFAULT_CLIPBOARD_CLEAR_SECS: u64 = 30;
-
-/// Spawn a one-shot task that wipes the clipboard after `clear_after_secs` (or
-/// the default), but only if it still holds the value we copied. `Some(0)`
-/// disables the auto-clear. The task carries the secret so the clear survives
-/// the requesting client quitting.
+/// Spawn a one-shot task that wipes the clipboard after `secs` (the effective
+/// interval — the caller already applied the agent default), but only if it
+/// still holds the value we copied. `0` disables the auto-clear. The task
+/// carries the secret so the clear survives the requesting client quitting;
+/// if the *agent* goes down first, `AgentState::lock`'s sweep covers it.
 #[cfg(feature = "clipboard")]
 fn schedule_clipboard_clear(
     state: Arc<Mutex<AgentState>>,
     value: zeroize::Zeroizing<String>,
-    clear_after_secs: Option<u64>,
+    secs: u64,
 ) {
     use tokio::time::{Duration, sleep};
-    let secs = clear_after_secs.unwrap_or(DEFAULT_CLIPBOARD_CLEAR_SECS);
     if secs == 0 {
         return;
     }

@@ -173,8 +173,19 @@ pub enum Response {
     Removed(Removed),
     /// `Add` / `Edit` result — cipher was created or updated on the server.
     Saved(Saved),
+    /// `Copy` / `CopyText` result — the value is on the agent's clipboard.
+    Copied(Copied),
     /// Recoverable error — operation declined or failed.
     Error(Error),
+}
+
+/// Wire shape for `Response::Copied`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Copied {
+    /// Seconds until the agent's auto-clear fires for this copy — the
+    /// *effective* value after the agent applied its configured default.
+    /// `0` means auto-clear is disabled for this copy.
+    pub clear_after_secs: u64,
 }
 
 /// Wire shape for `Response::Removed`.
@@ -211,6 +222,12 @@ pub struct Status {
     pub last_sync: Option<String>,
     /// Agent's `CARGO_PKG_VERSION`.
     pub agent_version: String,
+    /// Name of the live clipboard backend (`"arboard"`), or `None` when the
+    /// agent has no clipboard (headless build / no display). Lets clients
+    /// decide up front whether `Copy` will work or an OSC52 fallback is
+    /// needed. Defaulted so snapshots from older agents still decode.
+    #[serde(default)]
+    pub clipboard_backend: Option<String>,
 }
 
 /// Wire shape for `Response::List`.
@@ -316,6 +333,11 @@ pub enum Error {
     /// Decryption of an item field failed (typically MAC mismatch).
     #[error("decrypt failed: {0}")]
     Decrypt(String),
+    /// The agent has no clipboard backend (headless build or no display).
+    /// Typed so clients can fall back — e.g. the TUI's OSC52 path — instead
+    /// of string-matching an internal error.
+    #[error("no clipboard backend available")]
+    ClipboardUnavailable,
     /// Any other internal error — message is for the operator, not for parsing.
     #[error("internal: {0}")]
     Internal(String),

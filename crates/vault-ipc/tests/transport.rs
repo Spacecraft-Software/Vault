@@ -112,6 +112,7 @@ async fn status_round_trip_preserves_optionals() {
         items: Some(42),
         last_sync: Some("2026-06-01T00:00:00Z".into()),
         agent_version: "0.0.1".into(),
+        clipboard_backend: Some("arboard".into()),
     };
     write_frame(&mut a, &Response::Status(s.clone()))
         .await
@@ -122,6 +123,49 @@ async fn status_round_trip_preserves_optionals() {
             assert!(got.unlocked);
             assert_eq!(got.items, Some(42));
             assert_eq!(got.agent_version, "0.0.1");
+            assert_eq!(got.clipboard_backend.as_deref(), Some("arboard"));
+        }
+        other => panic!("expected Status, got {other:?}"),
+    }
+}
+
+/// A `Status` frame from an agent built before `clipboard_backend` existed
+/// must still decode — the field is serde-defaulted, which is the protocol's
+/// stated forward-compat strategy for added optional fields.
+#[tokio::test]
+async fn status_without_clipboard_backend_field_still_decodes() {
+    // Hand-build the CBOR an old agent would send: the externally-tagged
+    // Status response whose struct lacks the new field entirely.
+    #[derive(serde::Serialize)]
+    struct OldStatus {
+        unlocked: bool,
+        server: Option<String>,
+        email: Option<String>,
+        items: Option<usize>,
+        last_sync: Option<String>,
+        agent_version: String,
+    }
+    #[derive(serde::Serialize)]
+    #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+    enum OldResponse {
+        Status(OldStatus),
+    }
+
+    let (mut a, mut b) = duplex(8 * 1024);
+    let old = OldResponse::Status(OldStatus {
+        unlocked: false,
+        server: None,
+        email: None,
+        items: None,
+        last_sync: None,
+        agent_version: "0.0.0".into(),
+    });
+    write_frame(&mut a, &old).await.unwrap();
+    let got: Response = read_frame(&mut b).await.unwrap();
+    match got {
+        Response::Status(got) => {
+            assert_eq!(got.clipboard_backend, None, "defaults when absent");
+            assert_eq!(got.agent_version, "0.0.0");
         }
         other => panic!("expected Status, got {other:?}"),
     }
