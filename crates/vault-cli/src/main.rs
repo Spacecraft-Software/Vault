@@ -98,13 +98,40 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Derive the master key and hand it to the agent for the configured TTL.
-    Unlock {
+    /// Record the account (server + email) so later commands don't need the
+    /// flags. Writes the `[account]` profile; no network.
+    Register {
         /// Server origin, e.g. `https://vault.example.org`. Falls back to
         /// `$VAULT_SERVER`.
         #[arg(long)]
         server: Option<String>,
         /// Account email. Falls back to `$VAULT_EMAIL`.
+        #[arg(long)]
+        email: Option<String>,
+        /// Emit JSON instead of a human-readable confirmation.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Authenticate against the registered account and confirm a working sync.
+    /// First-time counterpart to `unlock`; resolves server/email from the
+    /// profile unless overridden.
+    Login {
+        /// Server origin override. Falls back to the profile, then `$VAULT_SERVER`.
+        #[arg(long)]
+        server: Option<String>,
+        /// Account email override. Falls back to the profile, then `$VAULT_EMAIL`.
+        #[arg(long)]
+        email: Option<String>,
+        /// Emit JSON instead of a human-readable summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Derive the master key and hand it to the agent for the configured TTL.
+    Unlock {
+        /// Server origin. Falls back to the registered profile, then `$VAULT_SERVER`.
+        #[arg(long)]
+        server: Option<String>,
+        /// Account email. Falls back to the registered profile, then `$VAULT_EMAIL`.
         #[arg(long)]
         email: Option<String>,
         /// Emit JSON instead of staying silent on success.
@@ -362,6 +389,16 @@ fn resolve_socket(cli: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
     match cmd {
         Cmd::Status { json } => cmd_status(ep, json).await,
+        Cmd::Register {
+            server,
+            email,
+            json,
+        } => cmd_register(server, email, json),
+        Cmd::Login {
+            server,
+            email,
+            json,
+        } => cmd_login(ep, server, email, json).await,
         Cmd::Unlock {
             server,
             email,
@@ -496,20 +533,128 @@ async fn cmd_status(ep: Endpoint<'_>, json: bool) -> Result<(), u8> {
     }
 }
 
+/// A resolved account: where to authenticate, as whom, and with which stable
+/// device id (from the profile, if registered).
+struct Account {
+    server: String,
+    email: String,
+    device_id: Option<String>,
+}
+
+/// Resolve the account for `login` / `unlock`: an explicit flag or env var
+/// wins; otherwise the registered `[account]` profile supplies it. The
+/// device_id only ever comes from the profile. Errors (exit 2) when a field
+/// can be found nowhere.
+fn resolve_account(server: Option<String>, email: Option<String>) -> Result<Account, u8> {
+    let profile = load_config()?;
+    let acct = profile.account();
+    let server = server
+        .or_else(|| std::env::var("VAULT_SERVER").ok())
+        .or_else(|| acct.server.clone())
+        .ok_or_else(|| {
+            eprintln!(
+                "vault: no server — pass --server, set $VAULT_SERVER, or run `vault register`"
+            );
+            2u8
+        })?;
+    let email = email
+        .or_else(|| std::env::var("VAULT_EMAIL").ok())
+        .or_else(|| acct.email.clone())
+        .ok_or_else(|| {
+            eprintln!("vault: no email — pass --email, set $VAULT_EMAIL, or run `vault register`");
+            2u8
+        })?;
+    Ok(Account {
+        server,
+        email,
+        device_id: acct.device_id.clone(),
+    })
+}
+
+/// `vault register` — persist the account profile. No agent or network: a
+/// light `http(s)://` check is all the validation done here; a real server
+/// error surfaces on the first `login`.
+fn cmd_register(server: Option<String>, email: Option<String>, json: bool) -> Result<(), u8> {
+    let server = resolve_arg(server, "VAULT_SERVER", "--server")?;
+    let email = resolve_arg(email, "VAULT_EMAIL", "--email")?;
+    if !(server.starts_with("https://") || server.starts_with("http://")) {
+        eprintln!("vault: server must be an http(s):// origin, got '{server}'");
+        return Err(2);
+    }
+    let mut cfg = load_config()?;
+    cfg.set_account(&server, &email);
+    save_config(&cfg)?;
+    let acct = cfg.account();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "server": acct.server,
+                "email": acct.email,
+                "device_id": acct.device_id,
+            })
+        );
+    } else {
+        println!(
+            "registered {} at {}",
+            acct.email.as_deref().unwrap_or(""),
+            server
+        );
+    }
+    Ok(())
+}
+
+/// `vault login` — authenticate against the registered account and report a
+/// sync summary. Shares `Request::Unlock` with `unlock`; the difference is
+/// profile resolution and the verbose, status-backed success message.
+async fn cmd_login(
+    ep: Endpoint<'_>,
+    server: Option<String>,
+    email: Option<String>,
+    json: bool,
+) -> Result<(), u8> {
+    let acct = resolve_account(server, email)?;
+    let password = read_password()?;
+    let mut stream = connect(ep).await?;
+    let req = Request::Unlock {
+        server: acct.server,
+        email: acct.email.clone(),
+        password,
+        device_id: acct.device_id,
+    };
+    let resp = exchange(&mut stream, &req).await?;
+    drop(req);
+    match resp {
+        Response::Ok => {}
+        Response::Error(e) => return report_error(&e),
+        other => return unexpected(&other),
+    }
+    // Confirm with a status snapshot so login ends on a "working sync" note.
+    let mut stream = connect(ep).await?;
+    match exchange(&mut stream, &Request::Status).await? {
+        Response::Status(s) => {
+            print_login_summary(&acct.email, &s, json);
+            Ok(())
+        }
+        Response::Error(e) => report_error(&e),
+        other => unexpected(&other),
+    }
+}
+
 async fn cmd_unlock(
     ep: Endpoint<'_>,
     server: Option<String>,
     email: Option<String>,
     json: bool,
 ) -> Result<(), u8> {
-    let server = resolve_arg(server, "VAULT_SERVER", "--server")?;
-    let email = resolve_arg(email, "VAULT_EMAIL", "--email")?;
+    let acct = resolve_account(server, email)?;
     let password = read_password()?;
     let mut stream = connect(ep).await?;
     let req = Request::Unlock {
-        server,
-        email,
+        server: acct.server,
+        email: acct.email,
         password,
+        device_id: acct.device_id,
     };
     let resp = exchange(&mut stream, &req).await?;
     // Wipe our copy of the request — the password field is now zero'd inside
@@ -1048,6 +1193,31 @@ fn print_ack(action: &str, json: bool) {
         map.insert(action.to_owned(), serde_json::Value::Bool(true));
         println!("{}", serde_json::Value::Object(map));
     }
+}
+
+/// Verbose `login` success: who we're authenticated as plus the post-sync
+/// item count / timestamp from the agent's status snapshot.
+fn print_login_summary(email: &str, s: &Status, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "logged_in": true,
+                "email": email,
+                "items": s.items,
+                "last_sync": s.last_sync,
+            })
+        );
+        return;
+    }
+    let mut line = format!("logged in as {email}");
+    if let Some(n) = s.items {
+        line.push_str(&format!(" · {n} items"));
+    }
+    if let Some(ts) = s.last_sync.as_deref() {
+        line.push_str(&format!(" · synced {ts}"));
+    }
+    println!("{line}");
 }
 
 fn print_status(s: &Status, json: bool) {

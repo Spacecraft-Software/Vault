@@ -10,6 +10,34 @@ range may break in any release.
 
 ### Added
 
+- **`vault register` + `vault login` — account profile (PRD §7.1).** The last
+  two unimplemented verbs, as an account-profile flow (not the Bitwarden
+  personal API-key model, which stays a tracked follow-up).
+  - **`register`** records the account — server, email (lower-cased), and a
+    freshly minted stable `device_id` — into a new `[account]` table in
+    `config.toml`. No agent or network (a light `http(s)://` check is the only
+    validation; real errors surface at first `login`). Re-registering keeps the
+    existing `device_id`.
+  - **`login`** authenticates against the registered account (master password →
+    `Request::Unlock`) and ends on a sync summary
+    (`logged in as <email> · <n> items · synced <ts>`, or `--json`). It
+    auto-spawns the agent, so a cold `vault login` brings everything up.
+  - **`unlock`** now resolves `server`/`email` from the profile too, so its
+    flags (and `$VAULT_SERVER`/`$VAULT_EMAIL`) are optional once registered;
+    precedence is explicit flag/env → profile → error. `login` and `unlock`
+    share one `Request::Unlock` — the difference is resolution and `login`'s
+    verbose, status-backed success.
+  - **Stable device id.** `Request::Unlock` gains a serde-defaulted
+    `device_id: Option<String>`; the agent uses it as the Bitwarden
+    `deviceIdentifier` instead of minting a fresh UUID each unlock, so the
+    account stops accumulating a new device per session. Old `Unlock` frames
+    without the field still decode (regression-tested).
+  - Tests: `[account]` round-trip + "no empty table until set" + device-id
+    mint/preserve + email lower-casing; `resolve_account` precedence
+    (flag → profile → error); the `Unlock` device-id round-trip and
+    old-frame-decode regression. New `uuid` dep on `vault-cli` (already in the
+    workspace tree).
+
 - **`vault config` + `vault purge` (PRD §7.1).** A persistent, typed config
   file and the two remaining settings/maintenance verbs.
   - **Config file** at `$XDG_CONFIG_HOME/vault/config.toml`, modeled as a

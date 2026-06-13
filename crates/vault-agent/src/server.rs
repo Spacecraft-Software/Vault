@@ -80,11 +80,12 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
             server,
             email,
             password,
+            device_id,
         } => {
             // Wrap the password so it is zeroised on drop no matter how
             // perform_unlock fares; deref coercion hands it to the API as &[u8].
             let password = zeroize::Zeroizing::new(password);
-            let unlock_res = perform_unlock(&server, &email, &password).await;
+            let unlock_res = perform_unlock(&server, &email, &password, device_id.as_deref()).await;
             match unlock_res {
                 Ok(vault) => {
                     let mut s = state.lock().await;

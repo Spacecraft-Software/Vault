@@ -16,10 +16,20 @@ use crate::state::Vault;
 
 /// Lock-step the unlock sequence:
 /// prelogin → derive master key → login → decrypt user key → sync → assemble.
-pub async fn perform_unlock(server: &str, email: &str, password: &[u8]) -> Result<Vault, IpcError> {
+pub async fn perform_unlock(
+    server: &str,
+    email: &str,
+    password: &[u8],
+    device_id: Option<&str>,
+) -> Result<Vault, IpcError> {
     let email_lower = email.trim().to_lowercase();
     let urls = BaseUrls::self_hosted(server).map_err(|e| IpcError::Internal(e.to_string()))?;
-    let mut client = BitwardenClient::new(urls, Uuid::new_v4(), "vault-agent").map_err(api_err)?;
+    // Prefer the account profile's stable device id; fall back to a fresh one
+    // so an unregistered unlock still works (it just registers a new device).
+    let device = device_id
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .unwrap_or_else(Uuid::new_v4);
+    let mut client = BitwardenClient::new(urls, device, "vault-agent").map_err(api_err)?;
 
     let prelogin = client.prelogin(&email_lower).await.map_err(api_err)?;
     let params = prelogin.into_kdf_params().map_err(crypto_err)?;

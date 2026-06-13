@@ -2483,6 +2483,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "uuid",
  "vault-core",
  "vault-ipc",
  "vault-store",
