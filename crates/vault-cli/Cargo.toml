@@ -28,14 +28,16 @@ workspace = true
 default = ["cli"]
 cli = []
 
-[dev-dependencies]
-tempfile = { workspace = true }
-
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true }
+toml = { workspace = true }
 zeroize = { workspace = true }
 vault-core = { path = "../vault-core" }
 vault-ipc = { path = "../vault-ipc" }
+vault-store = { path = "../vault-store" }
