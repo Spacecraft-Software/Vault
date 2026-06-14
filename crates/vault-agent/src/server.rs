@@ -115,6 +115,7 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
             let mut s = state.lock().await;
             let res = s.pin_enroll(&pin);
             s.touch();
+            drop(s);
             match res {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error(e),

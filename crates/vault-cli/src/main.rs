@@ -784,7 +784,7 @@ async fn cmd_pin(ep: Endpoint<'_>, action: PinAction) -> Result<(), u8> {
             };
             match exchange(&mut stream, &req).await? {
                 Response::PinStatus(s) => {
-                    print_pin_status(&s, json);
+                    print_pin_status(s, json);
                     Ok(())
                 }
                 Response::Error(e) => report_error(&e),
@@ -795,7 +795,7 @@ async fn cmd_pin(ep: Endpoint<'_>, action: PinAction) -> Result<(), u8> {
 }
 
 /// Human / JSON rendering of `vault pin status`.
-fn print_pin_status(s: &PinStatus, json: bool) {
+fn print_pin_status(s: PinStatus, json: bool) {
     if json {
         println!(
             "{}",

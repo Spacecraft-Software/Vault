@@ -127,6 +127,10 @@ fn unlock_from_cache(
     vault_from_user_key(cache, server, email, user_enc, user_mac)
 }
 
+/// The unwrapped user key: the symmetric encryption and MAC halves, each
+/// zeroised on drop.
+pub type UserKey = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
+
 /// What went wrong recovering the user key from a protected key + secret.
 pub enum KeyRecover {
     /// The secret (master password / PIN) was wrong — MAC mismatch.
@@ -154,7 +158,7 @@ pub fn recover_user_key(
     email: &str,
     secret: &[u8],
     protected: &str,
-) -> Result<(Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>), KeyRecover> {
+) -> Result<UserKey, KeyRecover> {
     let email_lower = email.trim().to_lowercase();
     let kdf: KdfParams = cache
         .kdf

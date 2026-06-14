@@ -209,7 +209,7 @@ impl AgentState {
     ///
     /// [`IpcError::Locked`] if the agent isn't unlocked, [`IpcError::Internal`]
     /// if no cache exists yet or the write fails.
-    pub fn pin_enroll(&mut self, pin: &[u8]) -> Result<(), IpcError> {
+    pub fn pin_enroll(&self, pin: &[u8]) -> Result<(), IpcError> {
         let v = self.vault.as_ref().ok_or(IpcError::Locked)?;
         let pin_protected =
             crate::unlock::pin_protect_user_key(&v.email, v.kdf, &v.user_enc, &v.user_mac, pin)?;
