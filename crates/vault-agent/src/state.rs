@@ -33,12 +33,70 @@ pub struct Vault {
     pub ciphers: Vec<Cipher>,
     /// Folder id → decrypted folder name.
     pub folders: std::collections::HashMap<String, String>,
-    /// Authenticated REST client, reused by `Sync`/`Remove`/`Edit`/`Add` for
-    /// the lifetime of the unlock. Holds the access token internally; dropped
-    /// when the agent locks.
-    pub client: BitwardenClient,
+    /// Authenticated REST client for `Sync`/`Remove`/`Edit`/`Add`, holding the
+    /// access token. `Some` for an online unlock; `None` for a session unlocked
+    /// from the local cache (offline) — server ops then return `Error::Offline`.
+    pub client: Option<BitwardenClient>,
+    /// The account's protected user key (login token `Key`) and KDF params,
+    /// carried so a refresh (`resync`) can re-persist the cache without
+    /// re-reading the file, and so offline unlock can round-trip them.
+    pub protected_user_key: String,
+    /// Account KDF parameters (for offline master-key derivation / re-persist).
+    pub kdf: vault_core::kdf::KdfParams,
+    /// Stable device id this session unlocked with (persisted to the cache).
+    pub device_id: String,
     /// Most recent sync time (ISO 8601 UTC), or `None` if never synced.
     pub last_sync: Option<String>,
+}
+
+impl Vault {
+    /// Encrypt the `/sync` response under the user key and write the account's
+    /// cache (payload + protected user key + KDF + device id) to disk
+    /// atomically, so a later `unlock` can reconstruct this vault offline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IpcError::Internal`] if the data dir can't be located, the
+    /// `/sync` body can't be re-serialized, or the encrypted write fails.
+    pub fn persist_cache(&self, sync: &vault_api::SyncResponse) -> Result<(), IpcError> {
+        let dir = vault_store::default_data_dir()
+            .ok_or_else(|| IpcError::Internal("no data directory".to_owned()))?
+            .join(account_dir_name(&self.server, &self.email));
+        let sync_bytes = serde_json::to_vec(sync)
+            .map_err(|e| IpcError::Internal(format!("serialize sync: {e}")))?;
+        let mut cache =
+            vault_store::VaultCache::new(self.device_id.clone(), self.server.clone(), &self.email);
+        cache
+            .set_payload(&self.user_enc, &self.user_mac, &sync_bytes)
+            .map_err(|e| IpcError::Internal(format!("encrypt cache: {e}")))?;
+        cache.protected_user_key = Some(self.protected_user_key.clone());
+        cache.kdf = Some(self.kdf);
+        vault_store::save_to_dir(&dir, &cache)
+            .map_err(|e| IpcError::Internal(format!("write cache: {e}")))?;
+        Ok(())
+    }
+}
+
+/// Filesystem-safe per-account cache subdirectory, keyed by host + email so
+/// distinct accounts (and the same email on different servers) never collide.
+/// Any character outside `[A-Za-z0-9._-]` becomes `_`.
+#[must_use]
+pub fn account_dir_name(server: &str, email: &str) -> String {
+    let host = server
+        .strip_prefix("https://")
+        .or_else(|| server.strip_prefix("http://"))
+        .unwrap_or(server)
+        .trim_end_matches('/');
+    let raw = format!("{host}_{}", email.to_lowercase());
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Top-level agent state.
@@ -249,6 +307,8 @@ impl AgentState {
             .map_err(|e| IpcError::Decrypt(e.to_string()))?
             .unwrap_or_else(|| "<unnamed>".to_owned());
         v.client
+            .as_mut()
+            .ok_or(IpcError::Offline)?
             .delete_cipher(&id)
             .await
             .map_err(|e| IpcError::Network(e.to_string()))?;
@@ -302,6 +362,8 @@ impl AgentState {
         let mut cipher = Cipher::from_plain(&plain, &v.user_enc, &v.user_mac);
         let id = v
             .client
+            .as_mut()
+            .ok_or(IpcError::Offline)?
             .create_cipher(&cipher)
             .await
             .map_err(|e| IpcError::Network(e.to_string()))?;
@@ -341,6 +403,8 @@ impl AgentState {
 
         let id = cipher.id.clone();
         v.client
+            .as_mut()
+            .ok_or(IpcError::Offline)?
             .update_cipher(&id, &cipher)
             .await
             .map_err(|e| IpcError::Network(e.to_string()))?;
@@ -352,19 +416,20 @@ impl AgentState {
         Ok(Saved { id, name })
     }
 
-    /// Re-pull `/sync` over the existing authenticated session and replace the
-    /// in-memory ciphers, folder map, and `last_sync` stamp. Requires an
-    /// unlocked agent.
+    /// Re-pull `/sync` over the existing authenticated session, replace the
+    /// in-memory ciphers / folder map / `last_sync`, and re-persist the
+    /// encrypted cache so an offline unlock sees the refreshed vault. Requires
+    /// an online session (`Error::Offline` when unlocked from cache).
     ///
-    /// Like `unlock`, this refreshes only the in-memory vault — the on-disk
-    /// encrypted cache is not (yet) written by the agent. Known limitation: a
-    /// `sync` long after `unlock` can fail with a `401` once the access token
-    /// expires; there is no refresh-token flow in M4, so that surfaces as
-    /// `IpcError::Network` (shared with `add`/`edit`/`remove`).
+    /// Known limitation: a `sync` long after `unlock` can fail with a `401`
+    /// once the access token expires; there is no refresh-token flow yet, so
+    /// that surfaces as `IpcError::Network`.
     pub async fn resync(&mut self) -> Result<(), IpcError> {
         let v = self.vault.as_mut().ok_or(IpcError::Locked)?;
         let sync = v
             .client
+            .as_mut()
+            .ok_or(IpcError::Offline)?
             .sync()
             .await
             .map_err(|e| IpcError::Network(e.to_string()))?;
@@ -373,6 +438,11 @@ impl AgentState {
         v.ciphers = ciphers;
         v.folders = folders;
         v.last_sync = crate::unlock::now_iso();
+        // Refresh the on-disk cache; a write failure shouldn't fail the sync
+        // (the in-memory vault is already updated), so it's best-effort.
+        if let Err(e) = v.persist_cache(&sync) {
+            eprintln!("vault-agent: cache persist after sync failed: {e}");
+        }
         Ok(())
     }
 
@@ -1013,8 +1083,54 @@ mod tests {
             user_mac: Zeroizing::new([0u8; 32]),
             ciphers: Vec::new(),
             folders: std::collections::HashMap::new(),
-            client,
+            client: Some(client),
+            protected_user_key: String::new(),
+            kdf: vault_core::kdf::KdfParams {
+                kind: vault_core::kdf::KdfType::Pbkdf2Sha256,
+                iterations: 1,
+                memory_kib: None,
+                parallelism: None,
+            },
+            device_id: "00000000-0000-0000-0000-000000000000".into(),
             last_sync: None,
         }
+    }
+
+    /// A vault unlocked from cache (offline) — no token; server ops must
+    /// decline. Used to assert the `Error::Offline` gating.
+    fn offline_vault() -> Vault {
+        let mut v = stub_vault();
+        v.client = None;
+        v
+    }
+
+    #[test]
+    fn offline_session_declines_server_ops() {
+        let mut s = AgentState::new(900);
+        s.vault = Some(offline_vault());
+        // resync needs the network session → Offline.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("rt");
+        let err = rt.block_on(s.resync()).unwrap_err();
+        assert!(matches!(err, IpcError::Offline), "got {err:?}");
+        // A read path still works (no ciphers, but not an error).
+        assert!(s.list_entries().is_ok());
+    }
+
+    #[test]
+    fn account_dir_name_is_filesystem_safe_and_distinct() {
+        let a = account_dir_name("https://vault.example.org", "Me@Example.org");
+        // host kept; email lower-cased; '@' sanitized to '_'.
+        assert_eq!(a, "vault.example.org_me_example.org");
+        // Different server, same email → different dir.
+        let b = account_dir_name("https://other.example.org/", "me@example.org");
+        assert_ne!(a, b);
+        // Anything weird is sanitized to '_'.
+        let c = account_dir_name("https://h/x?y", "a/b c");
+        assert!(
+            !c.contains('/') && !c.contains(' ') && !c.contains('?'),
+            "{c}"
+        );
     }
 }

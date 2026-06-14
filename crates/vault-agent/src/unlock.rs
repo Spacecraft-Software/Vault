@@ -9,14 +9,40 @@ use zeroize::Zeroizing;
 
 use vault_api::{BaseUrls, BitwardenClient, SyncResponse};
 use vault_core::cipher::{Cipher, decrypt_user_key};
-use vault_core::kdf::{derive_master_key, stretch_master_key};
+use vault_core::kdf::{KdfParams, derive_master_key, stretch_master_key};
 use vault_ipc::proto::Error as IpcError;
+use vault_store::VaultCache;
 
-use crate::state::Vault;
+use crate::state::{Vault, account_dir_name};
 
-/// Lock-step the unlock sequence:
-/// prelogin → derive master key → login → decrypt user key → sync → assemble.
+/// Unlock the agent: try an online login, and if the network is unreachable
+/// fall back to the encrypted local cache (offline session, no token).
+///
+/// Only a connectivity failure (`IpcError::Network`) triggers the cache
+/// fallback; a bad password or 2FA requirement propagates as-is. An offline
+/// session has `client = None`, so server ops return `IpcError::Offline`.
 pub async fn perform_unlock(
+    server: &str,
+    email: &str,
+    password: &[u8],
+    device_id: Option<&str>,
+) -> Result<Vault, IpcError> {
+    match online_unlock(server, email, password, device_id).await {
+        Ok(vault) => Ok(vault),
+        Err(IpcError::Network(net)) => {
+            // Network down — recover from cache if we have one for this account.
+            load_cache(server, email).map_or_else(
+                || Err(IpcError::Network(net)),
+                |cache| unlock_from_cache(&cache, server, email, password),
+            )
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Full online unlock: prelogin → derive master key → login → decrypt user key
+/// → sync → assemble, then persist the encrypted cache for offline use.
+async fn online_unlock(
     server: &str,
     email: &str,
     password: &[u8],
@@ -61,9 +87,68 @@ pub async fn perform_unlock(
     let sync = client.sync().await.map_err(api_err)?;
     let (ciphers, folders) = ciphers_and_folders(&sync, &user_enc, &user_mac);
 
-    // `client` holds the access token internally (`login_password` stashed
-    // it). Hand the client itself to the vault so subsequent Sync / Remove
-    // / Edit / Add reuse the same authenticated session.
+    // `client` holds the access token internally (`login_password` stashed it).
+    // Hand it to the vault so Sync / Remove / Edit / Add reuse the session.
+    let vault = Vault {
+        server: server.to_owned(),
+        email: email_lower,
+        user_enc,
+        user_mac,
+        ciphers,
+        folders,
+        client: Some(client),
+        protected_user_key: encrypted_user_key.to_owned(),
+        kdf: params,
+        device_id: device.to_string(),
+        last_sync: now_iso(),
+    };
+    // Persist for offline unlock; a write failure must not fail a good unlock.
+    if let Err(e) = vault.persist_cache(&sync) {
+        eprintln!("vault-agent: cache persist after unlock failed: {e}");
+    }
+    Ok(vault)
+}
+
+/// Offline unlock from the encrypted local cache — no network. Derives the
+/// master key from the cached KDF params, decrypts the protected user key (the
+/// `EncString` MAC check is the wrong-password detector), then loads ciphers
+/// from the cached `/sync` payload. The session has no token (`client = None`).
+fn unlock_from_cache(
+    cache: &VaultCache,
+    server: &str,
+    email: &str,
+    password: &[u8],
+) -> Result<Vault, IpcError> {
+    let email_lower = email.trim().to_lowercase();
+    let kdf: KdfParams = cache
+        .kdf
+        .ok_or_else(|| IpcError::Internal("cached account has no KDF params".to_owned()))?;
+    let protected = cache
+        .protected_user_key
+        .as_deref()
+        .ok_or_else(|| IpcError::Internal("cached account has no protected user key".to_owned()))?;
+
+    let master = Zeroizing::new(
+        derive_master_key(password, email_lower.as_bytes(), kdf).map_err(crypto_err)?,
+    );
+    let (stretch_enc, stretch_mac) = stretch_master_key(&master).map_err(crypto_err)?;
+    let stretch_enc = Zeroizing::new(stretch_enc);
+    let stretch_mac = Zeroizing::new(stretch_mac);
+
+    // A decrypt failure here is overwhelmingly a wrong password (MAC mismatch);
+    // surface it as such rather than a generic internal error.
+    let (user_enc_arr, user_mac_arr) = decrypt_user_key(protected, &stretch_enc, &stretch_mac)
+        .map_err(|_| IpcError::BadPassword)?;
+    let user_enc = Zeroizing::new(user_enc_arr);
+    let user_mac = Zeroizing::new(user_mac_arr);
+
+    let payload = cache
+        .load_payload(&user_enc, &user_mac)
+        .map_err(|e| IpcError::Internal(format!("decrypt cached vault: {e}")))?;
+    let sync: SyncResponse = serde_json::from_slice(&payload)
+        .map_err(|e| IpcError::Internal(format!("parse cached vault: {e}")))?;
+    let (ciphers, folders) = ciphers_and_folders(&sync, &user_enc, &user_mac);
+
     Ok(Vault {
         server: server.to_owned(),
         email: email_lower,
@@ -71,9 +156,18 @@ pub async fn perform_unlock(
         user_mac,
         ciphers,
         folders,
-        client,
-        last_sync: now_iso(),
+        client: None,
+        protected_user_key: protected.to_owned(),
+        kdf,
+        device_id: cache.device_id.clone(),
+        last_sync: cache.last_sync.clone(),
     })
+}
+
+/// Load the account's cache, if one exists and parses.
+fn load_cache(server: &str, email: &str) -> Option<VaultCache> {
+    let dir = vault_store::default_data_dir()?.join(account_dir_name(server, email));
+    vault_store::load_from_dir(&dir).ok()
 }
 
 /// Re-cast a `/sync` payload into the typed views the agent caches: a list of
@@ -222,6 +316,70 @@ mod tests {
             Some("github.com")
         );
         assert_eq!(folders.get("fid-1").map(String::as_str), Some("Work"));
+    }
+
+    #[test]
+    fn unlock_from_cache_recovers_offline_and_rejects_wrong_password() {
+        use vault_core::kdf::KdfType;
+
+        let kdf = KdfParams {
+            kind: KdfType::Pbkdf2Sha256,
+            iterations: 1_000,
+            memory_kib: None,
+            parallelism: None,
+        };
+        let email = "user@example.org";
+        let password = b"hunter2";
+        let user_enc = [7u8; 32];
+        let user_mac = [9u8; 32];
+
+        // Protect the 64-byte user key under the master-stretched key.
+        let master = derive_master_key(password, email.as_bytes(), kdf).unwrap();
+        let (stretch_enc, stretch_mac) = stretch_master_key(&master).unwrap();
+        let mut user_key = user_enc.to_vec();
+        user_key.extend_from_slice(&user_mac);
+        let protected =
+            vault_core::EncString::encrypt(&stretch_enc, &stretch_mac, &user_key).serialize();
+
+        // A one-cipher sync payload, encrypted under the user key.
+        let sync = SyncResponse {
+            profile: serde_json::Value::Null,
+            folders: vec![],
+            collections: vec![],
+            ciphers: vec![serde_json::json!({
+                "Id": "c1",
+                "Type": 1,
+                "Name": enc_str(&user_enc, &user_mac, "github.com"),
+            })],
+            domains: serde_json::Value::Null,
+            sends: vec![],
+        };
+        let sync_bytes = serde_json::to_vec(&sync).unwrap();
+        let mut cache = VaultCache::new("dev".into(), "https://x".into(), email);
+        cache
+            .set_payload(&user_enc, &user_mac, &sync_bytes)
+            .unwrap();
+        cache.protected_user_key = Some(protected);
+        cache.kdf = Some(kdf);
+
+        let vault = unlock_from_cache(&cache, "https://x", email, password).unwrap();
+        assert!(vault.client.is_none(), "offline session has no token");
+        assert_eq!(vault.ciphers.len(), 1);
+        assert_eq!(
+            vault.ciphers[0]
+                .decrypt_name(&user_enc, &user_mac)
+                .unwrap()
+                .as_deref(),
+            Some("github.com")
+        );
+
+        assert!(
+            matches!(
+                unlock_from_cache(&cache, "https://x", email, b"wrong"),
+                Err(IpcError::BadPassword)
+            ),
+            "wrong password must be rejected"
+        );
     }
 
     #[test]
