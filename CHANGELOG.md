@@ -10,6 +10,35 @@ range may break in any release.
 
 ### Added
 
+- **PIN unlock.** Unlock the vault with a short PIN instead of the master
+  password (like the Bitwarden extension/desktop), built on the encrypted cache.
+  - `vault pin set` (requires an unlocked agent) encrypts the user key under a
+    key derived from the PIN — same KDF/stretch/`EncString` crypto as the
+    master path, PIN as the secret, email as salt — and stores it as
+    `pin_protected_user_key` in the cache (envelope schema 3). `vault pin
+    disable` forgets it; `vault pin status` reports enabled + attempts left.
+  - `vault unlock --pin` recovers the user key from the cache with the PIN and
+    builds a **read-only** session (no token — `sync`/`add`/`edit`/`remove`
+    return `Error::Offline`, like an offline unlock). Plain `vault unlock`
+    stays master-password.
+  - **Lockout:** wrong PINs are counted in the cache (so the limit survives an
+    agent restart); the 5th wrong PIN wipes `pin_protected_user_key` and
+    returns `PinLockedOut` — re-enable after a master-password unlock. Wrong
+    PINs before that return `BadPin { attempts_remaining }`. New typed errors
+    `BadPin` / `PinLockedOut` / `PinNotSet` (CLI exit codes 12/13/14). PIN must
+    be ≥ 4 characters (validated client-side).
+  - The cache→vault recovery core is shared between the offline-master and PIN
+    paths (`recover_user_key` + `vault_from_user_key`); the attempt/lockout
+    logic is a pure `pin_attempt` over an in-memory cache, with a thin
+    disk-backed `unlock_pin` wrapper.
+  - Tests: store pin-field round-trip; pure `pin_attempt` lifecycle (recover →
+    reset counter → 5-strike lockout + key wipe → stays locked), `PinNotSet`
+    with no enrollment, and `pin_protect_user_key` ↔ `recover_user_key`
+    round-trip. No new dependencies.
+  - Out of scope (tracked): TUI PIN entry; a PIN/offline session syncing once
+    token persistence lands; Bitwarden's "require master password on restart"
+    (memory-only pin key) mode.
+
 - **Encrypted-cache persistence + offline unlock.** The agent now writes its
   vault to disk and can unlock without the network — the substrate for the
   upcoming **PIN unlock** (and useful on its own).

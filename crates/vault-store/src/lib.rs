@@ -24,7 +24,7 @@ use vault_core::EncString;
 use vault_core::kdf::KdfParams;
 
 /// Current on-disk schema version.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 /// Persistent on-disk cache for one Bitwarden account.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -53,6 +53,16 @@ pub struct VaultCache {
     /// `None` on caches written before schema 2.
     #[serde(default)]
     pub kdf: Option<KdfParams>,
+    /// The user key encrypted under a PIN-derived key (an `EncString`), set by
+    /// `vault pin set`. Lets `unlock --pin` recover the vault from a short PIN
+    /// instead of the master password. `None` when no PIN is enrolled. Safe at
+    /// rest: brute-force is bounded by the account KDF and the attempt lockout.
+    #[serde(default)]
+    pub pin_protected_user_key: Option<String>,
+    /// Consecutive failed PIN attempts. Persisted so the lockout survives an
+    /// agent restart; reset to 0 on a correct PIN or a fresh enrollment.
+    #[serde(default)]
+    pub pin_failures: u32,
 }
 
 impl VaultCache {
@@ -68,6 +78,8 @@ impl VaultCache {
             payload: None,
             protected_user_key: None,
             kdf: None,
+            pin_protected_user_key: None,
+            pin_failures: 0,
         }
     }
 

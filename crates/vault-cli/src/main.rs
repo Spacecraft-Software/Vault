@@ -21,7 +21,7 @@ use tokio::net::UnixStream;
 use zeroize::{Zeroize, Zeroizing};
 
 use vault_ipc::proto::{
-    Error as IpcError, Field, Item, ListEntry, Removed, Request, Response, Saved, Status,
+    Error as IpcError, Field, Item, ListEntry, PinStatus, Removed, Request, Response, Saved, Status,
 };
 use vault_ipc::{default_socket_path, read_frame, sanitize_socket_path, write_frame};
 
@@ -134,9 +134,18 @@ enum Cmd {
         /// Account email. Falls back to the registered profile, then `$VAULT_EMAIL`.
         #[arg(long)]
         email: Option<String>,
+        /// Unlock with the enrolled PIN instead of the master password
+        /// (read-only, offline session — sync/edits need a master unlock).
+        #[arg(long)]
+        pin: bool,
         /// Emit JSON instead of staying silent on success.
         #[arg(long)]
         json: bool,
+    },
+    /// Manage the unlock PIN (set / disable / status).
+    Pin {
+        #[command(subcommand)]
+        action: PinAction,
     },
     /// Wipe the in-memory key (the agent stays running).
     Lock {
@@ -308,6 +317,46 @@ enum ConfigAction {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum PinAction {
+    /// Enroll a PIN (requires an unlocked agent); prompts twice.
+    Set {
+        /// Server origin. Falls back to the profile, then `$VAULT_SERVER`.
+        #[arg(long)]
+        server: Option<String>,
+        /// Account email. Falls back to the profile, then `$VAULT_EMAIL`.
+        #[arg(long)]
+        email: Option<String>,
+        /// Emit JSON instead of staying silent on success.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget the enrolled PIN.
+    Disable {
+        /// Server origin. Falls back to the profile, then `$VAULT_SERVER`.
+        #[arg(long)]
+        server: Option<String>,
+        /// Account email. Falls back to the profile, then `$VAULT_EMAIL`.
+        #[arg(long)]
+        email: Option<String>,
+        /// Emit JSON instead of staying silent on success.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show whether a PIN is enrolled and how many attempts remain.
+    Status {
+        /// Server origin. Falls back to the profile, then `$VAULT_SERVER`.
+        #[arg(long)]
+        server: Option<String>,
+        /// Account email. Falls back to the profile, then `$VAULT_EMAIL`.
+        #[arg(long)]
+        email: Option<String>,
+        /// Emit JSON instead of a human-readable line.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum FieldArg {
     Password,
@@ -402,8 +451,10 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
         Cmd::Unlock {
             server,
             email,
+            pin,
             json,
-        } => cmd_unlock(ep, server, email, json).await,
+        } => cmd_unlock(ep, server, email, pin, json).await,
+        Cmd::Pin { action } => cmd_pin(ep, action).await,
         Cmd::Lock { json } => cmd_ack(ep, Request::Lock, "locked", json).await,
         Cmd::Sync { json } => cmd_sync(ep, json).await,
         Cmd::List { json } => cmd_list(ep, json).await,
@@ -645,20 +696,32 @@ async fn cmd_unlock(
     ep: Endpoint<'_>,
     server: Option<String>,
     email: Option<String>,
+    pin: bool,
     json: bool,
 ) -> Result<(), u8> {
     let acct = resolve_account(server, email)?;
-    let password = read_password()?;
-    let mut stream = connect(ep).await?;
-    let req = Request::Unlock {
-        server: acct.server,
-        email: acct.email,
-        password,
-        device_id: acct.device_id,
+    let req = if pin {
+        let pin = read_secret("PIN: ")?.ok_or_else(|| {
+            eprintln!("vault: empty PIN");
+            2u8
+        })?;
+        Request::UnlockPin {
+            server: acct.server,
+            email: acct.email,
+            pin,
+        }
+    } else {
+        Request::Unlock {
+            server: acct.server,
+            email: acct.email,
+            password: read_password()?,
+            device_id: acct.device_id,
+        }
     };
+    let mut stream = connect(ep).await?;
     let resp = exchange(&mut stream, &req).await?;
-    // Wipe our copy of the request — the password field is now zero'd inside
-    // the moved Request, but the wire buffer was already serialised. Drop is
+    // Wipe our copy of the request — the secret field is now zero'd inside the
+    // moved Request, but the wire buffer was already serialised. Drop is
     // best-effort beyond that point.
     drop(req);
     match resp {
@@ -668,6 +731,83 @@ async fn cmd_unlock(
         }
         Response::Error(e) => report_error(&e),
         other => unexpected(&other),
+    }
+}
+
+/// `vault pin set/disable/status`.
+async fn cmd_pin(ep: Endpoint<'_>, action: PinAction) -> Result<(), u8> {
+    match action {
+        PinAction::Set {
+            server,
+            email,
+            json,
+        } => {
+            // Ensure an account exists; the agent needs an unlocked vault.
+            let _ = resolve_account(server, email)?;
+            let pin = read_secret("New PIN (>= 4 chars): ")?.ok_or_else(|| {
+                eprintln!("vault: empty PIN");
+                2u8
+            })?;
+            if pin.len() < 4 {
+                eprintln!("vault: PIN must be at least 4 characters");
+                return Err(2);
+            }
+            cmd_ack(ep, Request::PinSet { pin }, "pin set", json).await
+        }
+        PinAction::Disable {
+            server,
+            email,
+            json,
+        } => {
+            let acct = resolve_account(server, email)?;
+            cmd_ack(
+                ep,
+                Request::PinDisable {
+                    server: acct.server,
+                    email: acct.email,
+                },
+                "pin disabled",
+                json,
+            )
+            .await
+        }
+        PinAction::Status {
+            server,
+            email,
+            json,
+        } => {
+            let acct = resolve_account(server, email)?;
+            let mut stream = connect(ep).await?;
+            let req = Request::PinStatus {
+                server: acct.server,
+                email: acct.email,
+            };
+            match exchange(&mut stream, &req).await? {
+                Response::PinStatus(s) => {
+                    print_pin_status(&s, json);
+                    Ok(())
+                }
+                Response::Error(e) => report_error(&e),
+                other => unexpected(&other),
+            }
+        }
+    }
+}
+
+/// Human / JSON rendering of `vault pin status`.
+fn print_pin_status(s: &PinStatus, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "enabled": s.enabled, "attempts_remaining": s.attempts_remaining })
+        );
+    } else if s.enabled {
+        println!(
+            "pin: enabled ({} attempt(s) remaining)",
+            s.attempts_remaining
+        );
+    } else {
+        println!("pin: disabled");
     }
 }
 
@@ -1124,6 +1264,9 @@ fn report_error(e: &IpcError) -> Result<(), u8> {
         IpcError::NoSuchField { .. } => 8,
         IpcError::AmbiguousItem { .. } => 10,
         IpcError::Offline => 11,
+        IpcError::BadPin { .. } => 12,
+        IpcError::PinLockedOut => 13,
+        IpcError::PinNotSet => 14,
         IpcError::Network(_)
         | IpcError::Internal(_)
         | IpcError::Decrypt(_)
