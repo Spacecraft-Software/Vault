@@ -109,55 +109,100 @@ async fn online_unlock(
     Ok(vault)
 }
 
-/// Offline unlock from the encrypted local cache — no network. Derives the
-/// master key from the cached KDF params, decrypts the protected user key (the
-/// `EncString` MAC check is the wrong-password detector), then loads ciphers
-/// from the cached `/sync` payload. The session has no token (`client = None`).
+/// Offline unlock from the encrypted local cache — no network. Recovers the
+/// user key from the master password via the cached protected key, then builds
+/// a read-only (`client = None`) vault. A wrong password is `BadPassword`.
 fn unlock_from_cache(
     cache: &VaultCache,
     server: &str,
     email: &str,
     password: &[u8],
 ) -> Result<Vault, IpcError> {
-    let email_lower = email.trim().to_lowercase();
-    let kdf: KdfParams = cache
-        .kdf
-        .ok_or_else(|| IpcError::Internal("cached account has no KDF params".to_owned()))?;
     let protected = cache
         .protected_user_key
         .as_deref()
         .ok_or_else(|| IpcError::Internal("cached account has no protected user key".to_owned()))?;
+    let (user_enc, user_mac) = recover_user_key(cache, email, password, protected)
+        .map_err(|e| e.into_ipc(|| IpcError::BadPassword))?;
+    vault_from_user_key(cache, server, email, user_enc, user_mac)
+}
 
+/// The unwrapped user key: the symmetric encryption and MAC halves, each
+/// zeroised on drop.
+pub type UserKey = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
+
+/// What went wrong recovering the user key from a protected key + secret.
+pub enum KeyRecover {
+    /// The secret (master password / PIN) was wrong — MAC mismatch.
+    WrongSecret,
+    /// A non-recoverable error (missing KDF, malformed key).
+    Internal(String),
+}
+
+impl KeyRecover {
+    /// Map to an `IpcError`, using `wrong` for the wrong-secret case so each
+    /// caller can choose `BadPassword` vs PIN-specific handling.
+    fn into_ipc(self, wrong: impl FnOnce() -> IpcError) -> IpcError {
+        match self {
+            Self::WrongSecret => wrong(),
+            Self::Internal(s) => IpcError::Internal(s),
+        }
+    }
+}
+
+/// Derive a key from `secret` + the cache's KDF/email salt and decrypt
+/// `protected` (an `EncString` over the 64-byte user key). Shared by the
+/// offline-master and PIN paths; the MAC check distinguishes a wrong secret.
+pub fn recover_user_key(
+    cache: &VaultCache,
+    email: &str,
+    secret: &[u8],
+    protected: &str,
+) -> Result<UserKey, KeyRecover> {
+    let email_lower = email.trim().to_lowercase();
+    let kdf: KdfParams = cache
+        .kdf
+        .ok_or_else(|| KeyRecover::Internal("cached account has no KDF params".to_owned()))?;
     let master = Zeroizing::new(
-        derive_master_key(password, email_lower.as_bytes(), kdf).map_err(crypto_err)?,
+        derive_master_key(secret, email_lower.as_bytes(), kdf)
+            .map_err(|e| KeyRecover::Internal(format!("crypto: {e}")))?,
     );
-    let (stretch_enc, stretch_mac) = stretch_master_key(&master).map_err(crypto_err)?;
+    let (stretch_enc, stretch_mac) =
+        stretch_master_key(&master).map_err(|e| KeyRecover::Internal(format!("crypto: {e}")))?;
     let stretch_enc = Zeroizing::new(stretch_enc);
     let stretch_mac = Zeroizing::new(stretch_mac);
-
-    // A decrypt failure here is overwhelmingly a wrong password (MAC mismatch);
-    // surface it as such rather than a generic internal error.
     let (user_enc_arr, user_mac_arr) = decrypt_user_key(protected, &stretch_enc, &stretch_mac)
-        .map_err(|_| IpcError::BadPassword)?;
-    let user_enc = Zeroizing::new(user_enc_arr);
-    let user_mac = Zeroizing::new(user_mac_arr);
+        .map_err(|_| KeyRecover::WrongSecret)?;
+    Ok((Zeroizing::new(user_enc_arr), Zeroizing::new(user_mac_arr)))
+}
 
+/// Build a read-only vault (`client = None`) from a recovered user key by
+/// decrypting the cached `/sync` payload. Shared by every cache-based unlock.
+pub fn vault_from_user_key(
+    cache: &VaultCache,
+    server: &str,
+    email: &str,
+    user_enc: Zeroizing<[u8; 32]>,
+    user_mac: Zeroizing<[u8; 32]>,
+) -> Result<Vault, IpcError> {
     let payload = cache
         .load_payload(&user_enc, &user_mac)
         .map_err(|e| IpcError::Internal(format!("decrypt cached vault: {e}")))?;
     let sync: SyncResponse = serde_json::from_slice(&payload)
         .map_err(|e| IpcError::Internal(format!("parse cached vault: {e}")))?;
     let (ciphers, folders) = ciphers_and_folders(&sync, &user_enc, &user_mac);
-
+    let kdf = cache
+        .kdf
+        .ok_or_else(|| IpcError::Internal("cached account has no KDF params".to_owned()))?;
     Ok(Vault {
         server: server.to_owned(),
-        email: email_lower,
+        email: email.trim().to_lowercase(),
         user_enc,
         user_mac,
         ciphers,
         folders,
         client: None,
-        protected_user_key: protected.to_owned(),
+        protected_user_key: cache.protected_user_key.clone().unwrap_or_default(),
         kdf,
         device_id: cache.device_id.clone(),
         last_sync: cache.last_sync.clone(),
@@ -165,9 +210,128 @@ fn unlock_from_cache(
 }
 
 /// Load the account's cache, if one exists and parses.
-fn load_cache(server: &str, email: &str) -> Option<VaultCache> {
+pub fn load_cache(server: &str, email: &str) -> Option<VaultCache> {
     let dir = vault_store::default_data_dir()?.join(account_dir_name(server, email));
     vault_store::load_from_dir(&dir).ok()
+}
+
+/// Path to the account's cache directory.
+pub fn cache_dir(server: &str, email: &str) -> Option<std::path::PathBuf> {
+    Some(vault_store::default_data_dir()?.join(account_dir_name(server, email)))
+}
+
+/// Write `cache` back to the account's directory.
+fn save_cache(server: &str, email: &str, cache: &VaultCache) -> Result<(), IpcError> {
+    let dir = cache_dir(server, email)
+        .ok_or_else(|| IpcError::Internal("no data directory".to_owned()))?;
+    vault_store::save_to_dir(&dir, cache)
+        .map_err(|e| IpcError::Internal(format!("write cache: {e}")))?;
+    Ok(())
+}
+
+/// PIN unlock from the cache: recover the user key with `pin` and build a
+/// read-only vault. Tracks failed attempts in the persisted cache; the
+/// `MAX_PIN_ATTEMPTS`-th wrong PIN wipes the pin key and reports `PinLockedOut`.
+pub fn unlock_pin(server: &str, email: &str, pin: &[u8]) -> Result<Vault, IpcError> {
+    let mut cache = load_cache(server, email).ok_or(IpcError::PinNotSet)?;
+    let res = pin_attempt(&mut cache, server, email, pin);
+    // The attempt mutates the counter (and may wipe the key on lockout) whether
+    // or not it succeeded — persist that. Best-effort: a write failure mustn't
+    // mask the unlock result.
+    let _ = save_cache(server, email, &cache);
+    res
+}
+
+/// Pure PIN-attempt logic over an in-memory cache (no disk): on the correct PIN
+/// resets `pin_failures` and returns a read-only vault; on a wrong PIN bumps
+/// the counter and returns `BadPin`, wiping the pin key and returning
+/// `PinLockedOut` once `MAX_PIN_ATTEMPTS` is reached.
+pub fn pin_attempt(
+    cache: &mut VaultCache,
+    server: &str,
+    email: &str,
+    pin: &[u8],
+) -> Result<Vault, IpcError> {
+    // A wiped-by-lockout cache keeps `pin_failures` at the max — report lockout
+    // (not "no PIN set") so the user knows to use the master password.
+    if cache.pin_failures >= crate::state::MAX_PIN_ATTEMPTS {
+        return Err(IpcError::PinLockedOut);
+    }
+    let protected = cache
+        .pin_protected_user_key
+        .clone()
+        .ok_or(IpcError::PinNotSet)?;
+
+    match recover_user_key(cache, email, pin, &protected) {
+        Ok((user_enc, user_mac)) => {
+            cache.pin_failures = 0;
+            vault_from_user_key(cache, server, email, user_enc, user_mac)
+        }
+        Err(KeyRecover::Internal(s)) => Err(IpcError::Internal(s)),
+        Err(KeyRecover::WrongSecret) => {
+            cache.pin_failures += 1;
+            let remaining = crate::state::MAX_PIN_ATTEMPTS.saturating_sub(cache.pin_failures);
+            if remaining == 0 {
+                // Lockout: drop the pin key so it can't be brute-forced further.
+                cache.pin_protected_user_key = None;
+                Err(IpcError::PinLockedOut)
+            } else {
+                Err(IpcError::BadPin {
+                    attempts_remaining: remaining,
+                })
+            }
+        }
+    }
+}
+
+/// Encrypt the 64-byte user key under a key derived from `pin` (account KDF,
+/// email salt) — the value stored as `pin_protected_user_key`. The inverse of
+/// the PIN side of [`recover_user_key`].
+///
+/// # Errors
+///
+/// [`IpcError::Internal`] on a key-derivation failure.
+pub fn pin_protect_user_key(
+    email: &str,
+    kdf: KdfParams,
+    user_enc: &[u8; 32],
+    user_mac: &[u8; 32],
+    pin: &[u8],
+) -> Result<String, IpcError> {
+    let email_lower = email.trim().to_lowercase();
+    let master = Zeroizing::new(
+        derive_master_key(pin, email_lower.as_bytes(), kdf)
+            .map_err(|e| IpcError::Internal(format!("crypto: {e}")))?,
+    );
+    let (stretch_enc, stretch_mac) =
+        stretch_master_key(&master).map_err(|e| IpcError::Internal(format!("crypto: {e}")))?;
+    let mut user_key = Zeroizing::new(Vec::with_capacity(64));
+    user_key.extend_from_slice(user_enc);
+    user_key.extend_from_slice(user_mac);
+    Ok(vault_core::EncString::encrypt(&stretch_enc, &stretch_mac, &user_key).serialize())
+}
+
+/// Forget any enrolled PIN for the account (idempotent — no cache is success).
+pub fn pin_disable(server: &str, email: &str) -> Result<(), IpcError> {
+    let Some(mut cache) = load_cache(server, email) else {
+        return Ok(());
+    };
+    cache.pin_protected_user_key = None;
+    cache.pin_failures = 0;
+    save_cache(server, email, &cache)
+}
+
+/// Report PIN enrollment + attempts remaining for the account.
+pub fn pin_status(server: &str, email: &str) -> vault_ipc::proto::PinStatus {
+    let cache = load_cache(server, email);
+    let enabled = cache
+        .as_ref()
+        .is_some_and(|c| c.pin_protected_user_key.is_some());
+    let failures = cache.as_ref().map_or(0, |c| c.pin_failures);
+    vault_ipc::proto::PinStatus {
+        enabled,
+        attempts_remaining: crate::state::MAX_PIN_ATTEMPTS.saturating_sub(failures),
+    }
 }
 
 /// Re-cast a `/sync` payload into the typed views the agent caches: a list of
@@ -380,6 +544,102 @@ mod tests {
             ),
             "wrong password must be rejected"
         );
+    }
+
+    /// Build a cache with a payload + master + PIN protected keys, for the
+    /// in-memory PIN-attempt tests.
+    fn seeded_pin_cache(
+        email: &str,
+        user_enc: &[u8; 32],
+        user_mac: &[u8; 32],
+        kdf: KdfParams,
+        pin: &[u8],
+    ) -> VaultCache {
+        let sync = SyncResponse {
+            profile: serde_json::Value::Null,
+            folders: vec![],
+            collections: vec![],
+            ciphers: vec![serde_json::json!({
+                "Id": "c1",
+                "Type": 1,
+                "Name": enc_str(user_enc, user_mac, "github.com"),
+            })],
+            domains: serde_json::Value::Null,
+            sends: vec![],
+        };
+        let sync_bytes = serde_json::to_vec(&sync).unwrap();
+        let mut cache = VaultCache::new("dev".into(), "https://x".into(), email);
+        cache.set_payload(user_enc, user_mac, &sync_bytes).unwrap();
+        cache.kdf = Some(kdf);
+        cache.pin_protected_user_key =
+            Some(pin_protect_user_key(email, kdf, user_enc, user_mac, pin).unwrap());
+        cache
+    }
+
+    #[test]
+    fn pin_attempt_recovers_resets_counts_and_locks_out() {
+        use vault_core::kdf::KdfType;
+        let kdf = KdfParams {
+            kind: KdfType::Pbkdf2Sha256,
+            iterations: 1_000,
+            memory_kib: None,
+            parallelism: None,
+        };
+        let email = "user@example.org";
+        let user_enc = [7u8; 32];
+        let user_mac = [9u8; 32];
+        let mut cache = seeded_pin_cache(email, &user_enc, &user_mac, kdf, b"1234");
+
+        // Correct PIN → read-only vault with the cached cipher.
+        let vault = pin_attempt(&mut cache, "https://x", email, b"1234").unwrap();
+        assert!(vault.client.is_none());
+        assert_eq!(vault.ciphers.len(), 1);
+
+        // Two wrong PINs bump the counter and report the remaining count.
+        for expected in [4u32, 3] {
+            assert!(matches!(
+                pin_attempt(&mut cache, "https://x", email, b"0000"),
+                Err(IpcError::BadPin { attempts_remaining }) if attempts_remaining == expected
+            ));
+        }
+        assert_eq!(cache.pin_failures, 2);
+
+        // A correct PIN resets the counter back to zero.
+        pin_attempt(&mut cache, "https://x", email, b"1234").unwrap();
+        assert_eq!(cache.pin_failures, 0);
+
+        // Five wrong PINs in a row → lockout, pin key wiped.
+        let mut last = Err(IpcError::PinNotSet);
+        for _ in 0..crate::state::MAX_PIN_ATTEMPTS {
+            last = pin_attempt(&mut cache, "https://x", email, b"0000");
+        }
+        assert!(matches!(last, Err(IpcError::PinLockedOut)));
+        assert_eq!(
+            cache.pin_protected_user_key, None,
+            "pin key wiped on lockout"
+        );
+        // A further attempt stays locked out (not "no PIN set").
+        assert!(matches!(
+            pin_attempt(&mut cache, "https://x", email, b"1234"),
+            Err(IpcError::PinLockedOut)
+        ));
+    }
+
+    #[test]
+    fn pin_attempt_without_enrolled_pin_is_pin_not_set() {
+        use vault_core::kdf::KdfType;
+        let kdf = KdfParams {
+            kind: KdfType::Pbkdf2Sha256,
+            iterations: 1_000,
+            memory_kib: None,
+            parallelism: None,
+        };
+        let mut cache = VaultCache::new("dev".into(), "https://x".into(), "u@e.org");
+        cache.kdf = Some(kdf);
+        assert!(matches!(
+            pin_attempt(&mut cache, "https://x", "u@e.org", b"1234"),
+            Err(IpcError::PinNotSet)
+        ));
     }
 
     #[test]

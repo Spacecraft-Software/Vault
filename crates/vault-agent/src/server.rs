@@ -96,6 +96,40 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::UnlockPin { server, email, pin } => {
+            let pin = zeroize::Zeroizing::new(pin);
+            // PIN unlock is offline (cache only) and synchronous; run it, then
+            // install the resulting read-only vault.
+            match crate::unlock::unlock_pin(&server, &email, &pin) {
+                Ok(vault) => {
+                    let mut s = state.lock().await;
+                    s.vault = Some(vault);
+                    s.touch();
+                    Response::Ok
+                }
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::PinSet { pin } => {
+            let pin = zeroize::Zeroizing::new(pin);
+            let mut s = state.lock().await;
+            let res = s.pin_enroll(&pin);
+            s.touch();
+            drop(s);
+            match res {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::PinDisable { server, email } => {
+            match crate::unlock::pin_disable(&server, &email) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::PinStatus { server, email } => {
+            Response::PinStatus(crate::unlock::pin_status(&server, &email))
+        }
         Request::Lock => {
             let mut s = state.lock().await;
             s.lock();

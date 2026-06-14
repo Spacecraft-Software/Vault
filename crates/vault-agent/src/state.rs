@@ -77,6 +77,10 @@ impl Vault {
     }
 }
 
+/// Wrong-PIN attempts allowed before the PIN is wiped and a master-password
+/// unlock is required (mirrors the Bitwarden default).
+pub const MAX_PIN_ATTEMPTS: u32 = 5;
+
 /// Filesystem-safe per-account cache subdirectory, keyed by host + email so
 /// distinct accounts (and the same email on different servers) never collide.
 /// Any character outside `[A-Za-z0-9._-]` becomes `_`.
@@ -194,6 +198,31 @@ impl AgentState {
         self.vault = None;
         #[cfg(feature = "clipboard")]
         self.clipboard_sweep();
+    }
+
+    /// Enroll a PIN: encrypt the unwrapped user key under a key derived from
+    /// `pin` (account KDF, email salt) and store it in the cache, resetting the
+    /// attempt counter. Requires an unlocked agent and an existing cache (which
+    /// an online unlock always wrote).
+    ///
+    /// # Errors
+    ///
+    /// [`IpcError::Locked`] if the agent isn't unlocked, [`IpcError::Internal`]
+    /// if no cache exists yet or the write fails.
+    pub fn pin_enroll(&self, pin: &[u8]) -> Result<(), IpcError> {
+        let v = self.vault.as_ref().ok_or(IpcError::Locked)?;
+        let pin_protected =
+            crate::unlock::pin_protect_user_key(&v.email, v.kdf, &v.user_enc, &v.user_mac, pin)?;
+        let mut cache = crate::unlock::load_cache(&v.server, &v.email).ok_or_else(|| {
+            IpcError::Internal("no cached vault — unlock online before setting a PIN".to_owned())
+        })?;
+        cache.pin_protected_user_key = Some(pin_protected);
+        cache.pin_failures = 0;
+        let dir = crate::unlock::cache_dir(&v.server, &v.email)
+            .ok_or_else(|| IpcError::Internal("no data directory".to_owned()))?;
+        vault_store::save_to_dir(&dir, &cache)
+            .map_err(|e| IpcError::Internal(format!("write cache: {e}")))?;
+        Ok(())
     }
 
     /// Build a `Status` snapshot for `Request::Status` / `Request::Ping`.

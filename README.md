@@ -60,6 +60,22 @@ config file; `login` and `unlock` then resolve those from the profile, so their
 once registered. `login` is the first-time "authenticate and verify sync";
 `unlock` is the routine "hand the agent my key again".
 
+### PIN unlock
+
+For quick access without re-typing the master password, enroll a PIN (after an
+online unlock) and unlock with it:
+
+```sh
+vault pin set            # prompts for a PIN (≥ 4 chars)
+vault unlock --pin       # prompts for the PIN; unlocks from the local cache
+vault pin status         # enrolled? attempts remaining?
+vault pin disable        # forget the PIN
+```
+
+A PIN session is **read-only** (browse / `get` / copy from the encrypted cache);
+`sync` and edits need a master-password unlock. Five wrong PINs disable the PIN
+and require a master-password unlock — bounding brute-force of a short secret.
+
 ## Configuration
 
 Persistent settings live at `$XDG_CONFIG_HOME/vault/config.toml`, managed with

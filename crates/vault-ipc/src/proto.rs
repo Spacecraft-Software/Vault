@@ -159,6 +159,44 @@ pub enum Request {
         uri: Option<String>,
     },
 
+    /// Enroll a PIN: encrypt the unwrapped user key under a key derived from
+    /// `pin` and store it in the cache. Requires an unlocked agent. `pin` is
+    /// secret, wiped after derivation.
+    PinSet {
+        /// The PIN bytes (UTF-8), sent only on the local UDS.
+        pin: Vec<u8>,
+    },
+
+    /// Forget the enrolled PIN (wipe the pin-protected key + attempt counter).
+    /// Carries the account so the cache can be found while the agent is locked.
+    PinDisable {
+        /// Server origin.
+        server: String,
+        /// Account email.
+        email: String,
+    },
+
+    /// Report whether a PIN is enrolled and how many attempts remain.
+    PinStatus {
+        /// Server origin.
+        server: String,
+        /// Account email.
+        email: String,
+    },
+
+    /// Unlock the agent from the cache using `pin` instead of the master
+    /// password (read-only session, no network token). `pin` is secret; the
+    /// account locates the cache (no login, so the persisted device id is
+    /// reused).
+    UnlockPin {
+        /// Server origin.
+        server: String,
+        /// Account email.
+        email: String,
+        /// The PIN bytes (UTF-8), sent only on the local UDS.
+        pin: Vec<u8>,
+    },
+
     /// Cleanly shut the agent down. Equivalent to `vault stop-agent`.
     Quit,
 }
@@ -181,8 +219,19 @@ pub enum Response {
     Saved(Saved),
     /// `Copy` / `CopyText` result — the value is on the agent's clipboard.
     Copied(Copied),
+    /// `PinStatus` result.
+    PinStatus(PinStatus),
     /// Recoverable error — operation declined or failed.
     Error(Error),
+}
+
+/// Wire shape for `Response::PinStatus`.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct PinStatus {
+    /// Whether a PIN is currently enrolled.
+    pub enabled: bool,
+    /// Attempts remaining before lockout (meaningful only when `enabled`).
+    pub attempts_remaining: u32,
 }
 
 /// Wire shape for `Response::Copied`.
@@ -349,6 +398,20 @@ pub enum Error {
     /// to sync or modify items.
     #[error("offline session — unlock again while online to sync or modify items")]
     Offline,
+    /// Wrong PIN; `attempts_remaining` before the PIN is wiped and a
+    /// master-password unlock is required.
+    #[error("incorrect PIN ({attempts_remaining} attempt(s) left)")]
+    BadPin {
+        /// Attempts left before lockout.
+        attempts_remaining: u32,
+    },
+    /// Too many wrong PINs — the PIN was disabled; unlock with the master
+    /// password.
+    #[error("too many incorrect PINs — PIN disabled; unlock with your master password")]
+    PinLockedOut,
+    /// `unlock --pin` (or `pin status` action) but no PIN is enrolled.
+    #[error("no PIN is set — run `vault pin set` after unlocking")]
+    PinNotSet,
     /// Any other internal error — message is for the operator, not for parsing.
     #[error("internal: {0}")]
     Internal(String),
