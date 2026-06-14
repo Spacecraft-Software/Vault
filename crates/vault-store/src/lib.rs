@@ -21,6 +21,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use vault_core::EncString;
+use vault_core::kdf::KdfParams;
+
+/// Current on-disk schema version.
+const SCHEMA_VERSION: u32 = 2;
 
 /// Persistent on-disk cache for one Bitwarden account.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -36,8 +40,19 @@ pub struct VaultCache {
     /// Last successful sync time (ISO 8601 UTC, RFC 3339).
     pub last_sync: Option<String>,
     /// Encrypted `/sync` payload — an `EncString` over the JSON response
-    /// body, encrypted under a key supplied by the agent at write time.
+    /// body, encrypted under the user key at write time.
     pub payload: Option<String>,
+    /// The account's protected user key — the login token's `Key`: the 64-byte
+    /// user key encrypted under the master-password-stretched key (an
+    /// `EncString`). Safe at rest (brute-force bounded by the account KDF); it
+    /// lets `unlock` reconstruct the user key offline from the master password
+    /// without a network login. `None` until the agent has unlocked online.
+    #[serde(default)]
+    pub protected_user_key: Option<String>,
+    /// The account KDF parameters, needed to re-derive the master key offline.
+    /// `None` on caches written before schema 2.
+    #[serde(default)]
+    pub kdf: Option<KdfParams>,
 }
 
 impl VaultCache {
@@ -45,12 +60,14 @@ impl VaultCache {
     #[must_use]
     pub fn new(device_id: String, server: String, email: &str) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: SCHEMA_VERSION,
             device_id,
             server,
             email: email.to_lowercase(),
             last_sync: None,
             payload: None,
+            protected_user_key: None,
+            kdf: None,
         }
     }
 

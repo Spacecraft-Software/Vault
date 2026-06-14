@@ -42,7 +42,7 @@ impl From<KdfType> for u8 {
 }
 
 /// Parameters as supplied by the server / export envelope.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct KdfParams {
     /// Which KDF to run.
     pub kind: KdfType,

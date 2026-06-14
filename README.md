@@ -20,9 +20,11 @@ agent: `status` / `unlock` / `lock` / `sync` / `list` / `get` / `add` /
 `edit` / `remove` / `generate` / `stop-agent` on the CLI (with `--json`
 everywhere), and a three-pane `vault-tui` with search, reveal/copy
 (agent-side clipboard, 30 s auto-clear), a generator overlay, a `:` command
-line, and add/edit/delete. The CLI auto-starts the agent when needed. See
-[PRD §12](./PRD.md#12-milestones) for the roadmap (M0 → v0.1) and
-[`CHANGELOG.md`](./CHANGELOG.md) for per-slice detail.
+line, and add/edit/delete. The CLI auto-starts the agent when needed, and
+once you've unlocked online at least once, `unlock` also works **offline**
+from an encrypted local cache (read/copy from cache; sync and edits need the
+network). See [PRD §12](./PRD.md#12-milestones) for the roadmap (M0 → v0.1)
+and [`CHANGELOG.md`](./CHANGELOG.md) for per-slice detail.
 
 ## Build
 

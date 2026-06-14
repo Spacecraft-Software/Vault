@@ -1123,6 +1123,7 @@ fn report_error(e: &IpcError) -> Result<(), u8> {
         IpcError::NoSuchItem(_) => 7,
         IpcError::NoSuchField { .. } => 8,
         IpcError::AmbiguousItem { .. } => 10,
+        IpcError::Offline => 11,
         IpcError::Network(_)
         | IpcError::Internal(_)
         | IpcError::Decrypt(_)

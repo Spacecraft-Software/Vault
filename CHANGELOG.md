@@ -10,6 +10,35 @@ range may break in any release.
 
 ### Added
 
+- **Encrypted-cache persistence + offline unlock.** The agent now writes its
+  vault to disk and can unlock without the network — the substrate for the
+  upcoming **PIN unlock** (and useful on its own).
+  - On an online `unlock` (and every `sync`), the agent persists
+    `$XDG_DATA_HOME/vault/<account>/cache.json` (`<account>` = sanitized
+    `host_email`): the `/sync` response encrypted under the user key, plus the
+    `protected_user_key` (the login token `Key` — the user key encrypted under
+    the master-stretched key, safe at rest) and the account `kdf` params.
+    `vault-store` was already built for this but had never been wired in;
+    `VaultCache` is now schema 2 (new fields are serde-defaulted, so any older
+    file still loads).
+  - **Offline unlock:** when a live login fails with a network error and a
+    cache exists, `unlock` falls back to the cache — re-derives the master key
+    locally from the cached KDF params, decrypts the `protected_user_key` (the
+    EncString MAC check detects a wrong password → `BadPassword`), and loads
+    ciphers from the encrypted payload. Bad password / 2FA still propagate (no
+    fallback). Unlock now survives restart and works without connectivity once
+    you've unlocked online once.
+  - An offline session has **no access token**, so `Vault.client` is `None` and
+    sync / add / edit / remove return the new typed `Error::Offline`
+    ("unlock again while online…", CLI exit code 11). Read paths (status /
+    list / get / copy / TUI browse) work fully from cache. (Local mutations
+    don't re-persist the cache yet, so it can lag edits until the next
+    `sync` — tracked.)
+  - Tests: `KdfParams` serde round-trip; `VaultCache` protected-key + kdf
+    round-trip and legacy-v1 load; a pure `unlock_from_cache` recovery +
+    wrong-password rejection; `account_dir_name` sanitization; and the
+    offline-session `Error::Offline` gating. No new dependencies.
+
 - **TUI text-input editing — readline keys + bracketed paste (PRD §7.2).** The
   `/` search, `:` command line, and every add/edit form field were
   append/backspace-only `String`s with no cursor and no paste. They now share a

@@ -344,6 +344,11 @@ pub enum Error {
     /// of string-matching an internal error.
     #[error("no clipboard backend available")]
     ClipboardUnavailable,
+    /// The session was unlocked from the local cache (offline) and has no
+    /// network token, so it can't reach the server. Unlock again while online
+    /// to sync or modify items.
+    #[error("offline session — unlock again while online to sync or modify items")]
+    Offline,
     /// Any other internal error — message is for the operator, not for parsing.
     #[error("internal: {0}")]
     Internal(String),

@@ -40,7 +40,7 @@ fn cache_round_trip_through_disk() {
     let path = save_to_dir(tmp.path(), &cache).unwrap();
     assert!(path.exists());
     let on_disk = std::fs::read_to_string(&path).unwrap();
-    assert!(on_disk.contains("\"schema_version\": 1"));
+    assert!(on_disk.contains("\"schema_version\": 2"));
     assert!(
         !on_disk.contains("Ciphers"),
         "payload must be encrypted on disk"
@@ -49,6 +49,39 @@ fn cache_round_trip_through_disk() {
     let loaded = load_from_dir(tmp.path()).unwrap();
     let pt = loaded.load_payload(&enc, &mac).unwrap();
     assert_eq!(pt, sync_json);
+}
+
+#[test]
+fn protected_user_key_and_kdf_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cache = VaultCache::new("dev".into(), "https://x".into(), "a@b");
+    cache.protected_user_key = Some("2.aaa|bbb|ccc".into());
+    cache.kdf = Some(fast_pbkdf2());
+    save_to_dir(tmp.path(), &cache).unwrap();
+
+    let loaded = load_from_dir(tmp.path()).unwrap();
+    assert_eq!(loaded.protected_user_key.as_deref(), Some("2.aaa|bbb|ccc"));
+    assert_eq!(loaded.kdf, Some(fast_pbkdf2()));
+}
+
+/// A schema-1 cache (no `protected_user_key` / `kdf`) must still deserialize —
+/// the new fields are serde-defaulted.
+#[test]
+fn legacy_v1_cache_still_loads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let v1 = r#"{
+        "schema_version": 1,
+        "device_id": "dev",
+        "server": "https://x",
+        "email": "a@b",
+        "last_sync": null,
+        "payload": null
+    }"#;
+    std::fs::write(tmp.path().join("cache.json"), v1).unwrap();
+    let loaded = load_from_dir(tmp.path()).unwrap();
+    assert_eq!(loaded.email, "a@b");
+    assert_eq!(loaded.protected_user_key, None);
+    assert_eq!(loaded.kdf, None);
 }
 
 #[test]
