@@ -31,10 +31,10 @@ pub async fn perform_unlock(
         Ok(vault) => Ok(vault),
         Err(IpcError::Network(net)) => {
             // Network down — recover from cache if we have one for this account.
-            match load_cache(server, email) {
-                Some(cache) => unlock_from_cache(&cache, server, email, password),
-                None => Err(IpcError::Network(net)),
-            }
+            load_cache(server, email).map_or_else(
+                || Err(IpcError::Network(net)),
+                |cache| unlock_from_cache(&cache, server, email, password),
+            )
         }
         Err(other) => Err(other),
     }
@@ -111,8 +111,8 @@ async fn online_unlock(
 
 /// Offline unlock from the encrypted local cache — no network. Derives the
 /// master key from the cached KDF params, decrypts the protected user key (the
-/// EncString MAC check is the wrong-password detector), then loads ciphers from
-/// the cached `/sync` payload. The session has no token (`client = None`).
+/// `EncString` MAC check is the wrong-password detector), then loads ciphers
+/// from the cached `/sync` payload. The session has no token (`client = None`).
 fn unlock_from_cache(
     cache: &VaultCache,
     server: &str,
@@ -335,10 +335,11 @@ mod tests {
 
         // Protect the 64-byte user key under the master-stretched key.
         let master = derive_master_key(password, email.as_bytes(), kdf).unwrap();
-        let (senc, smac) = stretch_master_key(&master).unwrap();
+        let (stretch_enc, stretch_mac) = stretch_master_key(&master).unwrap();
         let mut user_key = user_enc.to_vec();
         user_key.extend_from_slice(&user_mac);
-        let protected = vault_core::EncString::encrypt(&senc, &smac, &user_key).serialize();
+        let protected =
+            vault_core::EncString::encrypt(&stretch_enc, &stretch_mac, &user_key).serialize();
 
         // A one-cipher sync payload, encrypted under the user key.
         let sync = SyncResponse {
