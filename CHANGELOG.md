@@ -10,6 +10,30 @@ range may break in any release.
 
 ### Added
 
+- **TUI text-input editing — readline keys + bracketed paste (PRD §7.2).** The
+  `/` search, `:` command line, and every add/edit form field were
+  append/backspace-only `String`s with no cursor and no paste. They now share a
+  `TextInput { buf, cursor }` with real line editing:
+  - Cursor movement `←`/`→`/`Home`/`End` (+ `Ctrl+A`/`Ctrl+E`), `Delete` at the
+    cursor, and insert anywhere — fix a mid-word typo without deleting back to it.
+  - Kill/yank into a shared kill-ring: `Ctrl+W` (word back), `Ctrl+U` (to start),
+    `Ctrl+K` (to end), `Ctrl+Y` (yank).
+  - **Bracketed paste** (`EnableBracketedPaste` + `Event::Paste`): paste a value
+    from the system clipboard — including over SSH/tmux — at the cursor;
+    newlines are stripped (every input is single-line).
+  - `Ctrl+S` submits the add/edit form (PRD §7.2 *save*). On the form's Type
+    row `←`/`→`/`Space` still toggle login⇄note; cursor keys edit only in text
+    fields. The caret renders where edits land (`gi▌t`), not just at the end.
+  - **`Ctrl+C` remains the global quit** — a deliberate deviation from §7.2's
+    literal `Ctrl+C`=copy: there's no selection model, and quit-safety/muscle
+    memory win. Deferred (tracked): selection + `Ctrl+C`/`X`/`V`/`Z`
+    copy/cut/paste/undo, and reading the agent clipboard back for paste.
+  - TUI-only — no protocol, agent, CLI, or dependency changes (crossterm 0.28
+    already exposes the paste API). Tests: `TextInput` units (insert/delete at
+    cursor, nav clamping, kills return removed text, paste at cursor, UTF-8
+    boundary safety), kill→yank round-trip, paste-into-focused-field,
+    search-edit re-anchor, and a mid-string caret `TestBackend` smoke.
+
 - **`vault register` + `vault login` — account profile (PRD §7.1).** The last
   two unimplemented verbs, as an account-profile flow (not the Bitwarden
   personal API-key model, which stays a tracked follow-up).

@@ -17,6 +17,19 @@ use crate::app::{App, Focus, FormKind, InputMode, Screen};
 /// Mask shown for a secret field that has not been revealed.
 const MASK: &str = "••••••••";
 
+/// Render `buf` with a block caret (`▌`) at `cursor` (a byte offset on a char
+/// boundary). `None`, or a cursor at the end, draws a trailing caret (`buf▌`);
+/// mid-string draws it inline (`va▌lue`). Used for the search / command line
+/// echo and the focused form field.
+fn with_cursor(buf: &str, cursor: Option<usize>) -> String {
+    let at = cursor.unwrap_or(buf.len()).min(buf.len());
+    let mut out = String::with_capacity(buf.len() + "\u{258c}".len());
+    out.push_str(&buf[..at]);
+    out.push('\u{258c}');
+    out.push_str(&buf[at..]);
+    out
+}
+
 /// Parse a `#RRGGBB` palette constant into a ratatui [`Color`]; falls back to
 /// the terminal default on anything malformed.
 #[must_use]
@@ -134,7 +147,7 @@ fn render_items(frame: &mut Frame, app: &App, area: Rect) {
     let title = if app.search.is_empty() {
         format!("Items ({})", filtered.len())
     } else {
-        format!("Items ({}) /{}", filtered.len(), app.search)
+        format!("Items ({}) /{}", filtered.len(), app.search.as_str())
     };
     let list = List::new(items)
         .block(pane_block(&title, app.focus == Focus::Items))
@@ -261,7 +274,7 @@ fn render_form(frame: &mut Frame, app: &App, area: Rect) {
             // Compose secrets visibly only while their field has focus.
             (MASK.to_owned(), steel)
         } else if row.focused {
-            (format!("{}\u{258c}", row.value), amber)
+            (with_cursor(row.value, row.cursor), amber)
         } else {
             (row.value.to_owned(), info)
         };
@@ -369,8 +382,14 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     // The trailing slot shows, in priority order: the line being edited
     // (search / command input), a transient toast, or the key hints.
     let editing = match app.mode {
-        InputMode::Search => Some(format!("/{}\u{258c}", app.search)),
-        InputMode::Command => Some(format!(":{}\u{258c}", app.command)),
+        InputMode::Search => Some(format!(
+            "/{}",
+            with_cursor(app.search.as_str(), Some(app.search.cursor()))
+        )),
+        InputMode::Command => Some(format!(
+            ":{}",
+            with_cursor(app.command.as_str(), Some(app.command.cursor()))
+        )),
         InputMode::Normal | InputMode::Generate | InputMode::Form | InputMode::ConfirmDelete => {
             None
         }
@@ -579,6 +598,21 @@ mod tests {
         assert!(
             text.contains("/git\u{258c}"),
             "live query missing from status bar:\n{text}"
+        );
+    }
+
+    #[test]
+    fn cursor_renders_mid_string_after_moving_left() {
+        let mut app = App::browsing(status(), vec![login_entry()]);
+        app.open_search();
+        for c in "git".chars() {
+            app.search_push(c);
+        }
+        app.input_left(); // cursor between 'gi' and 't'
+        let text = draw(&app);
+        assert!(
+            text.contains("/gi\u{258c}t"),
+            "mid-string caret missing:\n{text}"
         );
     }
 
