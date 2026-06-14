@@ -29,6 +29,169 @@ const GEN_MIN_LEN: usize = 8;
 /// own generator ceiling so saved values round-trip everywhere.
 const GEN_MAX_LEN: usize = 128;
 
+/// A single-line editable text buffer with a cursor — the shared core behind
+/// the `/` search, `:` command line, and every form field. Edits happen at the
+/// cursor; `cursor` is a byte offset kept on a `char` boundary so all the
+/// slicing below is UTF-8-safe. Kill methods return the removed text so the
+/// caller can stash it in a kill-ring for `Ctrl+Y`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TextInput {
+    buf: String,
+    cursor: usize,
+}
+
+impl TextInput {
+    /// The current text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.buf
+    }
+
+    /// Cursor byte offset (always on a char boundary, in `0..=len`).
+    #[must_use]
+    pub const fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Whether the buffer is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
+
+    /// Clear the text and reset the cursor.
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.cursor = 0;
+    }
+
+    /// Take the text, leaving the input empty.
+    #[must_use]
+    pub fn take(&mut self) -> String {
+        self.cursor = 0;
+        std::mem::take(&mut self.buf)
+    }
+
+    /// Insert `c` at the cursor and step past it.
+    pub fn insert(&mut self, c: char) {
+        self.buf.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+
+    /// Insert `s` at the cursor (paste / yank), leaving the cursor after it.
+    pub fn insert_str(&mut self, s: &str) {
+        self.buf.insert_str(self.cursor, s);
+        self.cursor += s.len();
+    }
+
+    /// Delete the char before the cursor (Backspace).
+    pub fn backspace(&mut self) {
+        if let Some(prev) = self.prev_boundary() {
+            self.buf.replace_range(prev..self.cursor, "");
+            self.cursor = prev;
+        }
+    }
+
+    /// Delete the char at the cursor (Delete).
+    pub fn delete(&mut self) {
+        if let Some(next) = self.next_boundary() {
+            self.buf.replace_range(self.cursor..next, "");
+        }
+    }
+
+    /// Move the cursor one char left.
+    pub fn left(&mut self) {
+        if let Some(prev) = self.prev_boundary() {
+            self.cursor = prev;
+        }
+    }
+
+    /// Move the cursor one char right.
+    pub fn right(&mut self) {
+        if let Some(next) = self.next_boundary() {
+            self.cursor = next;
+        }
+    }
+
+    /// Move the cursor to the start.
+    pub const fn home(&mut self) {
+        self.cursor = 0;
+    }
+
+    /// Move the cursor to the end.
+    pub const fn end(&mut self) {
+        self.cursor = self.buf.len();
+    }
+
+    /// Delete the word before the cursor (Ctrl+W): trailing spaces, then the
+    /// run of non-spaces. Returns the removed text.
+    pub fn kill_word_back(&mut self) -> String {
+        let mut start = self.cursor;
+        let take_while_back = |start: &mut usize, pred: &dyn Fn(char) -> bool| {
+            while *start > 0 {
+                let prev = self.buf[..*start]
+                    .chars()
+                    .next_back()
+                    .map_or(*start, |c| *start - c.len_utf8());
+                let c = self.buf[prev..*start].chars().next().unwrap_or(' ');
+                if pred(c) {
+                    *start = prev;
+                } else {
+                    break;
+                }
+            }
+        };
+        take_while_back(&mut start, &|c| c == ' ');
+        take_while_back(&mut start, &|c| c != ' ');
+        let removed = self.buf[start..self.cursor].to_owned();
+        self.buf.replace_range(start..self.cursor, "");
+        self.cursor = start;
+        removed
+    }
+
+    /// Delete from the start of the line to the cursor (Ctrl+U). Returns it.
+    pub fn kill_to_start(&mut self) -> String {
+        let removed = self.buf[..self.cursor].to_owned();
+        self.buf.replace_range(..self.cursor, "");
+        self.cursor = 0;
+        removed
+    }
+
+    /// Delete from the cursor to the end of the line (Ctrl+K). Returns it.
+    pub fn kill_to_end(&mut self) -> String {
+        let removed = self.buf[self.cursor..].to_owned();
+        self.buf.truncate(self.cursor);
+        removed
+    }
+
+    /// Byte offset of the char boundary before the cursor, if any.
+    fn prev_boundary(&self) -> Option<usize> {
+        (self.cursor > 0).then(|| {
+            self.buf[..self.cursor]
+                .chars()
+                .next_back()
+                .map_or(0, |c| self.cursor - c.len_utf8())
+        })
+    }
+
+    /// Byte offset of the char boundary after the cursor, if any.
+    fn next_boundary(&self) -> Option<usize> {
+        self.buf[self.cursor..]
+            .chars()
+            .next()
+            .map(|c| self.cursor + c.len_utf8())
+    }
+}
+
+impl From<&str> for TextInput {
+    fn from(s: &str) -> Self {
+        Self {
+            buf: s.to_owned(),
+            cursor: s.len(),
+        }
+    }
+}
+
 /// What keyboard input currently drives.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InputMode {
@@ -190,8 +353,8 @@ pub enum FormKind {
 pub struct FormField {
     /// Display label (`Name`, `User`, `Pass`, …).
     pub label: &'static str,
-    /// Current text.
-    pub value: String,
+    /// Current text, with its own cursor.
+    pub value: TextInput,
     /// Value the form opened with — submit sends only fields that differ.
     initial: String,
     /// Mask the value while the field is unfocused, redact it in `Debug`.
@@ -225,6 +388,9 @@ pub struct FormRowView<'a> {
     pub focused: bool,
     /// Whether this is the Type toggle row rather than a text field.
     pub is_type: bool,
+    /// Cursor byte offset within `value` — `Some` only for the focused text
+    /// field, so the renderer draws the caret in exactly one place.
+    pub cursor: Option<usize>,
 }
 
 /// The add/edit form overlay's state. Pure data + navigation/edit logic;
@@ -284,7 +450,7 @@ impl FormState {
             .into_iter()
             .map(|label| FormField {
                 label,
-                value: String::new(),
+                value: TextInput::default(),
                 initial: String::new(),
                 secret: label == "Pass",
             })
@@ -309,7 +475,7 @@ impl FormState {
     pub fn new_edit(entry: &ListEntry) -> Self {
         let mut fields = Self::blank_fields();
         let mut prefill = |idx: usize, v: &str| {
-            v.clone_into(&mut fields[idx].value);
+            fields[idx].value = TextInput::from(v);
             v.clone_into(&mut fields[idx].initial);
         };
         prefill(F_NAME, &entry.name);
@@ -412,17 +578,20 @@ impl FormState {
                 secret: false,
                 focused: self.focus == 0,
                 is_type: true,
+                cursor: None,
             });
         }
         let off = usize::from(self.has_type_row());
         for (row, idx) in self.visible_fields().into_iter().enumerate() {
             let f = &self.fields[idx];
+            let focused = self.focus == off + row;
             out.push(FormRowView {
                 label: f.label,
-                value: &f.value,
+                value: f.value.as_str(),
                 secret: f.secret,
-                focused: self.focus == off + row,
+                focused,
                 is_type: false,
+                cursor: focused.then(|| f.value.cursor()),
             });
         }
         out
@@ -444,7 +613,8 @@ impl FormState {
         let vis = self.visible_fields();
         let take = |idx: usize| -> Option<String> {
             let f = &self.fields[idx];
-            (vis.contains(&idx) && f.value != f.initial).then(|| f.value.clone())
+            (vis.contains(&idx) && f.value.as_str() != f.initial)
+                .then(|| f.value.as_str().to_owned())
         };
         let name = take(F_NAME);
         let username = take(F_USER);
@@ -501,10 +671,12 @@ pub struct App {
     pub mode: InputMode,
     /// Live search query, applied on top of the folder filter. Persists after
     /// the user accepts it with Enter; cleared by Esc.
-    pub search: String,
+    pub search: TextInput,
     /// Pending `:` command-line buffer, only meaningful in
     /// [`InputMode::Command`].
-    pub command: String,
+    pub command: TextInput,
+    /// Shared kill-ring for `Ctrl+W`/`Ctrl+U`/`Ctrl+K` cuts; `Ctrl+Y` yanks it.
+    pub kill_ring: String,
     /// Generator overlay state, `Some` while [`InputMode::Generate`] is open.
     pub generator: Option<GeneratorState>,
     /// Add/edit form state, `Some` while [`InputMode::Form`] is open.
@@ -539,8 +711,9 @@ impl App {
             item_sel: 0,
             focus: Focus::Items,
             mode: InputMode::Normal,
-            search: String::new(),
-            command: String::new(),
+            search: TextInput::default(),
+            command: TextInput::default(),
+            kill_ring: String::new(),
             generator: None,
             form: None,
             confirm_delete: None,
@@ -570,8 +743,9 @@ impl App {
             item_sel: 0,
             focus: Focus::Items,
             mode: InputMode::Normal,
-            search: String::new(),
-            command: String::new(),
+            search: TextInput::default(),
+            command: TextInput::default(),
+            kill_ring: String::new(),
             generator: None,
             form: None,
             confirm_delete: None,
@@ -595,7 +769,7 @@ impl App {
     #[must_use]
     pub fn filtered(&self) -> Vec<&ListEntry> {
         let filter = self.active_filter();
-        let query = self.search.to_lowercase();
+        let query = self.search.as_str().to_lowercase();
         self.entries
             .iter()
             .filter(|e| match filter {
@@ -706,13 +880,13 @@ impl App {
 
     /// Append a character to the live search query.
     pub fn search_push(&mut self, c: char) {
-        self.search.push(c);
+        self.search.insert(c);
         self.on_query_changed();
     }
 
-    /// Delete the last character of the live search query.
+    /// Delete the character before the cursor in the live search query.
     pub fn search_pop(&mut self) {
-        self.search.pop();
+        self.search.backspace();
         self.on_query_changed();
     }
 
@@ -755,14 +929,14 @@ impl App {
         self.mode = InputMode::Command;
     }
 
-    /// Append a character to the pending command.
+    /// Insert a character at the cursor in the pending command.
     pub fn command_push(&mut self, c: char) {
-        self.command.push(c);
+        self.command.insert(c);
     }
 
-    /// Delete the last character of the pending command.
+    /// Delete the character before the cursor in the pending command.
     pub fn command_pop(&mut self) {
-        self.command.pop();
+        self.command.backspace();
     }
 
     /// Abandon the command line.
@@ -775,7 +949,129 @@ impl App {
     #[must_use]
     pub fn take_command(&mut self) -> String {
         self.mode = InputMode::Normal;
-        std::mem::take(&mut self.command)
+        self.command.take()
+    }
+
+    // --- shared text-input editing (search / command / focused form field) -
+
+    /// The text input the current mode edits, if any. The single seam every
+    /// readline-style key routes through.
+    fn active_input_mut(&mut self) -> Option<&mut TextInput> {
+        match self.mode {
+            InputMode::Search => Some(&mut self.search),
+            InputMode::Command => Some(&mut self.command),
+            InputMode::Form => self
+                .form
+                .as_mut()
+                .and_then(FormState::focused_field_mut)
+                .map(|f| &mut f.value),
+            InputMode::Normal | InputMode::Generate | InputMode::ConfirmDelete => None,
+        }
+    }
+
+    /// Run search's live-filter bookkeeping after a content edit; no-op in
+    /// other modes. Cursor-only moves don't call this (the query is unchanged).
+    fn after_input_edit(&mut self) {
+        if self.mode == InputMode::Search {
+            self.on_query_changed();
+        }
+    }
+
+    /// Move the cursor left in the active input.
+    pub fn input_left(&mut self) {
+        if let Some(ti) = self.active_input_mut() {
+            ti.left();
+        }
+    }
+
+    /// Move the cursor right in the active input.
+    pub fn input_right(&mut self) {
+        if let Some(ti) = self.active_input_mut() {
+            ti.right();
+        }
+    }
+
+    /// Move the cursor to the start of the active input.
+    pub fn input_home(&mut self) {
+        if let Some(ti) = self.active_input_mut() {
+            ti.home();
+        }
+    }
+
+    /// Move the cursor to the end of the active input.
+    pub fn input_end(&mut self) {
+        if let Some(ti) = self.active_input_mut() {
+            ti.end();
+        }
+    }
+
+    /// Delete the character at the cursor (Delete key).
+    pub fn input_delete(&mut self) {
+        if let Some(ti) = self.active_input_mut() {
+            ti.delete();
+        }
+        self.after_input_edit();
+    }
+
+    /// Insert text at the cursor — paste, with newlines stripped since every
+    /// input is single-line.
+    pub fn input_insert_str(&mut self, s: &str) {
+        let cleaned: String = s.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+        if cleaned.is_empty() {
+            return;
+        }
+        if let Some(ti) = self.active_input_mut() {
+            ti.insert_str(&cleaned);
+        }
+        self.after_input_edit();
+    }
+
+    /// `Ctrl+W` — kill the word before the cursor into the kill-ring.
+    pub fn input_kill_word(&mut self) {
+        let killed = match self.active_input_mut() {
+            Some(ti) => ti.kill_word_back(),
+            None => return,
+        };
+        if !killed.is_empty() {
+            self.kill_ring = killed;
+        }
+        self.after_input_edit();
+    }
+
+    /// `Ctrl+U` — kill from the line start to the cursor into the kill-ring.
+    pub fn input_kill_to_start(&mut self) {
+        let killed = match self.active_input_mut() {
+            Some(ti) => ti.kill_to_start(),
+            None => return,
+        };
+        if !killed.is_empty() {
+            self.kill_ring = killed;
+        }
+        self.after_input_edit();
+    }
+
+    /// `Ctrl+K` — kill from the cursor to the line end into the kill-ring.
+    pub fn input_kill_to_end(&mut self) {
+        let killed = match self.active_input_mut() {
+            Some(ti) => ti.kill_to_end(),
+            None => return,
+        };
+        if !killed.is_empty() {
+            self.kill_ring = killed;
+        }
+        self.after_input_edit();
+    }
+
+    /// `Ctrl+Y` — yank (insert) the kill-ring at the cursor.
+    pub fn input_yank(&mut self) {
+        let s = self.kill_ring.clone();
+        if s.is_empty() {
+            return;
+        }
+        if let Some(ti) = self.active_input_mut() {
+            ti.insert_str(&s);
+        }
+        self.after_input_edit();
     }
 
     // --- generator overlay -----------------------------------------------
@@ -872,14 +1168,14 @@ impl App {
     /// Append a character to the focused form field (no-op on the Type row).
     pub fn form_push(&mut self, c: char) {
         if let Some(f) = self.form.as_mut().and_then(FormState::focused_field_mut) {
-            f.value.push(c);
+            f.value.insert(c);
         }
     }
 
     /// Delete the last character of the focused form field.
     pub fn form_pop(&mut self) {
         if let Some(f) = self.form.as_mut().and_then(FormState::focused_field_mut) {
-            f.value.pop();
+            f.value.backspace();
         }
     }
 
@@ -916,7 +1212,7 @@ impl App {
         match generate_password(&GenerateOptions::default()) {
             Ok(pw) => {
                 if let Some(f) = form.focused_field_mut() {
-                    f.value = pw.to_string();
+                    f.value = TextInput::from(pw.as_str());
                 }
             }
             Err(e) => self.toast = Some(format!("generate failed: {e}")),
@@ -1013,6 +1309,115 @@ pub fn derive_folders(entries: &[ListEntry]) -> Vec<FolderItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_input_insert_and_delete_at_cursor() {
+        let mut ti = TextInput::from("abd");
+        // Cursor at end after From. Move left once → between 'b' and 'd'.
+        ti.left();
+        ti.insert('c'); // "abcd", cursor after 'c'
+        assert_eq!(ti.as_str(), "abcd");
+        assert_eq!(ti.cursor(), 3);
+        ti.backspace(); // removes 'c' → "abd"
+        assert_eq!(ti.as_str(), "abd");
+        ti.home();
+        ti.delete(); // removes 'a' → "bd"
+        assert_eq!(ti.as_str(), "bd");
+        assert_eq!(ti.cursor(), 0);
+    }
+
+    #[test]
+    fn text_input_cursor_nav_clamps() {
+        let mut ti = TextInput::from("hi");
+        ti.right(); // already at end
+        assert_eq!(ti.cursor(), 2);
+        ti.home();
+        ti.left(); // already at start
+        assert_eq!(ti.cursor(), 0);
+        ti.end();
+        assert_eq!(ti.cursor(), 2);
+    }
+
+    #[test]
+    fn text_input_kills_return_removed_text() {
+        let mut ti = TextInput::from("foo bar");
+        assert_eq!(ti.kill_word_back(), "bar"); // "foo "
+        assert_eq!(ti.as_str(), "foo ");
+        assert_eq!(ti.kill_to_start(), "foo "); // ""
+        assert!(ti.is_empty());
+
+        let mut ti = TextInput::from("keep cut");
+        ti.home();
+        for _ in 0..4 {
+            ti.right();
+        } // cursor after "keep"
+        assert_eq!(ti.kill_to_end(), " cut");
+        assert_eq!(ti.as_str(), "keep");
+    }
+
+    #[test]
+    fn text_input_insert_str_lands_at_cursor() {
+        let mut ti = TextInput::from("ad");
+        ti.left(); // between 'a' and 'd'
+        ti.insert_str("bc");
+        assert_eq!(ti.as_str(), "abcd");
+        assert_eq!(ti.cursor(), 3);
+    }
+
+    #[test]
+    fn text_input_is_utf8_boundary_safe() {
+        // "café" — 'é' is two bytes. Backspace must remove the whole char.
+        let mut ti = TextInput::from("café");
+        ti.backspace();
+        assert_eq!(ti.as_str(), "caf");
+        // Insert a multibyte char mid-string, then navigate across it.
+        let mut ti = TextInput::from("ab");
+        ti.left();
+        ti.insert('é'); // "aéb"
+        assert_eq!(ti.as_str(), "aéb");
+        ti.left();
+        assert_eq!(ti.cursor(), 1); // before 'é' (one byte in)
+        ti.delete(); // removes 'é'
+        assert_eq!(ti.as_str(), "ab");
+    }
+
+    #[test]
+    fn kill_then_yank_round_trips_via_kill_ring() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_command();
+        for c in "hello world".chars() {
+            app.command_push(c);
+        }
+        app.input_kill_word(); // cuts "world" into the ring
+        assert_eq!(app.command.as_str(), "hello ");
+        app.input_yank(); // pastes it back
+        assert_eq!(app.command.as_str(), "hello world");
+    }
+
+    #[test]
+    fn paste_into_focused_form_field_only() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_add_form();
+        app.form_focus_next(); // → Name field
+        app.input_insert_str("git\nhub"); // newline stripped
+        let name = app.form.as_ref().expect("form").rows()[1].value.to_owned();
+        assert_eq!(name, "github");
+    }
+
+    #[test]
+    fn search_edit_via_unified_path_reanchors_selection() {
+        let entries = vec![entry("aa", None), entry("ab", None), entry("zz", None)];
+        let mut app = App::browsing(status(), entries);
+        app.open_search();
+        for c in "a".chars() {
+            app.search_push(c);
+        }
+        app.move_down(); // item_sel → 1 within the filtered list
+        assert_eq!(app.item_sel, 1);
+        app.input_kill_to_start(); // clears the query via the unified path
+        assert_eq!(app.item_sel, 0, "a content edit must re-anchor");
+        assert!(!app.has_search());
+    }
 
     fn entry(name: &str, folder: Option<&str>) -> ListEntry {
         ListEntry {
@@ -1274,7 +1679,7 @@ mod tests {
             app.command_push(c);
         }
         app.command_pop();
-        assert_eq!(app.command, "sync");
+        assert_eq!(app.command.as_str(), "sync");
         assert_eq!(app.take_command(), "sync");
         assert_eq!(app.mode, InputMode::Normal);
         assert!(app.command.is_empty());

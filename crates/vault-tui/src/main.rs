@@ -26,7 +26,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -120,7 +123,7 @@ async fn run(socket: &Path) -> anyhow::Result<()> {
 
     install_panic_hook();
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
     let _restore = Restore; // RAII: restores the terminal on drop / unwind.
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
@@ -159,6 +162,7 @@ async fn run(socket: &Path) -> anyhow::Result<()> {
         };
         match ev {
             Some(Event::Key(key)) => handle_key(&mut state, key, socket).await,
+            Some(Event::Paste(s)) => state.input_insert_str(&s),
             Some(_) => {}  // resize / mouse / focus — redraw on next iteration
             None => break, // input thread gone
         }
@@ -253,23 +257,37 @@ async fn handle_normal_key(state: &mut App, key: KeyEvent, socket: &Path) {
 
 /// Form-overlay keys — field navigation and editing; Enter submits.
 async fn handle_form_key(state: &mut App, key: KeyEvent, socket: &Path) {
-    // Ctrl+G fills the focused Pass field with a generated password; other
-    // Ctrl chords are reserved (PRD's CUA layer is a tracked follow-up).
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        if key.code == KeyCode::Char('g') {
-            state.gen_into_password();
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // Form-specific Ctrl chords: generate into Pass, save (submit).
+    if ctrl {
+        match key.code {
+            KeyCode::Char('g') => state.gen_into_password(),
+            KeyCode::Char('s') => submit_form(state, socket).await,
+            // Fall through to the shared editor for Ctrl+A/E/W/U/K/Y.
+            _ if handle_text_edit_key(state, key) => {}
+            _ => {}
         }
+        return;
+    }
+    // On the Type row, ←/→/Space toggle login⇄note; in text fields the cursor
+    // keys edit, so route them to the shared editor instead.
+    if state.form_on_type_row() {
+        match key.code {
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
+                state.form_toggle_type();
+                return;
+            }
+            _ => {}
+        }
+    } else if handle_text_edit_key(state, key) {
         return;
     }
     match key.code {
         KeyCode::Esc => state.cancel_form(),
         KeyCode::Tab | KeyCode::Down => state.form_focus_next(),
         KeyCode::BackTab | KeyCode::Up => state.form_focus_prev(),
-        KeyCode::Left | KeyCode::Right => state.form_toggle_type(),
         KeyCode::Enter => submit_form(state, socket).await,
         KeyCode::Backspace => state.form_pop(),
-        // Space toggles on the Type row, types a literal space elsewhere.
-        KeyCode::Char(' ') if state.form_on_type_row() => state.form_toggle_type(),
         KeyCode::Char(c) => state.form_push(c),
         _ => {}
     }
@@ -352,9 +370,35 @@ async fn handle_confirm_key(state: &mut App, key: KeyEvent, socket: &Path) {
     }
 }
 
+/// Shared readline editing keys for any text-input surface — cursor movement,
+/// Delete, and the kill/yank chords. Returns `true` when it consumed the key.
+/// `Ctrl+C` is intentionally absent: it stays the global quit, intercepted in
+/// `handle_key` before mode dispatch.
+fn handle_text_edit_key(state: &mut App, key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Left => state.input_left(),
+        KeyCode::Right => state.input_right(),
+        KeyCode::Home => state.input_home(),
+        KeyCode::End => state.input_end(),
+        KeyCode::Delete => state.input_delete(),
+        KeyCode::Char('a') if ctrl => state.input_home(),
+        KeyCode::Char('e') if ctrl => state.input_end(),
+        KeyCode::Char('w') if ctrl => state.input_kill_word(),
+        KeyCode::Char('u') if ctrl => state.input_kill_to_start(),
+        KeyCode::Char('k') if ctrl => state.input_kill_to_end(),
+        KeyCode::Char('y') if ctrl => state.input_yank(),
+        _ => return false,
+    }
+    true
+}
+
 /// Search-mode keys — live query editing; arrows still move the selection so
 /// the user can pick a hit without leaving the mode.
 fn handle_search_key(state: &mut App, key: KeyEvent) {
+    if handle_text_edit_key(state, key) {
+        return;
+    }
     match key.code {
         KeyCode::Esc => state.cancel_search(),
         KeyCode::Enter => state.accept_search(),
@@ -370,6 +414,9 @@ fn handle_search_key(state: &mut App, key: KeyEvent) {
 
 /// Command-mode keys — edit the `:` buffer; Enter executes it.
 async fn handle_command_key(state: &mut App, key: KeyEvent, socket: &Path) {
+    if handle_text_edit_key(state, key) {
+        return;
+    }
     match key.code {
         KeyCode::Esc => state.cancel_command(),
         KeyCode::Backspace => state.command_pop(),
@@ -578,7 +625,7 @@ fn osc52_copy(state: &mut App, value: &str, label: &str) {
 /// an error to.
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    let _ = execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen);
 }
 
 /// RAII terminal-restore guard.
