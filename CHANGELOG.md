@@ -10,6 +10,16 @@ range may break in any release.
 
 ### Added
 
+- **TUI card create/edit.** The `vault-tui` add/edit form (`a`/`e`) now composes
+  card (type 3) items, not just logins and secure notes. The **Type** row cycles
+  `login → secure note → card`; the card rows are cardholder/brand/number/expiry
+  (one `MM/YYYY` field, split on submit)/CVV, with number and CVV masked while
+  unfocused. On edit, brand/expiry prefill from the detail pane's on-select fetch
+  and secrets start blank (blank = leave unchanged). Builds the existing
+  `CardWrite` payload on `Request::Add`/`Edit` — no backend change. Identity TUI
+  editing stays pending (no identity write path yet). Tests: card add carries
+  split expiry + redacts secrets, card edit prefill/diff, `parse_expiry`.
+
 - **Create/edit card ciphers.** `vault add … --type card` and `vault edit`
   now build/update card (type 3) items: cardholder/brand/expiry via flags, the
   **number and CVV prompted on the controlling terminal** (`/dev/tty`, never

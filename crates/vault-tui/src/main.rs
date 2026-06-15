@@ -38,7 +38,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
-use vault_ipc::proto::{Error as IpcError, Field, Request, Response, Status};
+use vault_ipc::proto::{CardWrite, Error as IpcError, Field, Request, Response, Status};
 use vault_ipc::{default_socket_path, sanitize_socket_path};
 
 use app::{App, FormKind, FormSubmit, InputMode, RevealedSecret, UnlockState};
@@ -465,7 +465,22 @@ async fn submit_form(state: &mut App, socket: &Path) {
         uri,
         folder,
         notes,
+        cardholder,
+        brand,
+        number,
+        exp_month,
+        exp_year,
+        code,
     } = data;
+    // Only a card cipher carries card fields; other types send `card: None`.
+    let card = (cipher_type == 3).then(|| CardWrite {
+        cardholder,
+        brand,
+        number: number.map(String::into_bytes),
+        exp_month,
+        exp_year,
+        code: code.map(String::into_bytes),
+    });
     let req = match kind {
         FormKind::Add => Request::Add {
             name: name.unwrap_or_default(),
@@ -476,7 +491,7 @@ async fn submit_form(state: &mut App, socket: &Path) {
             password: password.map(String::into_bytes),
             totp: None,
             uri,
-            card: None,
+            card,
         },
         FormKind::Edit { id, .. } => Request::Edit {
             selector: id,
@@ -487,7 +502,7 @@ async fn submit_form(state: &mut App, socket: &Path) {
             password: password.map(String::into_bytes),
             totp: None,
             uri,
-            card: None,
+            card,
         },
     };
     match client::request(socket, &req).await {

@@ -444,15 +444,21 @@ impl fmt::Debug for GeneratorState {
     }
 }
 
-/// Index of each field in [`FormState::fields`]. All six fields always exist;
-/// the *visible* subset depends on the cipher type, so values typed under one
-/// type survive a toggle to the other.
+/// Index of each field in [`FormState::fields`]. Every field always exists; the
+/// *visible* subset depends on the cipher type, so values typed under one type
+/// survive a toggle to another. `F_NAME`..=`F_NOTES` are the shared/login rows;
+/// `F_CARDHOLDER`..=`F_CODE` are the card-only rows.
 const F_NAME: usize = 0;
 const F_USER: usize = 1;
 const F_PASS: usize = 2;
 const F_URI: usize = 3;
 const F_FOLDER: usize = 4;
 const F_NOTES: usize = 5;
+const F_CARDHOLDER: usize = 6;
+const F_BRAND: usize = 7;
+const F_NUMBER: usize = 8;
+const F_EXPIRY: usize = 9;
+const F_CODE: usize = 10;
 
 /// Which mutation the form drives.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -546,35 +552,59 @@ pub struct FormSubmit {
     pub folder: Option<String>,
     /// Free-form notes.
     pub notes: Option<String>,
+    /// Card cardholder name (card type).
+    pub cardholder: Option<String>,
+    /// Card brand (card type).
+    pub brand: Option<String>,
+    /// Card number (card type, secret).
+    pub number: Option<String>,
+    /// Card expiry month, split from the `MM/YYYY` field (card type).
+    pub exp_month: Option<String>,
+    /// Card expiry year, split from the `MM/YYYY` field (card type).
+    pub exp_year: Option<String>,
+    /// Card CVV/CVC (card type, secret).
+    pub code: Option<String>,
 }
 
 impl fmt::Debug for FormSubmit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let redact = |o: &Option<String>| o.as_ref().map(|_| "<redacted>");
         f.debug_struct("FormSubmit")
             .field("kind", &self.kind)
             .field("cipher_type", &self.cipher_type)
             .field("name", &self.name)
             .field("username", &self.username)
-            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("password", &redact(&self.password))
             .field("uri", &self.uri)
             .field("folder", &self.folder)
             .field("notes", &self.notes)
+            .field("cardholder", &self.cardholder)
+            .field("brand", &self.brand)
+            .field("number", &redact(&self.number))
+            .field("exp_month", &self.exp_month)
+            .field("exp_year", &self.exp_year)
+            .field("code", &redact(&self.code))
             .finish()
     }
 }
 
 impl FormState {
-    /// Blank field set shared by both constructors.
+    /// Blank field set shared by both constructors. Labels are kept ≤8 chars to
+    /// fit the `{:<8}` column the renderer uses (so `Holder`/`CVV`, not
+    /// `Cardholder`/`Code`). `Pass`/`Number`/`CVV` mask while unfocused.
     fn blank_fields() -> Vec<FormField> {
-        ["Name", "User", "Pass", "URI", "Folder", "Notes"]
-            .into_iter()
-            .map(|label| FormField {
-                label,
-                value: TextInput::default(),
-                initial: String::new(),
-                secret: label == "Pass",
-            })
-            .collect()
+        [
+            "Name", "User", "Pass", "URI", "Folder", "Notes", // shared / login
+            "Holder", "Brand", "Number", "Expiry", "CVV", // card
+        ]
+        .into_iter()
+        .map(|label| FormField {
+            label,
+            value: TextInput::default(),
+            initial: String::new(),
+            secret: matches!(label, "Pass" | "Number" | "CVV"),
+        })
+        .collect()
     }
 
     /// An empty add form, composing a login by default.
@@ -589,10 +619,12 @@ impl FormState {
     }
 
     /// An edit form for `entry`, prefilled with the metadata the list already
-    /// carries (name / username / folder). Secrets stay blank — blank means
-    /// "leave unchanged" on submit.
+    /// carries (name / username / folder). For a card, `detail` (the pane's
+    /// on-select fetch) prefills `Brand`/`Expiry`. Secrets stay blank — blank
+    /// means "leave unchanged" on submit (so does the un-prefilled cardholder,
+    /// which has no fetch selector yet).
     #[must_use]
-    pub fn new_edit(entry: &ListEntry) -> Self {
+    pub fn new_edit(entry: &ListEntry, detail: Option<&DetailView>) -> Self {
         let mut fields = Self::blank_fields();
         let mut prefill = |idx: usize, v: &str| {
             fields[idx].value = TextInput::from(v);
@@ -604,6 +636,15 @@ impl FormState {
         }
         if let Some(fo) = entry.folder.as_deref() {
             prefill(F_FOLDER, fo);
+        }
+        if let Some(d) = detail.filter(|d| entry.cipher_type == 3 && d.id == entry.id) {
+            for (label, value) in &d.lines {
+                match label.as_str() {
+                    "Brand" => prefill(F_BRAND, value),
+                    "Exp" => prefill(F_EXPIRY, value),
+                    _ => {}
+                }
+            }
         }
         Self {
             kind: FormKind::Edit {
@@ -630,12 +671,21 @@ impl FormState {
 
     /// Indices of the fields the current cipher type exposes.
     fn visible_fields(&self) -> Vec<usize> {
-        if self.cipher_type == 1 {
-            (F_NAME..=F_NOTES).collect()
-        } else {
-            // Secure notes (and anything that isn't a login) edit only the
-            // metadata fields every cipher type carries.
-            vec![F_NAME, F_FOLDER, F_NOTES]
+        match self.cipher_type {
+            1 => (F_NAME..=F_NOTES).collect(),
+            3 => vec![
+                F_NAME,
+                F_CARDHOLDER,
+                F_BRAND,
+                F_NUMBER,
+                F_EXPIRY,
+                F_CODE,
+                F_FOLDER,
+                F_NOTES,
+            ],
+            // Secure notes (and anything else) edit only the metadata fields
+            // every cipher type carries.
+            _ => vec![F_NAME, F_FOLDER, F_NOTES],
         }
     }
 
@@ -670,20 +720,25 @@ impl FormState {
             .unwrap_or_else(|| self.row_count() - 1);
     }
 
-    /// Flip login ⇄ secure note (no-op unless the Type row has focus).
+    /// Cycle login → secure note → card → login (no-op unless the Type row has
+    /// focus). Focus stays on row 0, so the row count change can't overflow it.
     pub const fn toggle_type(&mut self) {
         if self.on_type_row() {
-            self.cipher_type = if self.cipher_type == 1 { 2 } else { 1 };
+            self.cipher_type = match self.cipher_type {
+                1 => 2,
+                2 => 3,
+                _ => 1,
+            };
         }
     }
 
     /// Human name of the cipher type being composed.
     #[must_use]
     pub const fn type_label(&self) -> &'static str {
-        if self.cipher_type == 1 {
-            "login"
-        } else {
-            "secure note"
+        match self.cipher_type {
+            1 => "login",
+            3 => "card",
+            _ => "secure note",
         }
     }
 
@@ -742,6 +797,21 @@ impl FormState {
         let uri = take(F_URI);
         let folder = take(F_FOLDER);
         let notes = take(F_NOTES);
+        let cardholder = take(F_CARDHOLDER);
+        let brand = take(F_BRAND);
+        let number = take(F_NUMBER);
+        let code = take(F_CODE);
+        // The form carries one `MM/YYYY` field; split it for the wire. A change
+        // to an empty string (cleared field) carries no expiry rather than
+        // erroring — only a non-empty, malformed value is rejected.
+        let expiry = take(F_EXPIRY);
+        let (exp_month, exp_year) = match expiry.as_deref() {
+            Some(s) if !s.is_empty() => {
+                let (m, y) = parse_expiry(s).map_err(|()| "expiry must be MM/YYYY".to_owned())?;
+                (Some(m), Some(y))
+            }
+            _ => (None, None),
+        };
         match self.kind {
             FormKind::Add => {
                 if name.as_deref().is_none_or(str::is_empty) {
@@ -749,9 +819,21 @@ impl FormState {
                 }
             }
             FormKind::Edit { .. } => {
-                if [&name, &username, &password, &uri, &folder, &notes]
-                    .iter()
-                    .all(|o| o.is_none())
+                if [
+                    &name,
+                    &username,
+                    &password,
+                    &uri,
+                    &folder,
+                    &notes,
+                    &cardholder,
+                    &brand,
+                    &number,
+                    &code,
+                    &expiry,
+                ]
+                .iter()
+                .all(|o| o.is_none())
                 {
                     return Err("no changes to save".to_owned());
                 }
@@ -766,8 +848,35 @@ impl FormState {
             uri,
             folder,
             notes,
+            cardholder,
+            brand,
+            number,
+            exp_month,
+            exp_year,
+            code,
         })
     }
+}
+
+/// Split an `MM/YYYY` (or `MM/YY`, expanded to `20YY`) expiry into
+/// `(month, year)` strings; month is validated `1..=12` and emitted unpadded
+/// (the agent zero-pads on display). Mirrors the CLI's `split_expiry`.
+fn parse_expiry(raw: &str) -> Result<(String, String), ()> {
+    let (m, y) = raw.split_once('/').ok_or(())?;
+    let month: u32 = m.trim().parse().map_err(|_| ())?;
+    if !(1..=12).contains(&month) {
+        return Err(());
+    }
+    let y = y.trim();
+    if y.is_empty() || !y.chars().all(|c| c.is_ascii_digit()) {
+        return Err(());
+    }
+    let year = if y.len() == 2 {
+        format!("20{y}")
+    } else {
+        y.to_owned()
+    };
+    Ok((month.to_string(), year))
 }
 
 /// Top-level TUI state.
@@ -1398,7 +1507,7 @@ impl App {
             return;
         };
         self.revealed = None;
-        self.form = Some(FormState::new_edit(&sel));
+        self.form = Some(FormState::new_edit(&sel, self.detail.as_ref()));
         self.mode = InputMode::Form;
     }
 
@@ -2159,9 +2268,13 @@ mod tests {
         assert_eq!(form.cipher_type, 2);
         let labels: Vec<&str> = form.rows().iter().map(|r| r.label).collect();
         assert_eq!(labels, ["Type", "Name", "Folder", "Notes"]);
-        // Flip back — the typed username survived the round trip.
+        // One more step is the card type.
+        app.form_toggle_type();
+        assert_eq!(app.form.as_ref().expect("form open").cipher_type, 3);
+        // A third wraps back to login — the typed username survived the cycle.
         app.form_toggle_type();
         let form = app.form.as_ref().expect("form open");
+        assert_eq!(form.cipher_type, 1);
         let user = form
             .rows()
             .into_iter()
@@ -2250,6 +2363,128 @@ mod tests {
         assert_eq!(data.cipher_type, 2);
         assert_eq!(data.name.as_deref(), Some("n"));
         assert_eq!(data.password, None, "hidden login fields must not leak");
+    }
+
+    /// A type-3 list entry for the card form tests.
+    fn card_entry() -> ListEntry {
+        ListEntry {
+            id: "id-visa".to_owned(),
+            name: "Visa".to_owned(),
+            cipher_type: 3,
+            username: None,
+            folder: None,
+        }
+    }
+
+    #[test]
+    fn add_card_form_carries_split_expiry_and_redacts_secrets() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_add_form();
+        app.form_toggle_type(); // login → secure note
+        app.form_toggle_type(); // secure note → card
+        let form = app.form.as_ref().expect("form open");
+        assert_eq!(form.cipher_type, 3);
+        let labels: Vec<&str> = form.rows().iter().map(|r| r.label).collect();
+        assert_eq!(
+            labels,
+            [
+                "Type", "Name", "Holder", "Brand", "Number", "Expiry", "CVV", "Folder", "Notes"
+            ]
+        );
+        // Fill rows in order: Name, (skip Holder), Brand, Number, Expiry, CVV.
+        let type_into = |app: &mut App, s: &str| {
+            for c in s.chars() {
+                app.form_push(c);
+            }
+        };
+        app.form_focus_next(); // → Name
+        type_into(&mut app, "My Visa");
+        app.form_focus_next(); // → Holder (left blank)
+        app.form_focus_next(); // → Brand
+        type_into(&mut app, "Visa");
+        app.form_focus_next(); // → Number
+        type_into(&mut app, "4111111111111111");
+        app.form_focus_next(); // → Expiry
+        type_into(&mut app, "04/2030");
+        app.form_focus_next(); // → CVV
+        type_into(&mut app, "123");
+
+        let data = app.form_submit_data().expect("valid card add");
+        assert_eq!(data.cipher_type, 3);
+        assert_eq!(data.name.as_deref(), Some("My Visa"));
+        assert_eq!(data.brand.as_deref(), Some("Visa"));
+        assert_eq!(data.number.as_deref(), Some("4111111111111111"));
+        assert_eq!(data.exp_month.as_deref(), Some("4"));
+        assert_eq!(data.exp_year.as_deref(), Some("2030"));
+        assert_eq!(data.code.as_deref(), Some("123"));
+        assert_eq!(data.cardholder, None, "blank cardholder rides as unset");
+
+        let rendered = format!("{data:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(
+            !rendered.contains("4111111111111111") && !rendered.contains("123"),
+            "Debug leaked a card secret: {rendered}"
+        );
+    }
+
+    #[test]
+    fn edit_card_prefills_from_detail_and_diffs_expiry() {
+        let mut app = App::browsing(status(), vec![card_entry()]);
+        // The detail pane's on-select fetch (Brand + Exp) prefills the form.
+        app.detail = Some(DetailView {
+            id: "id-visa".to_owned(),
+            lines: vec![
+                ("Brand".to_owned(), "Visa".to_owned()),
+                ("Exp".to_owned(), "04/2030".to_owned()),
+            ],
+        });
+        app.open_edit_form();
+        let form = app.form.as_ref().expect("form open");
+        assert!(!form.has_type_row(), "edit can't change the type");
+        let rows = form.rows();
+        let value_of = |label: &str| {
+            rows.iter()
+                .find(|r| r.label == label)
+                .map(|r| r.value.to_owned())
+                .expect("row exists")
+        };
+        assert_eq!(value_of("Brand"), "Visa");
+        assert_eq!(value_of("Expiry"), "04/2030");
+        assert_eq!(value_of("Number"), "", "secrets are never prefilled");
+
+        // Edit rows: Name Holder Brand Number Expiry CVV Folder Notes.
+        // Walk to Expiry (index 4), clear it, and type a new value.
+        for _ in 0..4 {
+            app.form_focus_next();
+        }
+        for _ in 0.."04/2030".len() {
+            app.form_pop();
+        }
+        for c in "05/2031".chars() {
+            app.form_push(c);
+        }
+        let data = app.form_submit_data().expect("valid card edit");
+        assert_eq!(data.exp_month.as_deref(), Some("5"));
+        assert_eq!(data.exp_year.as_deref(), Some("2031"));
+        assert_eq!(data.brand, None, "untouched prefill stays unchanged");
+        assert_eq!(data.number, None, "untouched secret stays unchanged");
+        assert_eq!(data.name, None);
+    }
+
+    #[test]
+    fn parse_expiry_accepts_both_year_widths_and_rejects_garbage() {
+        assert_eq!(
+            parse_expiry("04/2030"),
+            Ok(("4".to_owned(), "2030".to_owned()))
+        );
+        assert_eq!(
+            parse_expiry("4/30"),
+            Ok(("4".to_owned(), "2030".to_owned()))
+        );
+        assert!(parse_expiry("2030").is_err(), "no slash");
+        assert!(parse_expiry("13/2030").is_err(), "month out of range");
+        assert!(parse_expiry("04/").is_err(), "empty year");
+        assert!(parse_expiry("ab/2030").is_err(), "non-numeric month");
     }
 
     #[test]

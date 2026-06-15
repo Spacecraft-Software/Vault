@@ -113,6 +113,11 @@ vault edit "My Visa" --expiry 05/2031 --code   # --code re-prompts the CVV
 (identities are read-only for now). Editing card fields on a non-card item is
 rejected.
 
+The TUI can also create and edit cards: press `a` and cycle the **Type** row
+with `Space` (`login → secure note → card`), or `e` on a selected card. The
+card's number and CVV mask while unfocused; on edit they start blank (blank =
+leave unchanged), and the brand/expiry prefill from the detail pane.
+
 ### PIN unlock
 
 For quick access without re-typing the master password, enroll a PIN (after an
