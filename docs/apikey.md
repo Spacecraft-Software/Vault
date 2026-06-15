@@ -8,6 +8,11 @@
 can only be verified against a real Bitwarden / Vaultwarden account with
 two-factor auth enabled and a personal API key. This is the manual recipe.
 
+> The API key is one way past 2FA; the other is the **interactive
+> authenticator prompt** — `vault login` (no `--api-key`) prompts for a TOTP
+> code (or takes `--totp` / `$BW_TOTP`). Use the API key when you want
+> unattended logins; use the prompt when you'd rather not store a key.
+
 ## Prerequisites
 
 - A Bitwarden (hosted) or Vaultwarden account **with 2FA enabled**.

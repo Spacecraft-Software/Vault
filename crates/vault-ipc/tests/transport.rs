@@ -6,6 +6,7 @@ use tokio::io::{AsyncWriteExt, duplex};
 
 use vault_ipc::proto::{
     ApiKeyCreds, ApiKeyStatus, Error as IpcError, Field, ListEntry, Request, Response, Status,
+    TwoFactorCode,
 };
 use vault_ipc::transport::{MAX_FRAME, read_frame, write_frame};
 
@@ -30,6 +31,9 @@ async fn unlock_round_trip_preserves_password_bytes() {
             client_id: "user.abc123".into(),
             client_secret: b"s3cr3t".to_vec(),
         }),
+        two_factor: Some(TwoFactorCode {
+            token: "123456".into(),
+        }),
     };
     write_frame(&mut a, &req).await.unwrap();
     let got: Request = read_frame(&mut b).await.unwrap();
@@ -40,6 +44,7 @@ async fn unlock_round_trip_preserves_password_bytes() {
             password,
             device_id,
             api_key,
+            two_factor,
         } => {
             assert_eq!(server, "https://vault.example.org");
             assert_eq!(email, "user@example.org");
@@ -51,6 +56,7 @@ async fn unlock_round_trip_preserves_password_bytes() {
             let api_key = api_key.expect("api_key round-trips");
             assert_eq!(api_key.client_id, "user.abc123");
             assert_eq!(api_key.client_secret, b"s3cr3t");
+            assert_eq!(two_factor.expect("two_factor round-trips").token, "123456");
         }
         other => panic!("expected Unlock, got {other:?}"),
     }
@@ -80,10 +86,14 @@ async fn unlock_without_device_id_field_still_decodes() {
     let got: Request = read_frame(&mut b).await.unwrap();
     match got {
         Request::Unlock {
-            device_id, api_key, ..
+            device_id,
+            api_key,
+            two_factor,
+            ..
         } => {
             assert_eq!(device_id, None, "absent → None");
             assert!(api_key.is_none(), "absent api_key → None");
+            assert!(two_factor.is_none(), "absent two_factor → None");
         }
         other => panic!("expected Unlock, got {other:?}"),
     }

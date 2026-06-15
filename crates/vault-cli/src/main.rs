@@ -14,7 +14,8 @@ mod spawn;
 
 use vault_config as config;
 
-use std::io::{self, BufRead, IsTerminal, Read, Write};
+use std::fs::OpenOptions;
+use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
@@ -23,7 +24,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use vault_ipc::proto::{
     ApiKeyCreds, ApiKeyStatus, Error as IpcError, Field, Item, ListEntry, PinStatus, Removed,
-    Request, Response, Saved, Status,
+    Request, Response, Saved, Status, TwoFactorCode,
 };
 use vault_ipc::{default_socket_path, read_frame, sanitize_socket_path, write_frame};
 
@@ -130,6 +131,10 @@ enum Cmd {
         /// password is still required and the key is stored for later unlocks.
         #[arg(long = "api-key")]
         api_key: bool,
+        /// Authenticator (TOTP) code for a 2FA-enabled account, supplied up
+        /// front instead of being prompted. Falls back to `$BW_TOTP`.
+        #[arg(long)]
+        totp: Option<String>,
         /// Emit JSON instead of a human-readable summary.
         #[arg(long)]
         json: bool,
@@ -146,6 +151,11 @@ enum Cmd {
         /// (read-only, offline session — sync/edits need a master unlock).
         #[arg(long)]
         pin: bool,
+        /// Authenticator (TOTP) code for a 2FA-enabled account (master unlock
+        /// only), supplied up front instead of being prompted. Falls back to
+        /// `$BW_TOTP`.
+        #[arg(long)]
+        totp: Option<String>,
         /// Emit JSON instead of staying silent on success.
         #[arg(long)]
         json: bool,
@@ -489,14 +499,16 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
             server,
             email,
             api_key,
+            totp,
             json,
-        } => cmd_login(ep, server, email, api_key, json).await,
+        } => cmd_login(ep, server, email, api_key, totp, json).await,
         Cmd::Unlock {
             server,
             email,
             pin,
+            totp,
             json,
-        } => cmd_unlock(ep, server, email, pin, json).await,
+        } => cmd_unlock(ep, server, email, pin, totp, json).await,
         Cmd::Pin { action } => cmd_pin(ep, action).await,
         Cmd::Apikey { action } => cmd_apikey(ep, action).await,
         Cmd::Lock { json } => cmd_ack(ep, Request::Lock, "locked", json).await,
@@ -707,28 +719,15 @@ async fn cmd_login(
     server: Option<String>,
     email: Option<String>,
     api_key: bool,
+    totp: Option<String>,
     json: bool,
 ) -> Result<(), u8> {
     let acct = resolve_account(server, email)?;
     // Read the API key (env or interactive line) *before* the password, since
     // `read_password` consumes the rest of stdin.
     let api_creds = if api_key { Some(read_api_key()?) } else { None };
-    let password = read_password()?;
-    let mut stream = connect(ep).await?;
-    let req = Request::Unlock {
-        server: acct.server,
-        email: acct.email.clone(),
-        password,
-        device_id: acct.device_id,
-        api_key: api_creds,
-    };
-    let resp = exchange(&mut stream, &req).await?;
-    drop(req);
-    match resp {
-        Response::Ok => {}
-        Response::Error(e) => return report_error(&e),
-        other => return unexpected(&other),
-    }
+    let password = Zeroizing::new(read_password()?);
+    password_unlock(ep, &acct, &password, api_creds, resolve_totp(totp)).await?;
     // Confirm with a status snapshot so login ends on a "working sync" note.
     let mut stream = connect(ep).await?;
     match exchange(&mut stream, &Request::Status).await? {
@@ -746,43 +745,116 @@ async fn cmd_unlock(
     server: Option<String>,
     email: Option<String>,
     pin: bool,
+    totp: Option<String>,
     json: bool,
 ) -> Result<(), u8> {
     let acct = resolve_account(server, email)?;
-    let req = if pin {
+    if pin {
         let pin = read_secret("PIN: ")?.ok_or_else(|| {
             eprintln!("vault: empty PIN");
             2u8
         })?;
-        Request::UnlockPin {
+        let req = Request::UnlockPin {
             server: acct.server,
             email: acct.email,
             pin,
+        };
+        let mut stream = connect(ep).await?;
+        let resp = exchange(&mut stream, &req).await?;
+        drop(req);
+        return match resp {
+            Response::Ok => {
+                print_ack("unlocked", json);
+                Ok(())
+            }
+            Response::Error(e) => report_error(&e),
+            other => unexpected(&other),
+        };
+    }
+    // A routine master unlock never re-supplies an API key (the agent auto-uses
+    // any persisted one); it may need a TOTP code for a 2FA account.
+    let password = Zeroizing::new(read_password()?);
+    password_unlock(ep, &acct, &password, None, resolve_totp(totp)).await?;
+    print_ack("unlocked", json);
+    Ok(())
+}
+
+/// Resolve a TOTP code: the `--totp` flag, else `$BW_TOTP` (when non-empty).
+fn resolve_totp(flag: Option<String>) -> Option<String> {
+    flag.or_else(|| std::env::var("BW_TOTP").ok().filter(|s| !s.is_empty()))
+}
+
+/// Send a password `Unlock`, transparently handling a TOTP 2FA challenge: on
+/// `TwoFactorRequired`, use `totp` (first time) else prompt on the controlling
+/// terminal, then resubmit with the code. `Ok(())` on unlock; a terminal error
+/// or an empty/declined code reports through the usual exit codes.
+async fn password_unlock(
+    ep: Endpoint<'_>,
+    acct: &Account,
+    password: &Zeroizing<Vec<u8>>,
+    api_key: Option<ApiKeyCreds>,
+    totp: Option<String>,
+) -> Result<(), u8> {
+    let mut two_factor: Option<TwoFactorCode> = None;
+    let mut prompted = false;
+    loop {
+        let req = Request::Unlock {
+            server: acct.server.clone(),
+            email: acct.email.clone(),
+            password: password.as_slice().to_vec(),
+            device_id: acct.device_id.clone(),
+            api_key: api_key.clone(),
+            two_factor: two_factor.take(),
+        };
+        let mut stream = connect(ep).await?;
+        let resp = exchange(&mut stream, &req).await?;
+        drop(req);
+        match resp {
+            Response::Ok => return Ok(()),
+            Response::Error(IpcError::TwoFactorRequired) => {
+                // First challenge: prefer a supplied code; otherwise (and on any
+                // re-prompt after a rejected code) read from the controlling
+                // terminal, since stdin is exhausted by the password read.
+                let code = if prompted {
+                    read_tty_line("Authenticator code (retry): ")
+                } else {
+                    totp.clone()
+                        .or_else(|| read_tty_line("Authenticator code: "))
+                };
+                prompted = true;
+                match code {
+                    Some(c) => two_factor = Some(TwoFactorCode { token: c }),
+                    None => return report_error(&IpcError::TwoFactorRequired),
+                }
+            }
+            Response::Error(e) => return report_error(&e),
+            other => return unexpected(&other),
         }
+    }
+}
+
+/// Prompt on the controlling terminal (`/dev/tty`) and read one line, so it
+/// works even when stdin was piped/consumed (the password path). `None` if the
+/// terminal can't be opened or the line is empty (treated as "abort").
+fn read_tty_line(prompt: &str) -> Option<String> {
+    let tty = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    {
+        let mut w = &tty;
+        let _ = write!(w, "{prompt}");
+        let _ = w.flush();
+    }
+    let mut line = String::new();
+    BufReader::new(tty).read_line(&mut line).ok()?;
+    let trimmed = line.trim_end_matches(['\n', '\r']).to_owned();
+    line.zeroize();
+    if trimmed.is_empty() {
+        None
     } else {
-        Request::Unlock {
-            server: acct.server,
-            email: acct.email,
-            password: read_password()?,
-            device_id: acct.device_id,
-            // A routine unlock never re-supplies the key; the agent auto-uses
-            // the one persisted at `vault login --api-key`.
-            api_key: None,
-        }
-    };
-    let mut stream = connect(ep).await?;
-    let resp = exchange(&mut stream, &req).await?;
-    // Wipe our copy of the request — the secret field is now zero'd inside the
-    // moved Request, but the wire buffer was already serialised. Drop is
-    // best-effort beyond that point.
-    drop(req);
-    match resp {
-        Response::Ok => {
-            print_ack("unlocked", json);
-            Ok(())
-        }
-        Response::Error(e) => report_error(&e),
-        other => unexpected(&other),
+        Some(trimmed)
     }
 }
 

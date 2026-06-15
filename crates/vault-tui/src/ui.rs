@@ -115,7 +115,13 @@ fn render_unlock(frame: &mut Frame, app: &App, area: Rect) {
     };
     let amber = hex(steelbore::MOLTEN_AMBER);
     let steel = hex(steelbore::STEEL_BLUE);
-    let label = if u.use_pin { "PIN" } else { "Password" };
+    let label = if u.awaiting_2fa {
+        "Authenticator code"
+    } else if u.use_pin {
+        "PIN"
+    } else {
+        "Password"
+    };
     // Mask the secret, with the caret at the cursor position.
     let masked = "•".repeat(u.secret.as_str().chars().count());
     let field = with_cursor(&masked, Some(masked.len()));
@@ -139,7 +145,9 @@ fn render_unlock(frame: &mut Frame, app: &App, area: Rect) {
         )));
     }
     lines.push(Line::from(""));
-    let hint = if u.pin_enabled {
+    let hint = if u.awaiting_2fa {
+        "Enter submit code · Esc quit"
+    } else if u.pin_enabled {
         "Enter unlock · Tab password/PIN · Esc quit"
     } else {
         "Enter unlock · Esc quit"
@@ -785,6 +793,8 @@ mod tests {
             use_pin: false,
             pin_enabled: true,
             error: None,
+            awaiting_2fa: false,
+            password: zeroize::Zeroizing::new(Vec::new()),
         };
         u.secret = TextInput::from("hunter2");
         let app = App::unlock_screen(status(), u);

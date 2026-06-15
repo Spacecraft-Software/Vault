@@ -46,6 +46,12 @@ pub enum Request {
         /// frames from older clients still decode.
         #[serde(default)]
         api_key: Option<ApiKeyCreds>,
+        /// Two-factor code to satisfy a 2FA challenge on the password grant.
+        /// Sent on the *resubmit* after the agent returned
+        /// [`Error::TwoFactorRequired`]; absent on the first attempt.
+        /// Serde-defaulted for forward-compat.
+        #[serde(default)]
+        two_factor: Option<TwoFactorCode>,
     },
 
     /// Drop all in-memory keys and access tokens. Idempotent.
@@ -236,6 +242,14 @@ pub struct ApiKeyCreds {
     pub client_id: String,
     /// Bitwarden API client secret, sent only on the local UDS.
     pub client_secret: Vec<u8>,
+}
+
+/// A two-factor code carried on the wire (local UDS only) to complete a 2FA
+/// challenge. The provider is implicitly authenticator/TOTP (`0`).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TwoFactorCode {
+    /// The one-time code the user entered (e.g. a 6-digit authenticator code).
+    pub token: String,
 }
 
 // Hand-written so the secret never lands in a log line or panic message; the

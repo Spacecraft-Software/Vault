@@ -12,7 +12,7 @@ pub mod identity;
 pub mod sync;
 pub mod urls;
 
-pub use client::{BitwardenClient, CLIENT_ID, DEVICE_TYPE_CLI};
+pub use client::{BitwardenClient, CLIENT_ID, DEVICE_TYPE_CLI, TwoFactor};
 pub use error::{Error, Result};
 pub use identity::{PreloginResponse, TokenResponse};
 pub use sync::SyncResponse;

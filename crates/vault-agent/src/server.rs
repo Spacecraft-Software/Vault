@@ -82,6 +82,7 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
             password,
             device_id,
             api_key,
+            two_factor,
         } => {
             // Wrap the password so it is zeroised on drop no matter how
             // perform_unlock fares; deref coercion hands it to the API as &[u8].
@@ -92,6 +93,7 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
                 &password,
                 device_id.as_deref(),
                 api_key.as_ref(),
+                two_factor.as_ref(),
             )
             .await;
             match unlock_res {
