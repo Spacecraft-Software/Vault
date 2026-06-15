@@ -160,6 +160,18 @@ fn rt_string(rt: &Zeroizing<String>) -> String {
 /// unlock is required (mirrors the Bitwarden default).
 pub const MAX_PIN_ATTEMPTS: u32 = 5;
 
+/// Minimum seconds between keyring-deadline re-arms on activity, so a busy
+/// session doesn't issue a `set_timeout` syscall on every request.
+const SESSION_REFRESH_THROTTLE_SECS: u64 = 30;
+
+/// Seconds since the Unix epoch (0 if the clock is before the epoch).
+fn now_unix() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// Filesystem-safe per-account cache subdirectory, keyed by host + email so
 /// distinct accounts (and the same email on different servers) never collide.
 /// Any character outside `[A-Za-z0-9._-]` becomes `_`.
@@ -190,6 +202,13 @@ pub struct AgentState {
     pub last_activity: Instant,
     /// Idle timeout in seconds; after this with no activity the agent locks.
     pub idle_lock_secs: u64,
+    /// When set, the user key is mirrored into the Linux kernel session keyring
+    /// on unlock so a restarted agent can resume without the master password
+    /// (opt-in; PRD §7.3 carve-out). Off by default; no-op on non-Linux.
+    pub session_keyring: bool,
+    /// Throttle for refreshing the keyring entry's deadline on activity — we
+    /// only re-arm the timeout periodically, not on every request.
+    last_session_refresh: Option<Instant>,
     /// Set by `Request::Quit` to ask the accept loop to exit cleanly.
     pub shutdown_requested: bool,
     /// Clipboard backend for `Request::Copy`. `None` when no backend is
@@ -240,6 +259,8 @@ impl AgentState {
             vault: None,
             last_activity: Instant::now(),
             idle_lock_secs,
+            session_keyring: false,
+            last_session_refresh: None,
             shutdown_requested: false,
             #[cfg(feature = "clipboard")]
             clipboard: crate::clipboard::detect(),
@@ -258,9 +279,47 @@ impl AgentState {
         self.vault.is_some()
     }
 
-    /// Mark a request as just-handled (resets the idle-lock countdown).
+    /// Mark a request as just-handled (resets the idle-lock countdown). When
+    /// session-keyring resume is enabled, this also re-arms the keyring entry's
+    /// deadline — throttled so it's not a syscall on every request.
     pub fn touch(&mut self) {
         self.last_activity = Instant::now();
+        if self.session_keyring
+            && self.is_unlocked()
+            && self
+                .last_session_refresh
+                .is_none_or(|t| t.elapsed().as_secs() >= SESSION_REFRESH_THROTTLE_SECS)
+        {
+            self.persist_session();
+        }
+    }
+
+    /// Mirror the current session into the kernel keyring (when enabled and
+    /// unlocked), bounded by the idle-lock TTL so a dead agent's session
+    /// self-expires. Best effort — a keyring failure never affects the session.
+    pub fn persist_session(&mut self) {
+        if !self.session_keyring {
+            return;
+        }
+        let Some(v) = self.vault.as_ref() else {
+            return;
+        };
+        // idle_lock_secs == 0 disables idle-lock, so the session has no
+        // deadline (deadline_unix == 0) and no kernel timeout either.
+        let deadline_unix = if self.idle_lock_secs == 0 {
+            0
+        } else {
+            now_unix().saturating_add(self.idle_lock_secs)
+        };
+        let blob = crate::session::SessionBlob {
+            server: v.server.clone(),
+            email: v.email.clone(),
+            user_enc: *v.user_enc,
+            user_mac: *v.user_mac,
+            deadline_unix,
+        };
+        crate::session::store(&blob, self.idle_lock_secs);
+        self.last_session_refresh = Some(Instant::now());
     }
 
     /// Whether the idle-lock policy says it's time to drop keys.
@@ -271,12 +330,23 @@ impl AgentState {
 
     /// Zero out the vault keys and access token — and sweep any still-pending
     /// clipboard copy, so a secret can't outlive the session that copied it.
-    /// Covers `Lock`, `Quit`, idle-lock, and the SIGTERM path, which all
-    /// funnel through here.
+    /// Used by the **process-exit** paths (`Quit` / SIGTERM): it leaves any
+    /// kernel-keyring session intact so a restart can resume within the TTL.
+    /// The explicit-lock paths use [`lock_and_clear_session`](Self::lock_and_clear_session).
     pub fn lock(&mut self) {
         self.vault = None;
+        self.last_session_refresh = None;
         #[cfg(feature = "clipboard")]
         self.clipboard_sweep();
+    }
+
+    /// Lock **and** forget any persisted keyring session — the explicit
+    /// security paths (`vault lock`, idle-lock). After this, a restart requires
+    /// a full unlock. The clear is unconditional (and a cheap no-op when no
+    /// entry exists), so a leftover from a previously-enabled run is swept too.
+    pub fn lock_and_clear_session(&mut self) {
+        crate::session::clear();
+        self.lock();
     }
 
     /// Enroll a PIN: encrypt the unwrapped user key under a key derived from

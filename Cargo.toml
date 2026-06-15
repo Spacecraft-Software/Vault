@@ -73,6 +73,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "5"
+# Linux kernel keyring (pure Rust, no C lib — avoids the ring/-flto link
+# breakage). MIT/Apache-2.0; GPL-3.0-or-later compatible. Linux-only, gated
+# behind `cfg(target_os = "linux")` in vault-agent.
+linux-keyutils = "0.2"
 time = { version = "0.3", features = ["serde", "serde-well-known"] }
 fs2 = "0.4"
 

@@ -52,7 +52,7 @@ keeps the crypto, sync, and storage code consolidated and auditable.
 | G1  | Fully functional Bitwarden client offline once initially synced.                                  |
 | G2  | TUI usable as a daily driver; sub-100 ms perceived latency on local operations.                   |
 | G3  | CLI achieves practical parity with `rbw`'s read+write surface and accepts/emits JSON everywhere.  |
-| G4  | Master key never resident outside the agent process; locked on idle, signal, or explicit `lock`.  |
+| G4  | Master key never resident outside the agent process; locked on idle, signal, or explicit `lock`. (Opt-in carve-out: §7.3 `session_keyring`.) |
 | G5  | Works against both `bitwarden.com` and self-hosted Vaultwarden, including cert pinning.           |
 | G6  | Headless install (`--no-default-features --features cli`) ships a single binary, no TUI deps.     |
 | G7  | Conformance with the Spacecraft Software Standard (§3 priority hierarchy, §4 license, §5 posture, §6.3 signed commits, §12 timestamps, §13 attribution). |
@@ -146,6 +146,15 @@ envelope; exit codes documented in `docs/exit_codes.md`.
 - Holds: unwrapped master key, derived item-encryption keys, current sync revision.
 - Locks on: idle timeout (default 15 min, configurable), `vault lock`, `SIGTERM`, screen-lock dbus signal where available.
 - Auto-spawned by any client on first use; never run as root; socket mode `0600`.
+- **Session resume (opt-in, Linux).** With `agent.session_keyring` enabled, the
+  unwrapped user key may *also* reside in the Linux kernel **session keyring** —
+  kernel memory, never on disk, never swapped, possessor-gated, evicted on
+  logout — so a restarted agent (crash / `SIGTERM` / `stop-agent` + auto-spawn)
+  resumes unlocked without the master password, bounded by the idle-lock TTL
+  (the keyring entry carries a kernel timeout). Explicit `vault lock` and
+  idle-lock clear it; `SIGTERM`/`stop-agent` leave it for resume. This is the
+  sole, default-off carve-out to G4's "master key never resident outside the
+  agent process"; off, the key never leaves the process.
 
 ### 7.4 Storage
 

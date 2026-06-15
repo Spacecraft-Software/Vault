@@ -10,6 +10,32 @@ range may break in any release.
 
 ### Added
 
+- **Session resume across agent restart (opt-in, Linux).** With the new
+  `agent.session_keyring` config key, an unlock mirrors the user key into the
+  Linux **kernel session keyring** (kernel memory — never on disk, never
+  swapped, possessor-gated, evicted on logout). A restarted agent (crash,
+  `SIGTERM`, `stop-agent` + auto-spawn) reads it back and resumes **unlocked
+  without the master password**, bounded by the idle-lock TTL: the keyring entry
+  carries a kernel timeout (refreshed on activity, throttled), so a dead agent's
+  session self-expires.
+  - Lock semantics split: explicit `vault lock` and idle-lock **clear** the
+    keyring (durably locked); `stop-agent`/`SIGTERM`/crash leave it so the next
+    agent resumes. `AgentState::lock` (in-memory wipe) vs the new
+    `lock_and_clear_session`.
+  - New `crates/vault-agent/src/session.rs` over the pure-Rust `linux-keyutils`
+    crate (`[target.'cfg(target_os = "linux")']`, MIT/Apache-2.0); a no-op stub
+    elsewhere. `main.rs` attempts resume at startup via the existing
+    `unlock::load_cache` + `vault_from_user_key` path.
+  - `vault config set agent.session_keyring true` (flows to the auto-spawned
+    agent as `--session-keyring`, mirroring `idle_lock_secs`).
+  - This is the sole, **default-off** carve-out to PRD §7.3 / G4 ("master key
+    never resident outside the agent process"); documented in PRD §7.3. Off, the
+    key never leaves the process. Linux-only — a no-op everywhere else.
+  - Tests: `SessionBlob` serde round-trip (cross-platform) + a keyring
+    store/load/clear round-trip that skips gracefully where no keyring exists;
+    `vault-config` `agent.session_keyring` get/set/unset + `agent_args` flag
+    emission.
+
 - **Bitwarden personal API-key authentication (2FA accounts).** A new auth path
   that uses the OAuth2 `client_credentials` grant, which is *not* 2FA-challenged
   — so an account with two-factor auth enabled can finally authenticate without
