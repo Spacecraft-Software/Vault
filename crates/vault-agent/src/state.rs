@@ -696,7 +696,15 @@ impl AgentState {
         let value = match field {
             Field::Password => plain.password.clone(),
             Field::Username => plain.username.clone(),
-            Field::Totp => plain.totp.clone(),
+            // Generate the live RFC 6238 code from the stored secret; the raw
+            // secret stays in the agent (only the code crosses the socket).
+            Field::Totp => match plain.totp.as_deref() {
+                Some(secret) => Some(
+                    vault_core::totp::now(secret)
+                        .map_err(|e| IpcError::Internal(format!("totp: {e}")))?,
+                ),
+                None => None,
+            },
             Field::Notes => plain.notes.clone(),
             Field::Uri => plain.primary_uri.clone(),
         };
@@ -1120,6 +1128,42 @@ mod tests {
         assert!(matches!(
             s.resolve_cipher("not-there"),
             Err(IpcError::NoSuchItem(_))
+        ));
+    }
+
+    #[test]
+    fn get_item_totp_generates_a_code() {
+        let enc = [7u8; 32];
+        let mac = [9u8; 32];
+        let mut v = stub_vault();
+        v.user_enc = Zeroizing::new(enc);
+        v.user_mac = Zeroizing::new(mac);
+        let e = |s: &str| vault_core::EncString::encrypt(&enc, &mac, s.as_bytes()).serialize();
+        v.ciphers.push(Cipher {
+            id: "totp-1".into(),
+            cipher_type: 1,
+            name: Some(e("github")),
+            login: Some(Login {
+                // The RFC 6238 base32 seed; the agent must return a code, not it.
+                totp: Some(e("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")),
+                ..Login::default()
+            }),
+            ..Cipher::default()
+        });
+        let mut s = AgentState::new(900);
+        s.vault = Some(v);
+
+        let item = s.get_item(Some("totp-1"), "github", Field::Totp).unwrap();
+        assert_eq!(item.value.len(), 6, "default 6-digit code");
+        assert!(item.value.chars().all(|c| c.is_ascii_digit()));
+        assert_ne!(
+            item.value, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            "must be the generated code, not the raw secret"
+        );
+        // A field the cipher lacks still surfaces as NoSuchField.
+        assert!(matches!(
+            s.get_item(Some("totp-1"), "github", Field::Username),
+            Err(IpcError::NoSuchField { .. })
         ));
     }
 

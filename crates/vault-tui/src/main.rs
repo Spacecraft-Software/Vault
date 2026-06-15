@@ -375,6 +375,7 @@ async fn handle_normal_key(state: &mut App, key: KeyEvent, socket: &Path) {
         KeyCode::Char('c') => copy_field(state, socket, Field::Password, "password").await,
         KeyCode::Char('u') => copy_field(state, socket, Field::Username, "username").await,
         KeyCode::Char('o') => copy_field(state, socket, Field::Uri, "URI").await,
+        KeyCode::Char('t') => copy_field(state, socket, Field::Totp, "TOTP code").await,
         KeyCode::Char('/') => state.open_search(),
         KeyCode::Char(':') => state.open_command(),
         KeyCode::Char('g') => state.open_generator(),

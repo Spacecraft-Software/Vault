@@ -68,6 +68,19 @@ terminal, so it works even with the password piped in); supply it up front with
 step in its unlock screen. An [API key](#api-key-login-2fa-accounts) skips the
 2FA prompt entirely; only the authenticator provider is supported so far.
 
+### TOTP codes
+
+If a login stores a TOTP secret, Vault generates the **live one-time code** on
+demand — the stored secret stays in the agent; only the short code crosses out:
+
+```sh
+vault get github --field totp     # -> 123456 (rolls over every 30 s)
+```
+
+In the TUI, press `t` to copy the current code for the selected item. Standard
+authenticator secrets are supported (`otpauth://totp/…` URIs or a bare base32
+secret; SHA1/SHA256/SHA512).
+
 ### PIN unlock
 
 For quick access without re-typing the master password, enroll a PIN (after an

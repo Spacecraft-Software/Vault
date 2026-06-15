@@ -50,6 +50,10 @@ pub enum Error {
     /// Password generation could not satisfy the requested options.
     #[error("generate: {0}")]
     Generate(&'static str),
+
+    /// A TOTP secret / `otpauth://` URI could not be parsed or used.
+    #[error("totp: {0}")]
+    Totp(&'static str),
 }
 
 impl From<argon2::Error> for Error {

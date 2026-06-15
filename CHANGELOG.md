@@ -10,6 +10,17 @@ range may break in any release.
 
 ### Added
 
+- **Live TOTP codes from login ciphers.** A login's stored `totp` field (an
+  `otpauth://totp/…` URI or a bare base32 secret) now yields the **current RFC
+  6238 code** rather than the raw secret: `vault get <item> --field totp` prints
+  it, and the TUI's new `t` key copies it. The code is generated in the agent,
+  so the secret never crosses the socket. New `vault-core::totp` module
+  (HOTP/dynamic-truncation, hand-rolled base32, otpauth parsing; SHA1 default +
+  SHA256/SHA512) behind the one new dep `sha1`. RFC 6238 vector + base32 + parse
+  unit tests; an agent test that `Field::Totp` returns a 6-digit code (not the
+  secret). `Field::Totp` / `FieldArg::Totp` already existed — only the value
+  changed and the `t` key was added.
+
 - **Interactive TOTP two-factor auth.** A 2FA-enabled account is no longer a
   dead end on the password grant: on `Error::TwoFactorRequired`, prompt for the
   authenticator code and resubmit the token grant with it.
