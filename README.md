@@ -140,14 +140,22 @@ Persistent settings live at `$XDG_CONFIG_HOME/vault/config.toml`, managed with
 vault config get                          # list every known key + value
 vault config set clipboard.clear_secs 45  # validated; writes config.toml
 vault config set agent.idle_lock_secs 600
+vault config set sync.interval_secs 300    # background sync every 5 min
 vault config unset clipboard.clear_secs
 ```
 
 Recognised keys: `clipboard.clear_secs` (auto-clear window, `0` disables),
-`agent.idle_lock_secs` (idle-lock timeout, `0` disables), and
-`agent.session_keyring` (resume across restarts; see above). When the CLI
-auto-starts the agent, these populate its launch flags. Wipe the on-disk item
-cache (and drop a running agent's keys) with `vault purge`.
+`agent.idle_lock_secs` (idle-lock timeout, `0` disables),
+`agent.session_keyring` (resume across restarts; see above), and
+`sync.interval_secs` (background `/sync` interval while unlocked, `0` disables).
+When the CLI auto-starts the agent, these populate its launch flags (changes
+apply on the next agent spawn). Wipe the on-disk item cache (and drop a running
+agent's keys) with `vault purge`.
+
+With `sync.interval_secs` set, the agent re-pulls `/sync` on that cadence while
+unlocked — keeping the in-memory vault and offline cache fresh without a manual
+`vault sync`. It's best-effort (a locked, offline, or failed sync is skipped)
+and never defers the idle-lock countdown.
 
 ## Repository layout
 

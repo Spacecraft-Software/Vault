@@ -380,6 +380,37 @@ pub async fn idle_lock_loop(state: Arc<Mutex<AgentState>>) {
     }
 }
 
+/// Optional periodic background-sync task — caller spawns it after `run` starts
+/// when `sync_interval_secs > 0`. Every interval, if the agent is unlocked it
+/// re-pulls `/sync` via [`AgentState::resync`], refreshing the in-memory vault
+/// and the on-disk cache. Best effort: a `Locked` (agent locked) / `Offline` /
+/// network result is logged and skipped, never disturbing the session. It
+/// deliberately does **not** `touch()` — a background sync must not defer the
+/// idle-lock countdown.
+pub async fn scheduled_sync_loop(state: Arc<Mutex<AgentState>>) {
+    use tokio::time::{Duration, sleep};
+    // Fixed for the agent's life (config changes apply on the next spawn).
+    let interval = {
+        let s = state.lock().await;
+        s.sync_interval_secs
+    };
+    if interval == 0 {
+        return;
+    }
+    loop {
+        sleep(Duration::from_secs(interval)).await;
+        let mut s = state.lock().await;
+        if s.shutdown_requested {
+            break;
+        }
+        if s.is_unlocked()
+            && let Err(e) = s.resync().await
+        {
+            eprintln!("vault-agent: scheduled sync skipped: {e}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

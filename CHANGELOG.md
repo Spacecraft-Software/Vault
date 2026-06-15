@@ -10,6 +10,21 @@ range may break in any release.
 
 ### Added
 
+- **Scheduled background sync.** New `sync.interval_secs` config key: while
+  unlocked, the agent re-pulls `/sync` on that cadence (a `tokio` interval task,
+  `server::scheduled_sync_loop`), refreshing the in-memory vault and the
+  encrypted on-disk cache so it never drifts from the server and an offline/PIN
+  unlock later reads fresh data — no manual `vault sync`. `0`/unset disables.
+  - Reuses `AgentState::resync` wholesale; best-effort — a `Locked` / `Offline`
+    / network result is logged and skipped. It deliberately does **not**
+    `touch()`, so background syncs never defer the idle-lock countdown.
+  - Flows config → auto-spawn flag (`--sync-interval-secs`) like
+    `idle_lock_secs`; takes effect on the next agent spawn. `last_sync` (already
+    in `vault status`) surfaces freshness — no protocol change.
+  - Tests: `vault-config` get/set/unset + `agent_args` flag emission; an agent
+    invariant test that a locked `resync` is a clean `Locked` no-op and doesn't
+    move `last_activity`.
+
 - **Session resume across agent restart (opt-in, Linux).** With the new
   `agent.session_keyring` config key, an unlock mirrors the user key into the
   Linux **kernel session keyring** (kernel memory — never on disk, never
