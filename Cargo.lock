@@ -2484,10 +2484,22 @@ dependencies = [
  "tokio",
  "toml",
  "uuid",
+ "vault-config",
  "vault-core",
  "vault-ipc",
  "vault-store",
  "zeroize",
+]
+
+[[package]]
+name = "vault-config"
+version = "0.0.1"
+dependencies = [
+ "dirs",
+ "serde",
+ "tempfile",
+ "toml",
+ "uuid",
 ]
 
 [[package]]
@@ -2557,6 +2569,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "tokio",
+ "vault-config",
  "vault-core",
  "vault-ipc",
  "vault-theme",

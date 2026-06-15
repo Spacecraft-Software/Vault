@@ -38,10 +38,10 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
-use vault_ipc::proto::{Error as IpcError, Field, Request, Response};
+use vault_ipc::proto::{Error as IpcError, Field, Request, Response, Status};
 use vault_ipc::{default_socket_path, sanitize_socket_path};
 
-use app::{App, FormKind, FormSubmit, InputMode, RevealedSecret};
+use app::{App, FormKind, FormSubmit, InputMode, RevealedSecret, UnlockState};
 
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -189,14 +189,41 @@ async fn load_app(socket: &Path) -> App {
                 Err(e) => App::message("Error", e.to_string(), Some(s)),
             }
         }
-        Ok(Response::Status(s)) => App::message(
-            "Locked",
-            "Run `vault unlock` to browse your vault, then press r.",
-            Some(s),
-        ),
+        Ok(Response::Status(s)) => locked_screen(socket, s).await,
         Ok(Response::Error(err)) => App::message("Error", err.to_string(), None),
         Ok(other) => App::message("Error", format!("unexpected response: {other:?}"), None),
     }
+}
+
+/// Build the locked screen: an interactive unlock prompt when an account is
+/// registered, else a banner telling the user to register first.
+async fn locked_screen(socket: &Path, s: Status) -> App {
+    let cfg = vault_config::load().unwrap_or_default();
+    let account = cfg.account();
+    let (Some(server), Some(email)) = (account.server.clone(), account.email.clone()) else {
+        return App::message(
+            "Locked",
+            "No account registered — run `vault register` (then `vault login`), then press r.",
+            Some(s),
+        );
+    };
+    // Whether a PIN is enrolled drives offering the Tab toggle (best-effort).
+    let pin_enabled = matches!(
+        client::request(socket, &Request::PinStatus { server: server.clone(), email: email.clone() }).await,
+        Ok(Response::PinStatus(p)) if p.enabled
+    );
+    App::unlock_screen(
+        s,
+        app::UnlockState {
+            server,
+            email,
+            device_id: account.device_id.clone(),
+            secret: app::TextInput::default(),
+            use_pin: false,
+            pin_enabled,
+            error: None,
+        },
+    )
 }
 
 /// Translate one key press into an [`App`] action, routed by input mode.
@@ -220,6 +247,47 @@ async fn handle_key(state: &mut App, key: KeyEvent, socket: &Path) {
         InputMode::Generate => handle_generate_key(state, key, socket).await,
         InputMode::Form => handle_form_key(state, key, socket).await,
         InputMode::ConfirmDelete => handle_confirm_key(state, key, socket).await,
+        InputMode::Unlock => handle_unlock_key(state, key, socket).await,
+    }
+}
+
+/// Unlock-screen keys — edit the secret, `Tab` toggles password/PIN, `Enter`
+/// submits, `Esc` quits. On success the app reloads into the browser.
+async fn handle_unlock_key(state: &mut App, key: KeyEvent, socket: &Path) {
+    if handle_text_edit_key(state, key) {
+        return;
+    }
+    match key.code {
+        KeyCode::Esc => state.quit(),
+        KeyCode::Tab | KeyCode::BackTab => state.toggle_pin(),
+        KeyCode::Backspace => {
+            if let Some(u) = state.unlock.as_mut() {
+                u.secret.backspace();
+            }
+        }
+        KeyCode::Enter => submit_unlock(state, socket).await,
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(u) = state.unlock.as_mut() {
+                u.secret.insert(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Send the unlock request; on success reload into the browser, on error show
+/// it under the field (and clear the secret).
+async fn submit_unlock(state: &mut App, socket: &Path) {
+    let Some(req) = state.unlock.as_ref().map(UnlockState::request) else {
+        return;
+    };
+    let resp = client::request(socket, &req).await;
+    drop(req);
+    match resp {
+        Ok(Response::Ok) => *state = load_app(socket).await,
+        Ok(Response::Error(e)) => state.unlock_failed(e.to_string()),
+        Ok(other) => state.unlock_failed(format!("unexpected response: {other:?}")),
+        Err(e) => state.unlock_failed(e.to_string()),
     }
 }
 

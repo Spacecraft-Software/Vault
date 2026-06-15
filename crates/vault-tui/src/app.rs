@@ -208,6 +208,8 @@ pub enum InputMode {
     Form,
     /// `d` pressed — the delete-confirm overlay is open.
     ConfirmDelete,
+    /// The agent is locked — keys edit the master-password / PIN entry.
+    Unlock,
 }
 
 /// Which pane currently takes navigation keys.
@@ -232,6 +234,51 @@ pub enum Screen {
         /// Explanatory line.
         body: String,
     },
+    /// The locked agent + a registered account: an interactive unlock prompt.
+    Unlock,
+}
+
+/// State for the in-TUI unlock prompt, shown when the agent is locked and an
+/// account is registered. The typed secret is zeroised on drop (`TextInput`).
+#[derive(Clone, Debug)]
+pub struct UnlockState {
+    /// Server origin from the registered profile.
+    pub server: String,
+    /// Account email from the profile.
+    pub email: String,
+    /// Stable device id from the profile (rides `Unlock`).
+    pub device_id: Option<String>,
+    /// The master password / PIN being typed (masked on screen).
+    pub secret: TextInput,
+    /// Whether the prompt is in PIN mode (vs master password).
+    pub use_pin: bool,
+    /// Whether a PIN is enrolled (drives offering the `Tab` toggle).
+    pub pin_enabled: bool,
+    /// Last failed-unlock message, shown under the field.
+    pub error: Option<String>,
+}
+
+impl UnlockState {
+    /// Build the unlock request for the current mode and typed secret.
+    #[must_use]
+    pub fn request(&self) -> vault_ipc::proto::Request {
+        use vault_ipc::proto::Request;
+        let secret = self.secret.as_str().as_bytes().to_vec();
+        if self.use_pin {
+            Request::UnlockPin {
+                server: self.server.clone(),
+                email: self.email.clone(),
+                pin: secret,
+            }
+        } else {
+            Request::Unlock {
+                server: self.server.clone(),
+                email: self.email.clone(),
+                password: secret,
+                device_id: self.device_id.clone(),
+            }
+        }
+    }
 }
 
 /// How a folder entry filters the item list.
@@ -693,6 +740,8 @@ pub struct App {
     /// Transient status-bar message (copy feedback / errors). Cleared on the
     /// next key press.
     pub toast: Option<String>,
+    /// Interactive unlock state, `Some` while [`Screen::Unlock`] is shown.
+    pub unlock: Option<UnlockState>,
     /// Set when the user asks to quit.
     pub should_quit: bool,
 }
@@ -720,6 +769,7 @@ impl App {
             revealed: None,
             osc52_clear_at: None,
             toast: None,
+            unlock: None,
             should_quit: false,
         }
     }
@@ -752,7 +802,39 @@ impl App {
             revealed: None,
             osc52_clear_at: None,
             toast: None,
+            unlock: None,
             should_quit: false,
+        }
+    }
+
+    /// Build the interactive unlock screen for a locked agent with a registered
+    /// account.
+    #[must_use]
+    pub fn unlock_screen(status: Status, unlock: UnlockState) -> Self {
+        let mut app = Self::message("", "", Some(status));
+        app.screen = Screen::Unlock;
+        app.mode = InputMode::Unlock;
+        app.unlock = Some(unlock);
+        app
+    }
+
+    /// Toggle between master-password and PIN entry (no-op unless a PIN is
+    /// enrolled); clears the field and any error on switch.
+    pub fn toggle_pin(&mut self) {
+        if let Some(u) = self.unlock.as_mut()
+            && u.pin_enabled
+        {
+            u.use_pin = !u.use_pin;
+            u.secret.clear();
+            u.error = None;
+        }
+    }
+
+    /// Record a failed-unlock message and clear the typed secret.
+    pub fn unlock_failed(&mut self, msg: impl Into<String>) {
+        if let Some(u) = self.unlock.as_mut() {
+            u.error = Some(msg.into());
+            u.secret.clear();
         }
     }
 
@@ -965,6 +1047,7 @@ impl App {
                 .as_mut()
                 .and_then(FormState::focused_field_mut)
                 .map(|f| &mut f.value),
+            InputMode::Unlock => self.unlock.as_mut().map(|u| &mut u.secret),
             InputMode::Normal | InputMode::Generate | InputMode::ConfirmDelete => None,
         }
     }
@@ -2026,5 +2109,77 @@ mod tests {
             !rendered.contains("super-secret-value"),
             "Debug leaked the plaintext: {rendered}"
         );
+    }
+
+    fn unlock_state(pin_enabled: bool) -> UnlockState {
+        UnlockState {
+            server: "https://vault.example.org".into(),
+            email: "me@example.org".into(),
+            device_id: Some("dev-1".into()),
+            secret: TextInput::default(),
+            use_pin: false,
+            pin_enabled,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn unlock_request_builds_password_or_pin_by_mode() {
+        use vault_ipc::proto::Request;
+        let mut app = App::unlock_screen(status(), unlock_state(true));
+        app.input_insert_str("hunter2");
+        match app.unlock.as_ref().unwrap().request() {
+            Request::Unlock {
+                server,
+                email,
+                password,
+                device_id,
+            } => {
+                assert_eq!(server, "https://vault.example.org");
+                assert_eq!(email, "me@example.org");
+                assert_eq!(password, b"hunter2");
+                assert_eq!(device_id.as_deref(), Some("dev-1"));
+            }
+            other => panic!("expected Unlock, got {other:?}"),
+        }
+
+        // Toggle to PIN, re-type → UnlockPin (no device_id field).
+        app.toggle_pin();
+        app.input_insert_str("4321");
+        match app.unlock.as_ref().unwrap().request() {
+            Request::UnlockPin { server, email, pin } => {
+                assert_eq!(server, "https://vault.example.org");
+                assert_eq!(email, "me@example.org");
+                assert_eq!(pin, b"4321");
+            }
+            other => panic!("expected UnlockPin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toggle_pin_is_noop_without_enrollment_and_clears_on_switch() {
+        let mut app = App::unlock_screen(status(), unlock_state(false));
+        app.toggle_pin();
+        assert!(
+            !app.unlock.as_ref().unwrap().use_pin,
+            "no PIN enrolled → no switch"
+        );
+
+        let mut app = App::unlock_screen(status(), unlock_state(true));
+        app.input_insert_str("abc");
+        app.toggle_pin();
+        let u = app.unlock.as_ref().unwrap();
+        assert!(u.use_pin);
+        assert!(u.secret.is_empty(), "switch clears the field");
+    }
+
+    #[test]
+    fn unlock_failed_records_error_and_clears_secret() {
+        let mut app = App::unlock_screen(status(), unlock_state(false));
+        app.input_insert_str("wrong");
+        app.unlock_failed("incorrect master password");
+        let u = app.unlock.as_ref().unwrap();
+        assert_eq!(u.error.as_deref(), Some("incorrect master password"));
+        assert!(u.secret.is_empty());
     }
 }

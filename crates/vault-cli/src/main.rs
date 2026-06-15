@@ -10,8 +10,9 @@
 
 #![forbid(unsafe_code)]
 
-mod config;
 mod spawn;
+
+use vault_config as config;
 
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};

@@ -11,6 +11,7 @@ members = [
     "crates/vault-cli",
     "crates/vault-tui",
     "crates/vault-theme",
+    "crates/vault-config",
 ]
 
 [workspace.package]

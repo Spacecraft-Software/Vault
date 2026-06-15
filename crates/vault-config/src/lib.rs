@@ -9,9 +9,10 @@
 //! whatever would have consumed it. The file lives at
 //! `$XDG_CONFIG_HOME/vault/config.toml`; a missing file reads as defaults.
 //!
-//! Only the CLI reads this today — it sources the agent's launch flags from it
-//! during auto-spawn (see `crate::spawn`). The registry is shaped to grow into
-//! the rest of PRD §7.1's keys without disturbing callers.
+//! Shared by the CLI (which sources the agent's auto-spawn launch flags and
+//! manages the keys via `vault config`) and the TUI (which reads the
+//! `[account]` profile to drive in-place unlock). The registry is shaped to
+//! grow into the rest of PRD §7.1's keys without disturbing callers.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -111,8 +112,11 @@ impl Config {
         }
     }
 
-    /// Current value of `key` as a display string, `None` when unset. Errors
-    /// (as the offending key) when `key` is not recognised.
+    /// Current value of `key` as a display string, `None` when unset.
+    ///
+    /// # Errors
+    ///
+    /// Returns the offending key when `key` is not recognised.
     pub fn get(&self, key: &str) -> Result<Option<String>, String> {
         match key {
             "clipboard.clear_secs" => Ok(self.clipboard.clear_secs.map(|v| v.to_string())),

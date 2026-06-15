@@ -10,6 +10,24 @@ range may break in any release.
 
 ### Added
 
+- **TUI in-place unlock.** When the agent is locked, `vault-tui` no longer
+  dead-ends at a "run `vault unlock`" banner — it shows an interactive unlock
+  prompt for the registered account: type the master password, or `Tab` to a
+  PIN when one is enrolled, and drop straight into the browser. Reuses the
+  readline `TextInput` (secret masked with `•`) and the existing
+  `Unlock`/`UnlockPin` requests — no protocol or agent changes; failed unlocks
+  show the error (incl. `BadPin { attempts_remaining }` / `PinLockedOut`) and
+  clear the field.
+  - To read the account (server/email/device_id) — which a *locked* agent
+    doesn't report — `config.rs` was extracted from `vault-cli` into a shared
+    **`vault-config`** crate, now used by both the CLI and the TUI (single
+    source of truth for `config.toml`; the agent still doesn't read config).
+  - Tests: `vault-config`'s units moved with it; new `vault-tui` units for
+    `UnlockState::request` (password vs PIN), `toggle_pin` (no-op without
+    enrollment, clears on switch), `unlock_failed`, and a `TestBackend` smoke
+    that the unlock screen shows the account, masks the secret, and offers the
+    `Tab` hint only when a PIN is enrolled. No new external dependencies.
+
 - **Token persistence + refresh.** The OAuth2 refresh token is now kept and
   reused, so a cache/PIN/offline session can become fully capable and a
   long-lived session survives access-token expiry.

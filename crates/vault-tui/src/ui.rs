@@ -71,12 +71,13 @@ pub fn render(frame: &mut Frame, app: &App) {
     match &app.screen {
         Screen::Message { title, body: text } => render_message(frame, body, title, text),
         Screen::Browsing => render_browser(frame, app, body),
+        Screen::Unlock => render_unlock(frame, app, body),
     }
     match app.mode {
         InputMode::Generate => render_generator(frame, app, body),
         InputMode::Form => render_form(frame, app, body),
         InputMode::ConfirmDelete => render_confirm(frame, app, body),
-        InputMode::Normal | InputMode::Search | InputMode::Command => {}
+        InputMode::Normal | InputMode::Search | InputMode::Command | InputMode::Unlock => {}
     }
     render_status_bar(frame, app, status_bar);
 }
@@ -104,6 +105,61 @@ fn render_message(frame: &mut Frame, area: Rect, title: &str, body: &str) {
         .wrap(Wrap { trim: true })
         .block(block);
     frame.render_widget(para, centered(area, 60, 30));
+}
+
+/// Centered interactive unlock prompt (master password / PIN).
+fn render_unlock(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(u) = app.unlock.as_ref() else {
+        return;
+    };
+    let amber = hex(steelbore::MOLTEN_AMBER);
+    let steel = hex(steelbore::STEEL_BLUE);
+    let label = if u.use_pin { "PIN" } else { "Password" };
+    // Mask the secret, with the caret at the cursor position.
+    let masked = "•".repeat(u.secret.as_str().chars().count());
+    let field = with_cursor(&masked, Some(masked.len()));
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("Unlock {}", u.email),
+            Style::default().fg(amber).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(format!("{label}: "), Style::default().fg(steel)),
+            Span::styled(field, Style::default().fg(amber)),
+        ]),
+    ];
+    if let Some(err) = u.error.as_deref() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            err.to_owned(),
+            Style::default().fg(hex(steelbore::ERROR)),
+        )));
+    }
+    lines.push(Line::from(""));
+    let hint = if u.pin_enabled {
+        "Enter unlock · Tab password/PIN · Esc quit"
+    } else {
+        "Enter unlock · Esc quit"
+    };
+    lines.push(Line::from(Span::styled(
+        hint,
+        Style::default().fg(steel).add_modifier(Modifier::ITALIC),
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(amber))
+        .title(" Locked ")
+        .style(Style::default().bg(hex(steelbore::VOID_NAVY)));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(block),
+        centered(area, 60, 40),
+    );
 }
 
 /// The three-pane browser: folders | items | detail.
@@ -390,9 +446,11 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             ":{}",
             with_cursor(app.command.as_str(), Some(app.command.cursor()))
         )),
-        InputMode::Normal | InputMode::Generate | InputMode::Form | InputMode::ConfirmDelete => {
-            None
-        }
+        InputMode::Normal
+        | InputMode::Generate
+        | InputMode::Form
+        | InputMode::ConfirmDelete
+        | InputMode::Unlock => None,
     };
     if let Some(input) = editing {
         spans.push(Span::styled(
@@ -669,6 +727,33 @@ mod tests {
             "confirm prompt missing:\n{text}"
         );
         assert!(text.contains("y delete"), "confirm hint missing:\n{text}");
+    }
+
+    #[test]
+    fn unlock_screen_masks_secret_and_shows_account() {
+        use crate::app::{TextInput, UnlockState};
+        let mut u = UnlockState {
+            server: "https://vault.example.org".into(),
+            email: "me@example.org".into(),
+            device_id: None,
+            secret: TextInput::default(),
+            use_pin: false,
+            pin_enabled: true,
+            error: None,
+        };
+        u.secret = TextInput::from("hunter2");
+        let app = App::unlock_screen(status(), u);
+        let text = draw(&app);
+        assert!(
+            text.contains("Unlock me@example.org"),
+            "account missing:\n{text}"
+        );
+        assert!(text.contains('•'), "secret not masked:\n{text}");
+        assert!(!text.contains("hunter2"), "secret leaked:\n{text}");
+        assert!(
+            text.contains("Tab"),
+            "PIN toggle hint missing when enrolled:\n{text}"
+        );
     }
 
     #[test]

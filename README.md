@@ -72,6 +72,10 @@ vault pin status         # enrolled? attempts remaining?
 vault pin disable        # forget the PIN
 ```
 
+The TUI unlocks **in place**: when the agent is locked, `vault-tui` shows an
+unlock prompt for your registered account (master password, or `Tab` to a PIN
+when one is enrolled) instead of sending you back to the CLI.
+
 A PIN session reads from the encrypted cache, and — once the network is
 reachable — transparently goes online for `sync` and edits by refreshing a
 stored token (no master password needed); only a genuinely offline box stays
