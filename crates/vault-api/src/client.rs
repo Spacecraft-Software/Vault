@@ -9,7 +9,6 @@
 //! the master-password hash.
 
 use reqwest::Client;
-use reqwest::header::{HeaderMap, HeaderValue};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -35,6 +34,7 @@ pub struct BitwardenClient {
     device_name: String,
     user_agent: String,
     access_token: Option<Zeroizing<String>>,
+    refresh_token: Option<Zeroizing<String>>,
 }
 
 impl BitwardenClient {
@@ -57,6 +57,7 @@ impl BitwardenClient {
             device_name: device_name.into(),
             user_agent,
             access_token: None,
+            refresh_token: None,
         })
     }
 
@@ -76,6 +77,7 @@ impl BitwardenClient {
             device_name: device_name.into(),
             user_agent,
             access_token: None,
+            refresh_token: None,
         }
     }
 
@@ -95,6 +97,77 @@ impl BitwardenClient {
     #[must_use]
     pub const fn is_authenticated(&self) -> bool {
         self.access_token.is_some()
+    }
+
+    /// The current refresh token, if any — so the caller can persist it
+    /// (encrypted) for a later `refresh` without re-prompting for the password.
+    #[must_use]
+    pub fn refresh_token(&self) -> Option<&str> {
+        self.refresh_token.as_ref().map(|z| z.as_str())
+    }
+
+    /// Seed the client with a refresh token (no access token yet) — used to
+    /// rebuild an authenticated session from a persisted refresh token. Call
+    /// [`refresh`](Self::refresh) afterwards to obtain an access token.
+    pub fn set_refresh_token(&mut self, refresh_token: String) {
+        self.refresh_token = Some(Zeroizing::new(refresh_token));
+    }
+
+    /// Build a token-less client seeded with a refresh token (for restoring a
+    /// session from the cache). Call [`refresh`](Self::refresh) to go live.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Transport`] if the `reqwest` client fails to build.
+    pub fn with_refresh_token(
+        urls: BaseUrls,
+        device_id: Uuid,
+        device_name: impl Into<String>,
+        refresh_token: String,
+    ) -> Result<Self> {
+        let mut client = Self::new(urls, device_id, device_name)?;
+        client.refresh_token = Some(Zeroizing::new(refresh_token));
+        Ok(client)
+    }
+
+    /// `POST /connect/token` with `grant_type=refresh_token` — mint a fresh
+    /// access token from the held refresh token, updating it if the server
+    /// rotates it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ServerStatus`] if no refresh token is held or the server
+    /// rejects it (e.g. expired/revoked), or [`Error::Transport`] on failure.
+    pub async fn refresh(&mut self) -> Result<()> {
+        let refresh = self.refresh_token.as_ref().ok_or(Error::ServerStatus {
+            status: 401,
+            message: "no refresh token held".into(),
+        })?;
+        let url = self
+            .urls
+            .identity
+            .join("connect/token")
+            .map_err(|_| Error::BaseUrl("could not build token URL"))?;
+        let form: [(&str, &str); 3] = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh.as_str()),
+            ("client_id", CLIENT_ID),
+        ];
+        let resp = self.http.post(url).form(&form).send().await?;
+        let status = resp.status();
+        if status.is_success() {
+            let token: TokenResponse = resp.json().await?;
+            self.access_token = Some(Zeroizing::new(token.access_token.clone()));
+            if let Some(rt) = token.refresh_token {
+                self.refresh_token = Some(Zeroizing::new(rt));
+            }
+            Ok(())
+        } else {
+            Err(Error::ServerStatus {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            })
+        }
     }
 
     /// `POST /accounts/prelogin` — discover the account's KDF parameters.
@@ -164,6 +237,7 @@ impl BitwardenClient {
         if status.is_success() {
             let token: TokenResponse = resp.json().await?;
             self.access_token = Some(Zeroizing::new(token.access_token.clone()));
+            self.refresh_token = token.refresh_token.clone().map(Zeroizing::new);
             Ok(token)
         } else if status.as_u16() == 400 {
             // Could be 2FA-required or bad-password — peek at the body.
@@ -196,30 +270,15 @@ impl BitwardenClient {
     ///
     /// Returns [`Error::ServerStatus`] if no access token is held or the
     /// server replies non-2xx, or [`Error::Transport`] on transport failure.
-    ///
-    /// # Panics
-    ///
-    /// Never: the `Bearer` header is built from an ASCII access token.
-    #[allow(clippy::expect_used)] // access tokens are ASCII; HeaderValue construction cannot fail
-    pub async fn sync(&self) -> Result<SyncResponse> {
-        let token = self.access_token.as_ref().ok_or(Error::ServerStatus {
-            status: 401,
-            message: "no access token; call login_password() first".into(),
-        })?;
-
+    pub async fn sync(&mut self) -> Result<SyncResponse> {
         let url = self
             .urls
             .api
             .join("sync")
             .map_err(|_| Error::BaseUrl("could not build sync URL"))?;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "Authorization",
-            HeaderValue::try_from(format!("Bearer {}", token.as_str())).expect("token is ASCII"),
-        );
-
-        let resp = self.http.get(url).headers(headers).send().await?;
+        let resp = self
+            .send_with_auth(|http, bearer| http.get(url.clone()).header("Authorization", bearer))
+            .await?;
         handle_json(resp).await
     }
 
@@ -236,39 +295,16 @@ impl BitwardenClient {
     /// if the server replies with a non-2xx status (`404` if the id is
     /// unknown, `401` if the token is expired). Returns [`Error::Transport`] on
     /// transport failure.
-    ///
-    /// # Panics
-    ///
-    /// Never: the `Bearer` header is built from an ASCII access token.
-    #[allow(clippy::expect_used)] // access tokens are ASCII; HeaderValue construction cannot fail
-    pub async fn delete_cipher(&self, id: &str) -> Result<()> {
-        let token = self.access_token.as_ref().ok_or(Error::ServerStatus {
-            status: 401,
-            message: "no access token; call login_password() first".into(),
-        })?;
-
+    pub async fn delete_cipher(&mut self, id: &str) -> Result<()> {
         let url = self
             .urls
             .api
             .join(&format!("ciphers/{id}"))
             .map_err(|_| Error::BaseUrl("could not build delete-cipher URL"))?;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "Authorization",
-            HeaderValue::try_from(format!("Bearer {}", token.as_str())).expect("token is ASCII"),
-        );
-
-        let resp = self.http.delete(url).headers(headers).send().await?;
-        let status = resp.status();
-        if status.is_success() {
-            Ok(())
-        } else {
-            Err(Error::ServerStatus {
-                status: status.as_u16(),
-                message: resp.text().await.unwrap_or_default(),
-            })
-        }
+        let resp = self
+            .send_with_auth(|http, bearer| http.delete(url.clone()).header("Authorization", bearer))
+            .await?;
+        expect_success(resp).await
     }
 
     /// `POST /api/ciphers` — create a new cipher from an already-encrypted
@@ -279,12 +315,7 @@ impl BitwardenClient {
     /// Returns [`Error::ServerStatus`] if the client lacks an access token or
     /// the server replies non-2xx, [`Error::Transport`] on transport failure,
     /// or [`Error::Decode`] if the response id cannot be parsed.
-    ///
-    /// # Panics
-    ///
-    /// Never: the `Bearer` header is built from an ASCII access token.
-    #[allow(clippy::expect_used)] // access tokens are ASCII; HeaderValue construction cannot fail
-    pub async fn create_cipher(&self, cipher: &vault_core::Cipher) -> Result<String> {
+    pub async fn create_cipher(&mut self, cipher: &vault_core::Cipher) -> Result<String> {
         let url = self
             .urls
             .api
@@ -292,11 +323,11 @@ impl BitwardenClient {
             .map_err(|_| Error::BaseUrl("could not build create-cipher URL"))?;
         let body = CipherRequest::from_cipher(cipher);
         let resp = self
-            .http
-            .post(url)
-            .headers(self.bearer_headers()?)
-            .json(&body)
-            .send()
+            .send_with_auth(|http, bearer| {
+                http.post(url.clone())
+                    .header("Authorization", bearer)
+                    .json(&body)
+            })
             .await?;
         let status = resp.status();
         if status.is_success() {
@@ -318,12 +349,7 @@ impl BitwardenClient {
     /// Returns [`Error::ServerStatus`] if the client lacks an access token or
     /// the server replies non-2xx (`404` for an unknown id), or
     /// [`Error::Transport`] on transport failure.
-    ///
-    /// # Panics
-    ///
-    /// Never: the `Bearer` header is built from an ASCII access token.
-    #[allow(clippy::expect_used)] // access tokens are ASCII; HeaderValue construction cannot fail
-    pub async fn update_cipher(&self, id: &str, cipher: &vault_core::Cipher) -> Result<()> {
+    pub async fn update_cipher(&mut self, id: &str, cipher: &vault_core::Cipher) -> Result<()> {
         let url = self
             .urls
             .api
@@ -331,37 +357,54 @@ impl BitwardenClient {
             .map_err(|_| Error::BaseUrl("could not build update-cipher URL"))?;
         let body = CipherRequest::from_cipher(cipher);
         let resp = self
-            .http
-            .put(url)
-            .headers(self.bearer_headers()?)
-            .json(&body)
-            .send()
-            .await?;
-        let status = resp.status();
-        if status.is_success() {
-            Ok(())
-        } else {
-            Err(Error::ServerStatus {
-                status: status.as_u16(),
-                message: resp.text().await.unwrap_or_default(),
+            .send_with_auth(|http, bearer| {
+                http.put(url.clone())
+                    .header("Authorization", bearer)
+                    .json(&body)
             })
-        }
+            .await?;
+        expect_success(resp).await
     }
 
-    /// Build the `Authorization: Bearer …` header set, erroring if no token is
-    /// held yet.
-    #[allow(clippy::expect_used)] // access tokens are ASCII; HeaderValue construction cannot fail
-    fn bearer_headers(&self) -> Result<HeaderMap> {
+    /// Send an authenticated request and, on a `401` with a refresh token held,
+    /// `refresh` once and resend. `build` is given the HTTP client and the
+    /// `Bearer …` header value, and must produce the full request each call
+    /// (it may be invoked twice). Errors if no access token is held.
+    async fn send_with_auth<F>(&mut self, build: F) -> Result<reqwest::Response>
+    where
+        F: Fn(&Client, String) -> reqwest::RequestBuilder,
+    {
+        let bearer = self.bearer()?;
+        let resp = build(&self.http, bearer).send().await?;
+        if resp.status().as_u16() == 401 && self.refresh_token.is_some() {
+            self.refresh().await?;
+            let bearer = self.bearer()?;
+            return Ok(build(&self.http, bearer).send().await?);
+        }
+        Ok(resp)
+    }
+
+    /// The `Bearer …` header value for the current access token (owned, so it
+    /// doesn't borrow `self` across an `await`).
+    fn bearer(&self) -> Result<String> {
         let token = self.access_token.as_ref().ok_or(Error::ServerStatus {
             status: 401,
             message: "no access token; call login_password() first".into(),
         })?;
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "Authorization",
-            HeaderValue::try_from(format!("Bearer {}", token.as_str())).expect("token is ASCII"),
-        );
-        Ok(headers)
+        Ok(format!("Bearer {}", token.as_str()))
+    }
+}
+
+/// Map a response to `Ok(())` on 2xx or [`Error::ServerStatus`] otherwise.
+async fn expect_success(resp: reqwest::Response) -> Result<()> {
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(Error::ServerStatus {
+            status: status.as_u16(),
+            message: resp.text().await.unwrap_or_default(),
+        })
     }
 }
 

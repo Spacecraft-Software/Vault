@@ -10,6 +10,27 @@ range may break in any release.
 
 ### Added
 
+- **Token persistence + refresh.** The OAuth2 refresh token is now kept and
+  reused, so a cache/PIN/offline session can become fully capable and a
+  long-lived session survives access-token expiry.
+  - `vault-api`: `BitwardenClient` keeps the `refresh_token` from
+    `login_password`, exposes it (`refresh_token()`), and can be seeded with one
+    (`with_refresh_token`). New `refresh()` runs `grant_type=refresh_token`. The
+    four server ops (`sync`/`create`/`update`/`delete`) route through one
+    `send_with_auth` helper that, on a `401` with a refresh token held,
+    refreshes once and retries.
+  - The refresh token is persisted **encrypted under the user key** in the cache
+    (`refresh_token` envelope field) on online unlock + every `sync`, and
+    recovered into the in-memory session on a cache/PIN unlock.
+  - New `Vault::ensure_online`: a token-less session (offline / PIN) **lazily
+    upgrades** to online on its first `sync`/`add`/`edit`/`remove` by building a
+    client from the stored refresh token and refreshing — so PIN unlock stays
+    fast/offline but server ops "just work" when the network is up. A genuinely
+    offline box (or no stored refresh token) still returns `Error::Offline`.
+  - Tests: store refresh-token round-trip; `ensure_online` returns `Offline`
+    without a client/token and `Ok` with a live client; refresh-token recovery
+    from the cache on offline unlock. No new dependencies.
+
 - **PIN unlock.** Unlock the vault with a short PIN instead of the master
   password (like the Bitwarden extension/desktop), built on the encrypted cache.
   - `vault pin set` (requires an unlocked agent) encrypts the user key under a

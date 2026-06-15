@@ -87,6 +87,10 @@ async fn online_unlock(
     let sync = client.sync().await.map_err(api_err)?;
     let (ciphers, folders) = ciphers_and_folders(&sync, &user_enc, &user_mac);
 
+    // Capture the refresh token before the client is moved into the vault, so
+    // it can be persisted (encrypted) and reused after a cache/PIN unlock.
+    let refresh_token = client.refresh_token().map(|s| Zeroizing::new(s.to_owned()));
+
     // `client` holds the access token internally (`login_password` stashed it).
     // Hand it to the vault so Sync / Remove / Edit / Add reuse the session.
     let vault = Vault {
@@ -99,6 +103,7 @@ async fn online_unlock(
         client: Some(client),
         protected_user_key: encrypted_user_key.to_owned(),
         kdf: params,
+        refresh_token,
         device_id: device.to_string(),
         last_sync: now_iso(),
     };
@@ -194,6 +199,13 @@ pub fn vault_from_user_key(
     let kdf = cache
         .kdf
         .ok_or_else(|| IpcError::Internal("cached account has no KDF params".to_owned()))?;
+    // Recover the refresh token (encrypted under the user key) so this offline /
+    // PIN session can lazily go online. A decode failure just leaves it absent.
+    let refresh_token = cache.refresh_token.as_deref().and_then(|enc| {
+        let parsed = vault_core::EncString::parse(enc).ok()?;
+        let bytes = parsed.decrypt(&user_enc, &user_mac).ok()?;
+        String::from_utf8(bytes).ok().map(Zeroizing::new)
+    });
     Ok(Vault {
         server: server.to_owned(),
         email: email.trim().to_lowercase(),
@@ -204,6 +216,7 @@ pub fn vault_from_user_key(
         client: None,
         protected_user_key: cache.protected_user_key.clone().unwrap_or_default(),
         kdf,
+        refresh_token,
         device_id: cache.device_id.clone(),
         last_sync: cache.last_sync.clone(),
     })
@@ -525,9 +538,19 @@ mod tests {
             .unwrap();
         cache.protected_user_key = Some(protected);
         cache.kdf = Some(kdf);
+        // A refresh token, encrypted under the user key, must round-trip back
+        // into the recovered vault so an offline session can go online.
+        cache.refresh_token = Some(
+            vault_core::EncString::encrypt(&user_enc, &user_mac, b"my-refresh-token").serialize(),
+        );
 
         let vault = unlock_from_cache(&cache, "https://x", email, password).unwrap();
         assert!(vault.client.is_none(), "offline session has no token");
+        assert_eq!(
+            vault.refresh_token.as_deref().map(String::as_str),
+            Some("my-refresh-token"),
+            "refresh token recovered from cache"
+        );
         assert_eq!(vault.ciphers.len(), 1);
         assert_eq!(
             vault.ciphers[0]
