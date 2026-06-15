@@ -38,7 +38,9 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
-use vault_ipc::proto::{CardWrite, Error as IpcError, Field, Request, Response, Status};
+use vault_ipc::proto::{
+    CardWrite, Error as IpcError, Field, IdentityWrite, Request, Response, Status,
+};
 use vault_ipc::{default_socket_path, sanitize_socket_path};
 
 use app::{App, FormKind, FormSubmit, InputMode, RevealedSecret, UnlockState};
@@ -471,6 +473,7 @@ async fn submit_form(state: &mut App, socket: &Path) {
         exp_month,
         exp_year,
         code,
+        identity: id_fields,
     } = data;
     // Only a card cipher carries card fields; other types send `card: None`.
     let card = (cipher_type == 3).then(|| CardWrite {
@@ -480,6 +483,21 @@ async fn submit_form(state: &mut App, socket: &Path) {
         exp_month,
         exp_year,
         code: code.map(String::into_bytes),
+    });
+    // Only an identity cipher carries identity fields (the curated subset the
+    // TUI form edits; the rest of `IdentityWrite` stays unset).
+    let identity = (cipher_type == 4).then(|| IdentityWrite {
+        title: id_fields.title,
+        first_name: id_fields.first_name,
+        last_name: id_fields.last_name,
+        email: id_fields.email,
+        phone: id_fields.phone,
+        address1: id_fields.address1,
+        city: id_fields.city,
+        state: id_fields.state,
+        postal_code: id_fields.postal_code,
+        country: id_fields.country,
+        ..IdentityWrite::default()
     });
     let req = match kind {
         FormKind::Add => Request::Add {
@@ -492,7 +510,7 @@ async fn submit_form(state: &mut App, socket: &Path) {
             totp: None,
             uri,
             card,
-            identity: None,
+            identity,
         },
         FormKind::Edit { id, .. } => Request::Edit {
             selector: id,
@@ -504,7 +522,7 @@ async fn submit_form(state: &mut App, socket: &Path) {
             totp: None,
             uri,
             card,
-            identity: None,
+            identity,
         },
     };
     match client::request(socket, &req).await {
