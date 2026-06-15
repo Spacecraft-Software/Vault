@@ -100,28 +100,53 @@ impl Vault {
         if self.client.is_some() {
             return Ok(());
         }
-        let Some(refresh) = self.refresh_token.as_ref() else {
-            return Err(IpcError::Offline);
-        };
         let urls = vault_api::BaseUrls::self_hosted(&self.server)
             .map_err(|e| IpcError::Internal(e.to_string()))?;
         let device =
             uuid::Uuid::parse_str(&self.device_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
-        let mut client = vault_api::BitwardenClient::with_refresh_token(
-            urls,
-            device,
-            "vault-agent",
-            rt_string(refresh),
-        )
-        .map_err(|e| IpcError::Internal(e.to_string()))?;
-        // A failed refresh (network down, or token revoked) → stay offline.
-        client.refresh().await.map_err(|_| IpcError::Offline)?;
-        // Keep the (possibly rotated) refresh token in memory for re-persist.
-        if let Some(rt) = client.refresh_token() {
-            self.refresh_token = Some(Zeroizing::new(rt.to_owned()));
+
+        // 1. Prefer the stored refresh token — cheapest, no creds re-sent.
+        if let Some(refresh) = self.refresh_token.as_ref()
+            && let Ok(mut client) = vault_api::BitwardenClient::with_refresh_token(
+                urls.clone(),
+                device,
+                "vault-agent",
+                rt_string(refresh),
+            )
+            && client.refresh().await.is_ok()
+        {
+            // Keep the (possibly rotated) refresh token in memory for re-persist.
+            if let Some(rt) = client.refresh_token() {
+                self.refresh_token = Some(Zeroizing::new(rt.to_owned()));
+            }
+            self.client = Some(client);
+            return Ok(());
         }
-        self.client = Some(client);
-        Ok(())
+
+        // 2. Fall back to a stored API key: the client_credentials grant
+        //    re-authenticates without 2FA or a refresh token, and needs only a
+        //    live client (the user key is already in memory). This is what lets
+        //    a PIN/offline session of an API-key account go online for writes.
+        if let Some(dir) = vault_store::default_data_dir()
+            .map(|d| d.join(account_dir_name(&self.server, &self.email)))
+            && let Ok(creds) = vault_store::load_apikey_from_dir(&dir)
+        {
+            let mut client = vault_api::BitwardenClient::new(urls, device, "vault-agent")
+                .map_err(|e| IpcError::Internal(e.to_string()))?;
+            if client
+                .login_api_key(&creds.client_id, creds.client_secret.as_bytes())
+                .await
+                .is_ok()
+            {
+                if let Some(rt) = client.refresh_token() {
+                    self.refresh_token = Some(Zeroizing::new(rt.to_owned()));
+                }
+                self.client = Some(client);
+                return Ok(());
+            }
+        }
+
+        Err(IpcError::Offline)
     }
 }
 

@@ -160,6 +160,96 @@ pub fn load_from_dir(dir: &Path) -> Result<VaultCache, Error> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+/// A Bitwarden personal **API key**, persisted alongside the cache.
+///
+/// `client_id = "user.<uuid>"` + `client_secret`. The agent authenticates via
+/// the `client_credentials` grant — which skips 2FA — without the user
+/// re-supplying it on every unlock.
+///
+/// This is *not* an encryption key: it authenticates the session only, and the
+/// master password is still required to decrypt the vault. It therefore can't
+/// be wrapped under the user key (it's needed *before* unlock) and is protected
+/// at rest by filesystem permissions (`0600`) only — the same trust level as
+/// the stored refresh token or an SSH private key.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ApiKeyCreds {
+    /// Bitwarden API client id (`user.<uuid>`). Not secret.
+    pub client_id: String,
+    /// Bitwarden API client secret.
+    pub client_secret: String,
+}
+
+// Hand-written so the secret never lands in a log line or panic message; the
+// non-secret `client_id` is shown to aid debugging. Verified by a unit test.
+impl std::fmt::Debug for ApiKeyCreds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKeyCreds")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Save `creds` to `<dir>/apikey.json` atomically, `0600`.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] if the directory can't be created or the write fails,
+/// or [`Error::Json`] if `creds` fails to serialise.
+pub fn save_apikey_to_dir(dir: &Path, creds: &ApiKeyCreds) -> Result<PathBuf, Error> {
+    fs::create_dir_all(dir)?;
+    let path = dir.join("apikey.json");
+    let json = serde_json::to_vec_pretty(creds)?;
+    write_atomic(&path, &json)?;
+    // `write_atomic` already yields 0600 via tempfile's default mode; set it
+    // explicitly too since this file holds a raw secret (belt-and-suspenders,
+    // and robust if the rename ever preserved a different source mode).
+    set_owner_only(&path)?;
+    Ok(path)
+}
+
+/// Load `<dir>/apikey.json`. Returns [`Error::NotFound`] if absent.
+///
+/// # Errors
+///
+/// Returns [`Error::NotFound`] when no API key is stored, [`Error::Io`] on any
+/// other read failure, or [`Error::Json`] if the file fails to parse.
+pub fn load_apikey_from_dir(dir: &Path) -> Result<ApiKeyCreds, Error> {
+    let path = dir.join("apikey.json");
+    let bytes = fs::read(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => Error::NotFound(path.clone()),
+        _ => Error::Io(e),
+    })?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// Delete `<dir>/apikey.json`. A no-op (and `Ok`) when the file is absent.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] on a removal failure other than "not found".
+pub fn delete_apikey_from_dir(dir: &Path) -> Result<(), Error> {
+    let path = dir.join("apikey.json");
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Error::Io(e)),
+    }
+}
+
+/// Restrict `path` to owner read/write (`0600`) on Unix; no-op elsewhere.
+#[cfg(unix)]
+fn set_owner_only(path: &Path) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_owner_only(_path: &Path) -> Result<(), Error> {
+    Ok(())
+}
+
 /// Atomic write: tempfile in the same dir → fsync → rename.
 fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), Error> {
     let parent = target.parent().ok_or(Error::Path("no parent directory"))?;

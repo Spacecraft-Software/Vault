@@ -28,6 +28,10 @@ pub enum Error {
     #[error("invalid base URL: {0}")]
     BaseUrl(&'static str),
 
+    /// A caller-supplied credential was malformed (e.g. a non-UTF-8 API-key secret).
+    #[error("invalid credential: {0}")]
+    Credential(&'static str),
+
     /// Operation requires a two-factor token Vault doesn't yet support (M2).
     #[error("two-factor authentication required (provider {0:?}) — not yet implemented")]
     TwoFactorRequired(Vec<u32>),

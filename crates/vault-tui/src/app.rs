@@ -276,6 +276,9 @@ impl UnlockState {
                 email: self.email.clone(),
                 password: secret,
                 device_id: self.device_id.clone(),
+                // The agent auto-uses any API key persisted at
+                // `vault login --api-key`; the TUI never re-supplies it.
+                api_key: None,
             }
         }
     }
@@ -2134,11 +2137,13 @@ mod tests {
                 email,
                 password,
                 device_id,
+                api_key,
             } => {
                 assert_eq!(server, "https://vault.example.org");
                 assert_eq!(email, "me@example.org");
                 assert_eq!(password, b"hunter2");
                 assert_eq!(device_id.as_deref(), Some("dev-1"));
+                assert!(api_key.is_none(), "TUI never supplies an API key");
             }
             other => panic!("expected Unlock, got {other:?}"),
         }

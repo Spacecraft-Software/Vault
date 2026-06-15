@@ -81,11 +81,19 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
             email,
             password,
             device_id,
+            api_key,
         } => {
             // Wrap the password so it is zeroised on drop no matter how
             // perform_unlock fares; deref coercion hands it to the API as &[u8].
             let password = zeroize::Zeroizing::new(password);
-            let unlock_res = perform_unlock(&server, &email, &password, device_id.as_deref()).await;
+            let unlock_res = perform_unlock(
+                &server,
+                &email,
+                &password,
+                device_id.as_deref(),
+                api_key.as_ref(),
+            )
+            .await;
             match unlock_res {
                 Ok(vault) => {
                     let mut s = state.lock().await;
@@ -129,6 +137,15 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
         }
         Request::PinStatus { server, email } => {
             Response::PinStatus(crate::unlock::pin_status(&server, &email))
+        }
+        Request::ApiKeyStatus { server, email } => {
+            Response::ApiKeyStatus(crate::unlock::apikey_status(&server, &email))
+        }
+        Request::ApiKeyForget { server, email } => {
+            match crate::unlock::apikey_forget(&server, &email) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
         }
         Request::Lock => {
             let mut s = state.lock().await;

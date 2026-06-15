@@ -4,7 +4,9 @@
 
 use tokio::io::{AsyncWriteExt, duplex};
 
-use vault_ipc::proto::{Error as IpcError, Field, ListEntry, Request, Response, Status};
+use vault_ipc::proto::{
+    ApiKeyCreds, ApiKeyStatus, Error as IpcError, Field, ListEntry, Request, Response, Status,
+};
 use vault_ipc::transport::{MAX_FRAME, read_frame, write_frame};
 
 #[tokio::test]
@@ -24,6 +26,10 @@ async fn unlock_round_trip_preserves_password_bytes() {
         email: "user@example.org".into(),
         password: pw.clone(),
         device_id: Some("11111111-2222-3333-4444-555555555555".into()),
+        api_key: Some(ApiKeyCreds {
+            client_id: "user.abc123".into(),
+            client_secret: b"s3cr3t".to_vec(),
+        }),
     };
     write_frame(&mut a, &req).await.unwrap();
     let got: Request = read_frame(&mut b).await.unwrap();
@@ -33,6 +39,7 @@ async fn unlock_round_trip_preserves_password_bytes() {
             email,
             password,
             device_id,
+            api_key,
         } => {
             assert_eq!(server, "https://vault.example.org");
             assert_eq!(email, "user@example.org");
@@ -41,6 +48,9 @@ async fn unlock_round_trip_preserves_password_bytes() {
                 device_id.as_deref(),
                 Some("11111111-2222-3333-4444-555555555555")
             );
+            let api_key = api_key.expect("api_key round-trips");
+            assert_eq!(api_key.client_id, "user.abc123");
+            assert_eq!(api_key.client_secret, b"s3cr3t");
         }
         other => panic!("expected Unlock, got {other:?}"),
     }
@@ -69,8 +79,43 @@ async fn unlock_without_device_id_field_still_decodes() {
     write_frame(&mut a, &old).await.unwrap();
     let got: Request = read_frame(&mut b).await.unwrap();
     match got {
-        Request::Unlock { device_id, .. } => assert_eq!(device_id, None, "absent → None"),
+        Request::Unlock {
+            device_id, api_key, ..
+        } => {
+            assert_eq!(device_id, None, "absent → None");
+            assert!(api_key.is_none(), "absent api_key → None");
+        }
         other => panic!("expected Unlock, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn apikey_status_request_and_response_round_trip() {
+    let (mut a, mut b) = duplex(8 * 1024);
+    let req = Request::ApiKeyStatus {
+        server: "https://vault.example.org".into(),
+        email: "user@example.org".into(),
+    };
+    write_frame(&mut a, &req).await.unwrap();
+    match read_frame::<_, Request>(&mut b).await.unwrap() {
+        Request::ApiKeyStatus { server, email } => {
+            assert_eq!(server, "https://vault.example.org");
+            assert_eq!(email, "user@example.org");
+        }
+        other => panic!("expected ApiKeyStatus, got {other:?}"),
+    }
+
+    let resp = Response::ApiKeyStatus(ApiKeyStatus {
+        configured: true,
+        client_id: Some("user.abc123".into()),
+    });
+    write_frame(&mut a, &resp).await.unwrap();
+    match read_frame::<_, Response>(&mut b).await.unwrap() {
+        Response::ApiKeyStatus(s) => {
+            assert!(s.configured);
+            assert_eq!(s.client_id.as_deref(), Some("user.abc123"));
+        }
+        other => panic!("expected Response::ApiKeyStatus, got {other:?}"),
     }
 }
 

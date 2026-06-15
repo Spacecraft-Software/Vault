@@ -39,6 +39,13 @@ pub enum Request {
         /// Serde-defaulted so frames from older clients still decode.
         #[serde(default)]
         device_id: Option<String>,
+        /// Bitwarden personal API key to enroll. When present, the agent
+        /// authenticates via the `client_credentials` grant (which skips 2FA)
+        /// and persists the key so future unlocks reuse it. The master password
+        /// is still required (above) to decrypt the vault. Serde-defaulted so
+        /// frames from older clients still decode.
+        #[serde(default)]
+        api_key: Option<ApiKeyCreds>,
     },
 
     /// Drop all in-memory keys and access tokens. Idempotent.
@@ -197,8 +204,49 @@ pub enum Request {
         pin: Vec<u8>,
     },
 
+    /// Report whether a Bitwarden API key is stored for the account. Carries
+    /// the account so the credential file can be found while the agent is
+    /// locked. Never returns the secret.
+    ApiKeyStatus {
+        /// Server origin.
+        server: String,
+        /// Account email.
+        email: String,
+    },
+
+    /// Forget the stored API key for the account (delete the credential file).
+    /// Subsequent logins fall back to the password grant. Carries the account
+    /// so the file can be found while the agent is locked.
+    ApiKeyForget {
+        /// Server origin.
+        server: String,
+        /// Account email.
+        email: String,
+    },
+
     /// Cleanly shut the agent down. Equivalent to `vault stop-agent`.
     Quit,
+}
+
+/// A Bitwarden personal API key carried on the wire (local UDS only). The
+/// `client_secret` is sensitive; the custom [`Debug`] keeps it out of logs.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ApiKeyCreds {
+    /// Bitwarden API client id (`user.<uuid>`). Not secret.
+    pub client_id: String,
+    /// Bitwarden API client secret, sent only on the local UDS.
+    pub client_secret: Vec<u8>,
+}
+
+// Hand-written so the secret never lands in a log line or panic message; the
+// non-secret `client_id` is shown to aid debugging. Verified by a unit test.
+impl std::fmt::Debug for ApiKeyCreds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKeyCreds")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Agent → client responses.
@@ -221,8 +269,19 @@ pub enum Response {
     Copied(Copied),
     /// `PinStatus` result.
     PinStatus(PinStatus),
+    /// `ApiKeyStatus` result.
+    ApiKeyStatus(ApiKeyStatus),
     /// Recoverable error — operation declined or failed.
     Error(Error),
+}
+
+/// Wire shape for `Response::ApiKeyStatus`. The secret is never included.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ApiKeyStatus {
+    /// Whether an API key is stored for the account.
+    pub configured: bool,
+    /// The non-secret `client_id` (`user.<uuid>`), echoed when configured.
+    pub client_id: Option<String>,
 }
 
 /// Wire shape for `Response::PinStatus`.
