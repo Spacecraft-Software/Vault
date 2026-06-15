@@ -29,6 +29,11 @@ const GEN_MIN_LEN: usize = 8;
 /// own generator ceiling so saved values round-trip everywhere.
 const GEN_MAX_LEN: usize = 128;
 
+/// Rows a vim half-page motion (`Ctrl-d`/`Ctrl-u`) moves. A fixed approximation
+/// of vim's "half the window": the pure-render `App` has no viewport height, so
+/// a constant step keeps the motion useful without plumbing the pane geometry.
+const VIM_PAGE: usize = 10;
+
 /// A single-line editable text buffer with a cursor — the shared core behind
 /// the `/` search, `:` command line, and every form field. Edits happen at the
 /// cursor; `cursor` is a byte offset kept on a `char` boundary so all the
@@ -704,6 +709,10 @@ impl FormState {
 
 /// Top-level TUI state.
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "App is the TUI's flat UI-state aggregate; these are independent toggles (config prefs + transient flags), not a state machine to fold into an enum"
+)]
 pub struct App {
     /// What the screen shows.
     pub screen: Screen,
@@ -751,6 +760,11 @@ pub struct App {
     /// animations yet, so nothing reads this — it's populated from config so a
     /// future spinner / lock-countdown can honor it without re-plumbing.
     pub reduced_motion: bool,
+    /// Vim-style jump motions enabled (`tui.vim`): `gg`/`G`/`Ctrl-d`/`Ctrl-u`,
+    /// with the generator moved from `g` to `Ctrl-g`.
+    pub vim: bool,
+    /// Whether a `g` is pending the second `g` of a `gg` (vim mode only).
+    pub pending_g: bool,
     /// Set when the user asks to quit.
     pub should_quit: bool,
 }
@@ -780,6 +794,8 @@ impl App {
             toast: None,
             unlock: None,
             reduced_motion: false,
+            vim: false,
+            pending_g: false,
             should_quit: false,
         }
     }
@@ -814,6 +830,8 @@ impl App {
             toast: None,
             unlock: None,
             reduced_motion: false,
+            vim: false,
+            pending_g: false,
             should_quit: false,
         }
     }
@@ -913,6 +931,62 @@ impl App {
             }
             Focus::Items => self.item_sel = self.item_sel.saturating_sub(1),
         }
+    }
+
+    /// Jump to the first row of the focused pane (vim `gg`).
+    pub fn move_top(&mut self) {
+        self.revealed = None;
+        match self.focus {
+            Focus::Folders => {
+                self.folder_sel = 0;
+                self.item_sel = 0;
+            }
+            Focus::Items => self.item_sel = 0,
+        }
+    }
+
+    /// Jump to the last row of the focused pane (vim `G`); no-op when empty.
+    pub fn move_bottom(&mut self) {
+        self.revealed = None;
+        match self.focus {
+            Focus::Folders => {
+                self.folder_sel = self.folders.len().saturating_sub(1);
+                self.item_sel = 0;
+            }
+            Focus::Items => self.item_sel = self.filtered().len().saturating_sub(1),
+        }
+    }
+
+    /// Move the focused selection down by a half-page (vim `Ctrl-d`), clamped.
+    pub fn page_down(&mut self) {
+        for _ in 0..VIM_PAGE {
+            self.move_down();
+        }
+    }
+
+    /// Move the focused selection up by a half-page (vim `Ctrl-u`), clamped.
+    pub fn page_up(&mut self) {
+        for _ in 0..VIM_PAGE {
+            self.move_up();
+        }
+    }
+
+    /// Arm the `gg` prefix: the next `g` jumps to the top.
+    pub const fn arm_pending_g(&mut self) {
+        self.pending_g = true;
+    }
+
+    /// Consume the `gg` prefix, returning whether a `g` was pending (and
+    /// clearing it either way).
+    pub const fn take_pending_g(&mut self) -> bool {
+        let was = self.pending_g;
+        self.pending_g = false;
+        was
+    }
+
+    /// Cancel any pending `gg` prefix (a non-`g` key was pressed).
+    pub const fn clear_pending_g(&mut self) {
+        self.pending_g = false;
     }
 
     /// Toggle focus between the folder pane and the item list.
@@ -1509,6 +1583,44 @@ mod tests {
         app.input_insert_str("git\nhub"); // newline stripped
         let name = app.form.as_ref().expect("form").rows()[1].value.to_owned();
         assert_eq!(name, "github");
+    }
+
+    #[test]
+    fn vim_motions_jump_and_clamp() {
+        let entries: Vec<ListEntry> = (0..25).map(|i| entry(&format!("e{i}"), None)).collect();
+        let mut app = App::browsing(status(), entries);
+        assert_eq!(app.item_sel, 0);
+        app.move_bottom();
+        assert_eq!(app.item_sel, 24, "G lands on the last row");
+        app.move_top();
+        assert_eq!(app.item_sel, 0, "gg lands on the first row");
+        app.page_down();
+        assert_eq!(app.item_sel, VIM_PAGE, "Ctrl-d moves a half-page");
+        app.page_up();
+        assert_eq!(app.item_sel, 0, "Ctrl-u clamps at the top");
+        // page motions clamp at the bottom.
+        app.move_bottom();
+        app.page_down();
+        assert_eq!(app.item_sel, 24, "Ctrl-d clamps at the last row");
+    }
+
+    #[test]
+    fn move_bottom_on_empty_list_is_a_noop() {
+        let mut app = App::browsing(status(), vec![]);
+        app.move_bottom();
+        assert_eq!(app.item_sel, 0);
+    }
+
+    #[test]
+    fn pending_g_arms_once_then_fires() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        assert!(!app.take_pending_g(), "nothing pending initially");
+        app.arm_pending_g();
+        assert!(app.take_pending_g(), "first take after arm fires gg");
+        assert!(!app.take_pending_g(), "and is cleared afterwards");
+        app.arm_pending_g();
+        app.clear_pending_g();
+        assert!(!app.take_pending_g(), "a non-g key cancels the prefix");
     }
 
     #[test]

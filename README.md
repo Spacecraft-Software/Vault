@@ -150,12 +150,19 @@ Recognised keys: `clipboard.clear_secs` (auto-clear window, `0` disables),
 `agent.idle_lock_secs` (idle-lock timeout, `0` disables),
 `agent.session_keyring` (resume across restarts; see above),
 `sync.interval_secs` (background `/sync` interval while unlocked, `0` disables),
-and `ui.reduced_motion` (suppress animated TUI elements — **reserved**: the TUI
-has no animations yet, so this records the preference for when a spinner /
-lock-countdown lands). When the CLI auto-starts the agent, the agent-side keys
-populate its launch flags (changes apply on the next agent spawn);
-`ui.reduced_motion` is read by `vault-tui` directly. Wipe the on-disk item cache
-(and drop a running agent's keys) with `vault purge`.
+`ui.reduced_motion` (suppress animated TUI elements — **reserved**: the TUI has
+no animations yet, so this records the preference for when a spinner /
+lock-countdown lands), and `tui.vim` (vim motions; see below). When the CLI
+auto-starts the agent, the agent-side keys populate its launch flags (changes
+apply on the next agent spawn); `ui.reduced_motion` and `tui.vim` are read by
+`vault-tui` directly. Wipe the on-disk item cache (and drop a running agent's
+keys) with `vault purge`.
+
+With `tui.vim` set, `vault-tui` adds vim jump motions on top of the default
+`hjkl` navigation: `gg` to the top, `G` to the bottom, and `Ctrl-d`/`Ctrl-u` for
+a half-page. Because `g` becomes the `gg` prefix, the password generator moves
+from `g` to `Ctrl-g` while vim mode is on (with it off, `g` opens the generator
+as before).
 
 With `sync.interval_secs` set, the agent re-pulls `/sync` on that cadence while
 unlocked — keeping the in-memory vault and offline cache fresh without a manual
