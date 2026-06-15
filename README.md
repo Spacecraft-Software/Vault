@@ -98,6 +98,21 @@ the primary field — a card's number, an identity's email (and a login's
 password). The number/CVV are fetched only on reveal, so no card secret enters
 the TUI until you ask.
 
+Create a card with `vault add … --type card` — the non-secret fields are flags;
+the number and CVV are prompted on the terminal (never argv, so they don't leak
+to shell history / `ps`):
+
+```sh
+vault add "My Visa" --type card --brand Visa --expiry 04/2030
+#   Card number: …
+#   CVV (leave empty for none): …
+vault edit "My Visa" --expiry 05/2031 --code   # --code re-prompts the CVV
+```
+
+`--expiry` accepts `MM/YYYY` or `MM/YY`. Identity create/edit is still pending
+(identities are read-only for now). Editing card fields on a non-card item is
+rejected.
+
 ### PIN unlock
 
 For quick access without re-typing the master password, enroll a PIN (after an

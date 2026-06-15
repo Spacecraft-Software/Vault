@@ -10,6 +10,21 @@ range may break in any release.
 
 ### Added
 
+- **Create/edit card ciphers.** `vault add … --type card` and `vault edit`
+  now build/update card (type 3) items: cardholder/brand/expiry via flags, the
+  **number and CVV prompted on the controlling terminal** (`/dev/tty`, never
+  argv — so they don't leak to shell history / `ps`). `--expiry` takes
+  `MM/YYYY` or `MM/YY`; on edit, `--number`/`--code` re-prompt those secrets.
+  Editing card fields on a non-card item is rejected.
+  - `vault-core`: `from_plain` emits a `Card` for type 3. `vault-ipc`: a typed
+    `CardWrite` (secrets as zeroized `Vec<u8>`, redacted `Debug`) on
+    `Request::Add`/`Edit` (serde-defaulted). `vault-agent`: `add_cipher` builds
+    a `PlainCard`; `apply_cipher_edits` sets only the given card fields (others
+    preserved).
+  - Identity create/edit remains the tracked follow-up (read-only for now).
+    Tests: `from_plain`→`decrypt` card round-trip; `apply_cipher_edits` card
+    partial-update; `CardWrite` transport + `Debug`-redaction; CLI `split_expiry`.
+
 - **TUI card/identity detail render.** Selecting a card or identity in
   `vault-tui` now shows its fields in the detail pane: card brand/expiry with a
   masked number (`Space` reveals it, re-masked on navigation) and masked CVV;

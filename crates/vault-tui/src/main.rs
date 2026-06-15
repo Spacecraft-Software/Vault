@@ -476,6 +476,7 @@ async fn submit_form(state: &mut App, socket: &Path) {
             password: password.map(String::into_bytes),
             totp: None,
             uri,
+            card: None,
         },
         FormKind::Edit { id, .. } => Request::Edit {
             selector: id,
@@ -486,6 +487,7 @@ async fn submit_form(state: &mut App, socket: &Path) {
             password: password.map(String::into_bytes),
             totp: None,
             uri,
+            card: None,
         },
     };
     match client::request(socket, &req).await {

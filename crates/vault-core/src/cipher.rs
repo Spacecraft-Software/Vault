@@ -466,8 +466,8 @@ impl Cipher {
     ///
     /// `cipher_type`, `id`, and `folder_id` pass through from `plain`
     /// unchanged (they are plaintext metadata, not `EncString` fields). Login
-    /// sub-fields (`username`/`password`/`totp`/`primary_uri`) are only emitted
-    /// for `cipher_type == 1`; for any other type the `login` object is `None`.
+    /// sub-fields are emitted only for `cipher_type == 1`, card sub-fields only
+    /// for `cipher_type == 3`; identity (type 4) write isn't built yet.
     #[must_use]
     pub fn from_plain(plain: &PlainCipher, enc_key: &[u8; 32], mac_key: &[u8; 32]) -> Self {
         let enc = |s: &str| EncString::encrypt(enc_key, mac_key, s.as_bytes()).serialize();
@@ -480,6 +480,18 @@ impl Cipher {
                 .as_deref()
                 .map(|u| vec![LoginUri { uri: Some(enc(u)) }]),
         });
+        let card = if plain.cipher_type == 3 {
+            plain.card.as_ref().map(|c| Card {
+                cardholder_name: c.cardholder_name.as_deref().map(&enc),
+                brand: c.brand.as_deref().map(&enc),
+                number: c.number.as_deref().map(&enc),
+                exp_month: c.exp_month.as_deref().map(&enc),
+                exp_year: c.exp_year.as_deref().map(&enc),
+                code: c.code.as_deref().map(&enc),
+            })
+        } else {
+            None
+        };
         Self {
             id: plain.id.clone(),
             cipher_type: plain.cipher_type,
@@ -488,9 +500,8 @@ impl Cipher {
             name: plain.name.as_deref().map(&enc),
             notes: plain.notes.as_deref().map(&enc),
             login,
-            // Card/identity are read-only for now; `add`/`edit` only build
-            // logins, so these never round-trip through `from_plain`.
-            card: None,
+            card,
+            // Identity write isn't built yet (read-only); see CLAUDE.md.
             identity: None,
             fields: None,
         }

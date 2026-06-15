@@ -23,8 +23,8 @@ use tokio::net::UnixStream;
 use zeroize::{Zeroize, Zeroizing};
 
 use vault_ipc::proto::{
-    ApiKeyCreds, ApiKeyStatus, Error as IpcError, Field, Item, ListEntry, PinStatus, Removed,
-    Request, Response, Saved, Status, TwoFactorCode,
+    ApiKeyCreds, ApiKeyStatus, CardWrite, Error as IpcError, Field, Item, ListEntry, PinStatus,
+    Removed, Request, Response, Saved, Status, TwoFactorCode,
 };
 use vault_ipc::{default_socket_path, read_frame, sanitize_socket_path, write_frame};
 
@@ -223,6 +223,15 @@ enum Cmd {
         /// Without this flag the password is read from stdin.
         #[arg(long, value_name = "LEN", num_args = 0..=1, default_missing_value = "20")]
         generate: Option<usize>,
+        /// Cardholder name (card only).
+        #[arg(long)]
+        cardholder: Option<String>,
+        /// Card brand, e.g. `Visa` (card only).
+        #[arg(long)]
+        brand: Option<String>,
+        /// Card expiry as `MM/YYYY` or `MM/YY` (card only).
+        #[arg(long)]
+        expiry: Option<String>,
         /// Emit JSON instead of a human-readable confirmation.
         #[arg(long)]
         json: bool,
@@ -253,6 +262,21 @@ enum Cmd {
         /// Replace the password with a freshly generated one; optional length.
         #[arg(long, value_name = "LEN", num_args = 0..=1, default_missing_value = "20")]
         generate: Option<usize>,
+        /// New cardholder name (card only).
+        #[arg(long)]
+        cardholder: Option<String>,
+        /// New card brand (card only).
+        #[arg(long)]
+        brand: Option<String>,
+        /// New card expiry `MM/YYYY` or `MM/YY` (card only).
+        #[arg(long)]
+        expiry: Option<String>,
+        /// Replace the card number — the new value is prompted on the terminal.
+        #[arg(long)]
+        number: bool,
+        /// Replace the card security code (CVV) — prompted on the terminal.
+        #[arg(long)]
+        code: bool,
         /// Emit JSON instead of a human-readable confirmation.
         #[arg(long)]
         json: bool,
@@ -453,6 +477,8 @@ enum KindArg {
     Login,
     /// Secure note (type 2).
     Note,
+    /// Payment card (type 3).
+    Card,
 }
 
 impl KindArg {
@@ -461,6 +487,7 @@ impl KindArg {
         match self {
             Self::Login => 1,
             Self::Note => 2,
+            Self::Card => 3,
         }
     }
 }
@@ -503,6 +530,7 @@ fn resolve_socket(cli: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     default_socket_path().ok_or_else(|| anyhow::anyhow!("no XDG_RUNTIME_DIR / TMPDIR available"))
 }
 
+#[allow(clippy::too_many_lines)] // flat one-arm-per-subcommand dispatch reads best in one match
 async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
     match cmd {
         Cmd::Status { json } => cmd_status(ep, json).await,
@@ -539,6 +567,9 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
             folder,
             notes,
             generate,
+            cardholder,
+            brand,
+            expiry,
             json,
         } => {
             cmd_add(
@@ -551,6 +582,9 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
                     folder,
                     notes,
                     generate,
+                    cardholder,
+                    brand,
+                    expiry,
                     json,
                 },
             )
@@ -565,6 +599,11 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
             notes,
             password,
             generate,
+            cardholder,
+            brand,
+            expiry,
+            number,
+            code,
             json,
         } => {
             cmd_edit(
@@ -578,6 +617,11 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
                     notes,
                     password,
                     generate,
+                    cardholder,
+                    brand,
+                    expiry,
+                    number,
+                    code,
                     json,
                 },
             )
@@ -1296,12 +1340,31 @@ struct AddArgs {
     folder: Option<String>,
     notes: Option<String>,
     generate: Option<usize>,
+    cardholder: Option<String>,
+    brand: Option<String>,
+    expiry: Option<String>,
     json: bool,
 }
 
 async fn cmd_add(ep: Endpoint<'_>, args: AddArgs) -> Result<(), u8> {
     let cipher_type = args.kind.cipher_type();
     let is_login = matches!(args.kind, KindArg::Login);
+
+    // Card (type 3): non-secret fields from flags; number/CVV prompted on the
+    // controlling terminal (never argv — they'd leak to shell history / ps).
+    let card = if matches!(args.kind, KindArg::Card) {
+        let (exp_month, exp_year) = split_expiry(args.expiry.as_deref())?;
+        Some(CardWrite {
+            cardholder: args.cardholder,
+            brand: args.brand,
+            number: read_tty_line("Card number: ").map(String::into_bytes),
+            exp_month,
+            exp_year,
+            code: read_tty_line("CVV (leave empty for none): ").map(String::into_bytes),
+        })
+    } else {
+        None
+    };
 
     // Password (login only): generate locally or read from stdin. Empty stdin
     // means "no password" — a login with just a username is valid.
@@ -1333,6 +1396,7 @@ async fn cmd_add(ep: Endpoint<'_>, args: AddArgs) -> Result<(), u8> {
         password,
         totp: None,
         uri,
+        card,
     };
     let mut stream = connect(ep).await?;
     let resp = exchange(&mut stream, &req).await?;
@@ -1347,6 +1411,7 @@ async fn cmd_add(ep: Endpoint<'_>, args: AddArgs) -> Result<(), u8> {
 }
 
 /// Parsed `vault edit` arguments.
+#[allow(clippy::struct_excessive_bools)] // independent CLI flags (password/number/code/json), not a state enum
 struct EditArgs {
     selector: String,
     name: Option<String>,
@@ -1356,6 +1421,11 @@ struct EditArgs {
     notes: Option<String>,
     password: bool,
     generate: Option<usize>,
+    cardholder: Option<String>,
+    brand: Option<String>,
+    expiry: Option<String>,
+    number: bool,
+    code: bool,
     json: bool,
 }
 
@@ -1376,6 +1446,33 @@ async fn cmd_edit(ep: Endpoint<'_>, args: EditArgs) -> Result<(), u8> {
         None
     };
 
+    // Card edit: build a CardWrite if any card flag was passed. Secrets
+    // (number/CVV) are prompted on the terminal when their bool flag is set.
+    let card = if args.cardholder.is_some()
+        || args.brand.is_some()
+        || args.expiry.is_some()
+        || args.number
+        || args.code
+    {
+        let (exp_month, exp_year) = split_expiry(args.expiry.as_deref())?;
+        Some(CardWrite {
+            cardholder: args.cardholder,
+            brand: args.brand,
+            number: args
+                .number
+                .then(|| read_tty_line("New card number: ").map(String::into_bytes))
+                .flatten(),
+            exp_month,
+            exp_year,
+            code: args
+                .code
+                .then(|| read_tty_line("New CVV: ").map(String::into_bytes))
+                .flatten(),
+        })
+    } else {
+        None
+    };
+
     let req = Request::Edit {
         selector: args.selector,
         name: args.name,
@@ -1385,6 +1482,7 @@ async fn cmd_edit(ep: Endpoint<'_>, args: EditArgs) -> Result<(), u8> {
         password,
         totp: None,
         uri: args.uri,
+        card,
     };
     let mut stream = connect(ep).await?;
     let resp = exchange(&mut stream, &req).await?;
@@ -1396,6 +1494,34 @@ async fn cmd_edit(ep: Endpoint<'_>, args: EditArgs) -> Result<(), u8> {
         Response::Error(e) => report_error(&e),
         other => unexpected(&other),
     }
+}
+
+/// Split a `MM/YYYY` or `MM/YY` expiry into `(month, year)` strings (month
+/// normalized to no leading zero, two-digit year expanded to `20YY`). Returns
+/// `(None, None)` when no expiry was given; exit code 2 on a malformed value.
+fn split_expiry(expiry: Option<&str>) -> Result<(Option<String>, Option<String>), u8> {
+    let Some(raw) = expiry else {
+        return Ok((None, None));
+    };
+    let bad = || {
+        eprintln!("vault: --expiry must be MM/YYYY or MM/YY, got '{raw}'");
+        2u8
+    };
+    let (m, y) = raw.split_once('/').ok_or_else(bad)?;
+    let month: u32 = m.trim().parse().map_err(|_| bad())?;
+    if !(1..=12).contains(&month) {
+        return Err(bad());
+    }
+    let y = y.trim();
+    if y.is_empty() || !y.chars().all(|c| c.is_ascii_digit()) {
+        return Err(bad());
+    }
+    let year = if y.len() == 2 {
+        format!("20{y}")
+    } else {
+        y.to_owned()
+    };
+    Ok((Some(month.to_string()), Some(year)))
 }
 
 /// Generate a password locally, surfacing generator errors as exit code 2.
@@ -1718,4 +1844,28 @@ fn print_item(item: &Item, json: bool) {
     // Plain output: print the field value followed by exactly one newline.
     // Matches the rbw convention so shell pipelines work unchanged.
     println!("{}", item.value);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_expiry;
+
+    #[test]
+    fn split_expiry_parses_and_normalizes() {
+        assert_eq!(
+            split_expiry(Some("04/2030")).unwrap(),
+            (Some("4".into()), Some("2030".into()))
+        );
+        // Two-digit year expands; leading-zero month normalizes.
+        assert_eq!(
+            split_expiry(Some("4/30")).unwrap(),
+            (Some("4".into()), Some("2030".into()))
+        );
+        // No expiry → both None.
+        assert_eq!(split_expiry(None).unwrap(), (None, None));
+        // Malformed → error.
+        assert!(split_expiry(Some("2030")).is_err()); // no slash
+        assert!(split_expiry(Some("13/2030")).is_err()); // bad month
+        assert!(split_expiry(Some("04/abcd")).is_err()); // non-numeric year
+    }
 }
