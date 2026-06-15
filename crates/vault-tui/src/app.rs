@@ -747,6 +747,10 @@ pub struct App {
     pub toast: Option<String>,
     /// Interactive unlock state, `Some` while [`Screen::Unlock`] is shown.
     pub unlock: Option<UnlockState>,
+    /// Suppress animated UI (`ui.reduced_motion`). Reserved: the TUI has no
+    /// animations yet, so nothing reads this — it's populated from config so a
+    /// future spinner / lock-countdown can honor it without re-plumbing.
+    pub reduced_motion: bool,
     /// Set when the user asks to quit.
     pub should_quit: bool,
 }
@@ -775,6 +779,7 @@ impl App {
             osc52_clear_at: None,
             toast: None,
             unlock: None,
+            reduced_motion: false,
             should_quit: false,
         }
     }
@@ -808,6 +813,7 @@ impl App {
             osc52_clear_at: None,
             toast: None,
             unlock: None,
+            reduced_motion: false,
             should_quit: false,
         }
     }

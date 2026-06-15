@@ -10,6 +10,16 @@ range may break in any release.
 
 ### Added
 
+- **`ui.reduced_motion` config key (reserved).** Completes the PRD §7.1 config
+  registry with the accessibility preference to suppress animated TUI elements.
+  The TUI has no animations yet (it's fully event-driven — no spinner, no
+  lock-countdown, no blink), so the key is **inert groundwork**: `vault-config`
+  records/validates it and `vault-tui` populates an `App.reduced_motion` flag
+  from it, ready for a future spinner / lock-countdown to honor without
+  re-plumbing. It's a TUI-rendering preference, read by the TUI directly (not
+  relayed to the agent). Tested in `vault-config` (round-trip, rejects
+  non-booleans, never emitted as an agent flag).
+
 - **TUI About overlay.** `vault-tui` gains a read-only About screen (open with
   `?` or `:about`, dismiss with `Esc`/`q`) showing the version, maintainer,
   copyright/license, and canonical URL — rendered from the same

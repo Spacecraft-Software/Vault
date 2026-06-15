@@ -28,6 +28,7 @@ pub const KNOWN_KEYS: &[&str] = &[
     "agent.idle_lock_secs",
     "agent.session_keyring",
     "sync.interval_secs",
+    "ui.reduced_motion",
 ];
 
 /// Accepted values for `clipboard.backend`.
@@ -45,6 +46,8 @@ pub struct Config {
     pub agent: AgentCfg,
     /// Background-sync settings.
     pub sync: SyncCfg,
+    /// TUI rendering preferences.
+    pub ui: UiCfg,
     /// Registered account profile (written by `vault register`). Skipped from
     /// the file until something is set, so an unregistered config carries no
     /// empty `[account]` table.
@@ -84,6 +87,17 @@ pub struct SyncCfg {
     /// Seconds between agent-side background `/sync`es while unlocked; `0` (or
     /// unset) disables. Takes effect on the next agent (auto-)spawn.
     pub interval_secs: Option<u64>,
+}
+
+/// `[ui]` table — TUI-only rendering preferences (the agent never renders, so
+/// these are read by `vault-tui` directly, not relayed via `agent_args`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiCfg {
+    /// Suppress animated TUI elements (spinner / lock-countdown) for
+    /// accessibility. Reserved: the TUI has no animations yet, so this records
+    /// the preference for when they land.
+    pub reduced_motion: Option<bool>,
 }
 
 /// `[account]` table — the registered account, written by `vault register`
@@ -142,6 +156,12 @@ impl Config {
         self.sync.interval_secs
     }
 
+    /// Effective `ui.reduced_motion`, if set.
+    #[must_use]
+    pub const fn reduced_motion(&self) -> Option<bool> {
+        self.ui.reduced_motion
+    }
+
     /// The registered account profile.
     #[must_use]
     pub const fn account(&self) -> &AccountCfg {
@@ -171,6 +191,7 @@ impl Config {
             "agent.idle_lock_secs" => Ok(self.agent.idle_lock_secs.map(|v| v.to_string())),
             "agent.session_keyring" => Ok(self.agent.session_keyring.map(|v| v.to_string())),
             "sync.interval_secs" => Ok(self.sync.interval_secs.map(|v| v.to_string())),
+            "ui.reduced_motion" => Ok(self.ui.reduced_motion.map(|v| v.to_string())),
             other => Err(other.to_owned()),
         }
     }
@@ -203,6 +224,10 @@ impl Config {
                 self.sync.interval_secs = Some(parse_u64(key, raw)?);
                 Ok(())
             }
+            "ui.reduced_motion" => {
+                self.ui.reduced_motion = Some(parse_bool(key, raw)?);
+                Ok(())
+            }
             other => Err(unknown_key(other)),
         }
     }
@@ -232,6 +257,10 @@ impl Config {
             }
             "sync.interval_secs" => {
                 self.sync.interval_secs = None;
+                Ok(())
+            }
+            "ui.reduced_motion" => {
+                self.ui.reduced_motion = None;
                 Ok(())
             }
             other => Err(unknown_key(other)),
@@ -522,6 +551,27 @@ mod tests {
         assert!(c.set("clipboard.backend", "xclip").is_err());
         c.unset("clipboard.backend").expect("unset");
         assert_eq!(c.clipboard_backend(), None);
+    }
+
+    #[test]
+    fn reduced_motion_round_trips_and_is_tui_only() {
+        let mut c = Config::default();
+        assert_eq!(c.reduced_motion(), None);
+        c.set("ui.reduced_motion", "true").expect("set true");
+        assert_eq!(c.reduced_motion(), Some(true));
+        // It's a TUI-rendering preference — never relayed to the agent.
+        assert!(
+            !agent_args(&c).contains(&OsString::from("--reduced-motion")),
+            "ui.reduced_motion must not become an agent flag"
+        );
+        // Survives a toml round-trip.
+        let text = toml::to_string_pretty(&c).expect("serialise");
+        let back: Config = toml::from_str(&text).expect("parse");
+        assert_eq!(back.reduced_motion(), Some(true));
+        // Non-boolean rejected; unset clears.
+        assert!(c.set("ui.reduced_motion", "sometimes").is_err());
+        c.unset("ui.reduced_motion").expect("unset");
+        assert_eq!(c.reduced_motion(), None);
     }
 
     #[test]
