@@ -10,6 +10,24 @@ range may break in any release.
 
 ### Added
 
+- **Create/edit identity ciphers.** `vault add … --type identity` and `vault
+  edit` now build/update identity (type 4) items — the last cipher type to get a
+  write path. The 15 non-secret fields (title, names, username, company, email,
+  phone, address1–3, city, state, postal code, country) are flags; the three
+  sensitive fields — **SSN, passport, license** — are prompted on the controlling
+  terminal when their bool flag (`--ssn`/`--passport`/`--license`) is set (never
+  argv). The identity username is `--identity-username` (the bare `--username` is
+  the login field). Editing identity fields on a non-identity item is rejected.
+  - `vault-core`: `from_plain` emits an `Identity` for type 4. `vault-ipc`: a
+    typed `IdentityWrite` (ssn/passport/license as zeroized `Vec<u8>`, redacted
+    `Debug`) on `Request::Add`/`Edit` (serde-defaulted). `vault-agent`:
+    `add_cipher` builds a `PlainIdentity`; `apply_cipher_edits` sets only the
+    given identity fields. Tests: `from_plain`→`decrypt` identity round-trip;
+    `apply_cipher_edits` identity partial-update; `IdentityWrite` transport +
+    `Debug`-redaction.
+  - This unblocks **identity TUI editing** (the next follow-up) — the backend it
+    needed now exists.
+
 - **TUI card create/edit.** The `vault-tui` add/edit form (`a`/`e`) now composes
   card (type 3) items, not just logins and secure notes. The **Type** row cycles
   `login → secure note → card`; the card rows are cardholder/brand/number/expiry

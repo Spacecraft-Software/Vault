@@ -147,6 +147,73 @@ fn from_plain_then_decrypt_round_trips_card() {
 }
 
 #[test]
+fn from_plain_then_decrypt_round_trips_identity() {
+    use vault_core::cipher::PlainIdentity;
+    let enc = [0x99u8; 32];
+    let mac = [0xAAu8; 32];
+    let plain = PlainCipher {
+        id: "id-jane".into(),
+        cipher_type: 4,
+        folder_id: None,
+        name: Some("Jane Doe".into()),
+        notes: None,
+        username: None,
+        password: None,
+        totp: None,
+        primary_uri: None,
+        card: None,
+        // `PlainIdentity` implements `Drop` (zeroizes secrets), so functional
+        // update (`..default()`) can't move out of it — list every field.
+        identity: Some(PlainIdentity {
+            title: None,
+            first_name: Some("Jane".into()),
+            middle_name: None,
+            last_name: Some("Doe".into()),
+            username: None,
+            company: None,
+            ssn: Some("123-45-6789".into()),
+            passport_number: None,
+            license_number: None,
+            email: Some("jane@example.org".into()),
+            phone: None,
+            address1: None,
+            address2: None,
+            address3: None,
+            city: Some("Amber".into()),
+            state: None,
+            postal_code: None,
+            country: None,
+        }),
+    };
+
+    let cipher = Cipher::from_plain(&plain, &enc, &mac);
+    assert_eq!(cipher.cipher_type, 4);
+    assert!(cipher.login.is_none(), "identity has no login object");
+    let id = cipher.identity.as_ref().expect("identity emitted");
+    assert!(
+        id.ssn.as_deref().unwrap().starts_with("2."),
+        "secret is encrypted"
+    );
+
+    let back = cipher
+        .decrypt(
+            &enc,
+            &mac,
+            DecryptOptions {
+                identity: true,
+                ..DecryptOptions::default()
+            },
+        )
+        .unwrap();
+    let i = back.identity.as_ref().expect("decrypted identity");
+    assert_eq!(i.first_name.as_deref(), Some("Jane"));
+    assert_eq!(i.last_name.as_deref(), Some("Doe"));
+    assert_eq!(i.email.as_deref(), Some("jane@example.org"));
+    assert_eq!(i.city.as_deref(), Some("Amber"));
+    assert_eq!(i.ssn.as_deref(), Some("123-45-6789"));
+}
+
+#[test]
 fn decrypt_card_fields() {
     let enc = [0x33u8; 32];
     let mac = [0x44u8; 32];

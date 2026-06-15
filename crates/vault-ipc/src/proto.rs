@@ -152,6 +152,9 @@ pub enum Request {
         /// Card fields (card type only). Serde-defaulted for forward-compat.
         #[serde(default)]
         card: Option<CardWrite>,
+        /// Identity fields (identity type only). Serde-defaulted for forward-compat.
+        #[serde(default)]
+        identity: Option<IdentityWrite>,
     },
 
     /// Edit an existing cipher. Only the `Some` fields change; `None` leaves
@@ -177,6 +180,10 @@ pub enum Request {
         /// Serde-defaulted for forward-compat.
         #[serde(default)]
         card: Option<CardWrite>,
+        /// Identity fields to change (identity ciphers only); `Some` per field =
+        /// set. Serde-defaulted for forward-compat.
+        #[serde(default)]
+        identity: Option<IdentityWrite>,
     },
 
     /// Enroll a PIN: encrypt the unwrapped user key under a key derived from
@@ -283,6 +290,79 @@ impl std::fmt::Debug for CardWrite {
             .field("exp_month", &self.exp_month)
             .field("exp_year", &self.exp_year)
             .field("code", &self.code.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+/// Identity fields for `Add`/`Edit` (local UDS only).
+///
+/// Each is `Option` so the same shape serves create (absent = unset) and edit
+/// (present = set). `ssn`, `passport_number` and `license_number` are secret
+/// bytes (zeroized in `PlainIdentity`), wiped by the agent after encryption.
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub struct IdentityWrite {
+    /// Title (`Mr`, `Ms`, …).
+    pub title: Option<String>,
+    /// First name.
+    pub first_name: Option<String>,
+    /// Middle name.
+    pub middle_name: Option<String>,
+    /// Last name.
+    pub last_name: Option<String>,
+    /// Username.
+    pub username: Option<String>,
+    /// Company.
+    pub company: Option<String>,
+    /// SSN / national id (secret).
+    pub ssn: Option<Vec<u8>>,
+    /// Passport number (secret).
+    pub passport_number: Option<Vec<u8>>,
+    /// License number (secret).
+    pub license_number: Option<Vec<u8>>,
+    /// Email.
+    pub email: Option<String>,
+    /// Phone.
+    pub phone: Option<String>,
+    /// Address line 1.
+    pub address1: Option<String>,
+    /// Address line 2.
+    pub address2: Option<String>,
+    /// Address line 3.
+    pub address3: Option<String>,
+    /// City.
+    pub city: Option<String>,
+    /// State / province.
+    pub state: Option<String>,
+    /// Postal code.
+    pub postal_code: Option<String>,
+    /// Country.
+    pub country: Option<String>,
+}
+
+// Hand-written so the secret ssn/passport/license never land in a log line;
+// non-secret fields are shown to aid debugging. Verified by a unit test.
+impl std::fmt::Debug for IdentityWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |o: &Option<Vec<u8>>| o.as_ref().map(|_| "<redacted>");
+        f.debug_struct("IdentityWrite")
+            .field("title", &self.title)
+            .field("first_name", &self.first_name)
+            .field("middle_name", &self.middle_name)
+            .field("last_name", &self.last_name)
+            .field("username", &self.username)
+            .field("company", &self.company)
+            .field("ssn", &redact(&self.ssn))
+            .field("passport_number", &redact(&self.passport_number))
+            .field("license_number", &redact(&self.license_number))
+            .field("email", &self.email)
+            .field("phone", &self.phone)
+            .field("address1", &self.address1)
+            .field("address2", &self.address2)
+            .field("address3", &self.address3)
+            .field("city", &self.city)
+            .field("state", &self.state)
+            .field("postal_code", &self.postal_code)
+            .field("country", &self.country)
             .finish()
     }
 }
