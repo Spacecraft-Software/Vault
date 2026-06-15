@@ -22,7 +22,8 @@ use tokio::net::UnixStream;
 use zeroize::{Zeroize, Zeroizing};
 
 use vault_ipc::proto::{
-    Error as IpcError, Field, Item, ListEntry, PinStatus, Removed, Request, Response, Saved, Status,
+    ApiKeyCreds, ApiKeyStatus, Error as IpcError, Field, Item, ListEntry, PinStatus, Removed,
+    Request, Response, Saved, Status,
 };
 use vault_ipc::{default_socket_path, read_frame, sanitize_socket_path, write_frame};
 
@@ -123,6 +124,12 @@ enum Cmd {
         /// Account email override. Falls back to the profile, then `$VAULT_EMAIL`.
         #[arg(long)]
         email: Option<String>,
+        /// Authenticate with a Bitwarden personal API key (the
+        /// `client_credentials` grant, which skips an interactive 2FA prompt).
+        /// Reads `$BW_CLIENTID` / `$BW_CLIENTSECRET`, else prompts. The master
+        /// password is still required and the key is stored for later unlocks.
+        #[arg(long = "api-key")]
+        api_key: bool,
         /// Emit JSON instead of a human-readable summary.
         #[arg(long)]
         json: bool,
@@ -147,6 +154,12 @@ enum Cmd {
     Pin {
         #[command(subcommand)]
         action: PinAction,
+    },
+    /// Manage the stored Bitwarden API key (status / forget). Enroll one with
+    /// `vault login --api-key`.
+    Apikey {
+        #[command(subcommand)]
+        action: ApiKeyAction,
     },
     /// Wipe the in-memory key (the agent stays running).
     Lock {
@@ -358,6 +371,34 @@ enum PinAction {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum ApiKeyAction {
+    /// Show whether an API key is stored for the account.
+    Status {
+        /// Server origin. Falls back to the profile, then `$VAULT_SERVER`.
+        #[arg(long)]
+        server: Option<String>,
+        /// Account email. Falls back to the profile, then `$VAULT_EMAIL`.
+        #[arg(long)]
+        email: Option<String>,
+        /// Emit JSON instead of a human-readable line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget the stored API key (later logins use the password grant).
+    Forget {
+        /// Server origin. Falls back to the profile, then `$VAULT_SERVER`.
+        #[arg(long)]
+        server: Option<String>,
+        /// Account email. Falls back to the profile, then `$VAULT_EMAIL`.
+        #[arg(long)]
+        email: Option<String>,
+        /// Emit JSON instead of staying silent on success.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum FieldArg {
     Password,
@@ -447,8 +488,9 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
         Cmd::Login {
             server,
             email,
+            api_key,
             json,
-        } => cmd_login(ep, server, email, json).await,
+        } => cmd_login(ep, server, email, api_key, json).await,
         Cmd::Unlock {
             server,
             email,
@@ -456,6 +498,7 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
             json,
         } => cmd_unlock(ep, server, email, pin, json).await,
         Cmd::Pin { action } => cmd_pin(ep, action).await,
+        Cmd::Apikey { action } => cmd_apikey(ep, action).await,
         Cmd::Lock { json } => cmd_ack(ep, Request::Lock, "locked", json).await,
         Cmd::Sync { json } => cmd_sync(ep, json).await,
         Cmd::List { json } => cmd_list(ep, json).await,
@@ -663,9 +706,13 @@ async fn cmd_login(
     ep: Endpoint<'_>,
     server: Option<String>,
     email: Option<String>,
+    api_key: bool,
     json: bool,
 ) -> Result<(), u8> {
     let acct = resolve_account(server, email)?;
+    // Read the API key (env or interactive line) *before* the password, since
+    // `read_password` consumes the rest of stdin.
+    let api_creds = if api_key { Some(read_api_key()?) } else { None };
     let password = read_password()?;
     let mut stream = connect(ep).await?;
     let req = Request::Unlock {
@@ -673,6 +720,7 @@ async fn cmd_login(
         email: acct.email.clone(),
         password,
         device_id: acct.device_id,
+        api_key: api_creds,
     };
     let resp = exchange(&mut stream, &req).await?;
     drop(req);
@@ -717,6 +765,9 @@ async fn cmd_unlock(
             email: acct.email,
             password: read_password()?,
             device_id: acct.device_id,
+            // A routine unlock never re-supplies the key; the agent auto-uses
+            // the one persisted at `vault login --api-key`.
+            api_key: None,
         }
     };
     let mut stream = connect(ep).await?;
@@ -810,6 +861,111 @@ fn print_pin_status(s: PinStatus, json: bool) {
     } else {
         println!("pin: disabled");
     }
+}
+
+/// `vault apikey status/forget`.
+async fn cmd_apikey(ep: Endpoint<'_>, action: ApiKeyAction) -> Result<(), u8> {
+    match action {
+        ApiKeyAction::Status {
+            server,
+            email,
+            json,
+        } => {
+            let acct = resolve_account(server, email)?;
+            let mut stream = connect(ep).await?;
+            let req = Request::ApiKeyStatus {
+                server: acct.server,
+                email: acct.email,
+            };
+            match exchange(&mut stream, &req).await? {
+                Response::ApiKeyStatus(s) => {
+                    print_apikey_status(&s, json);
+                    Ok(())
+                }
+                Response::Error(e) => report_error(&e),
+                other => unexpected(&other),
+            }
+        }
+        ApiKeyAction::Forget {
+            server,
+            email,
+            json,
+        } => {
+            let acct = resolve_account(server, email)?;
+            cmd_ack(
+                ep,
+                Request::ApiKeyForget {
+                    server: acct.server,
+                    email: acct.email,
+                },
+                "api key forgotten",
+                json,
+            )
+            .await
+        }
+    }
+}
+
+/// Human / JSON rendering of `vault apikey status`.
+fn print_apikey_status(s: &ApiKeyStatus, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "configured": s.configured, "client_id": s.client_id })
+        );
+    } else if s.configured {
+        let id = s.client_id.as_deref().unwrap_or("");
+        println!("api key: configured ({id})");
+    } else {
+        println!("api key: not configured");
+    }
+}
+
+/// Read a Bitwarden API key for `vault login --api-key`: `$BW_CLIENTID` /
+/// `$BW_CLIENTSECRET` if set (matching the official `bw` CLI), else an
+/// interactive single-line prompt. Read before the master password, since
+/// `read_password` consumes the rest of stdin.
+fn read_api_key() -> Result<ApiKeyCreds, u8> {
+    let client_id = resolve_api_field("BW_CLIENTID", "API key client_id (user.…): ")?;
+    let mut client_secret = resolve_api_field("BW_CLIENTSECRET", "API key client_secret: ")?;
+    let creds = ApiKeyCreds {
+        client_id,
+        client_secret: client_secret.as_bytes().to_vec(),
+    };
+    client_secret.zeroize();
+    Ok(creds)
+}
+
+/// One API-key field: the env var when set and non-empty, else a single line
+/// from an interactive stdin. Errors (with guidance) when neither is available.
+fn resolve_api_field(env_var: &str, prompt: &str) -> Result<String, u8> {
+    if let Ok(v) = std::env::var(env_var)
+        && !v.is_empty()
+    {
+        return Ok(v);
+    }
+    if !io::stdin().is_terminal() {
+        eprintln!("vault: set ${env_var} (or run interactively) to supply the API key");
+        return Err(2);
+    }
+    let mut stderr = io::stderr();
+    let _ = write!(stderr, "{prompt}");
+    let _ = stderr.flush();
+    let mut line = String::new();
+    // Bind the read result before the `if let` so the `StdinLock` temporary
+    // doesn't outlive the statement (clippy::significant_drop_in_scrutinee).
+    let read_res = io::stdin().lock().read_line(&mut line);
+    if let Err(e) = read_res {
+        eprintln!("vault: failed to read input: {e}");
+        return Err(2);
+    }
+    let trimmed = line.trim_end_matches(['\n', '\r']).to_owned();
+    line.zeroize();
+    if trimmed.is_empty() {
+        eprintln!("vault: empty {env_var}");
+        return Err(2);
+    }
+    Ok(trimmed)
 }
 
 /// Fire-and-acknowledge: send `req`, expect a bare `Ok`, and (only under

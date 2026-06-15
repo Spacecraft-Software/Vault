@@ -10,6 +10,38 @@ range may break in any release.
 
 ### Added
 
+- **Bitwarden personal API-key authentication (2FA accounts).** A new auth path
+  that uses the OAuth2 `client_credentials` grant, which is *not* 2FA-challenged
+  — so an account with two-factor auth enabled can finally authenticate without
+  an interactive TOTP prompt (Vault has no TOTP entry). The API key authenticates
+  the *session* only; the `Key` it returns is still wrapped under the stretched
+  master key, so **the master password is still required at every unlock** to
+  decrypt the vault.
+  - `vault login --api-key`: reads `$BW_CLIENTID` / `$BW_CLIENTSECRET` (matching
+    the official `bw` CLI), else prompts, then reads the master password. On
+    success the agent authenticates via `client_credentials` and **persists the
+    key** (0600 `apikey.json` in the account data dir) so plain `vault unlock`
+    (and the TUI unlock) auto-reuse it — no 2FA, no re-supplying creds.
+  - `vault apikey status` / `vault apikey forget` manage the stored key (status
+    echoes only the non-secret `client_id`; forget falls back to the password
+    grant).
+  - `vault-api`: `BitwardenClient::login_api_key` (`grant_type=client_credentials`,
+    `scope=api`). `vault-store`: `ApiKeyCreds` + `save`/`load`/`delete_apikey_to_dir`
+    (atomic, 0600, custom `Debug` that redacts the secret). `vault-ipc`: optional
+    `api_key` on `Request::Unlock` (serde-defaulted, forward-compatible) plus
+    `ApiKeyStatus` / `ApiKeyForget` verbs and an `ApiKeyStatus` response (never
+    carries the secret). `vault-agent`: grant selection (request creds → persisted
+    key → password) with persistence on enrollment, and `ensure_online` now falls
+    back to API-key re-auth — so a PIN/offline session of an API-key account can
+    still go online for `sync`/edits even when the grant issued no refresh token.
+  - The key is protected at rest by filesystem permissions (0600) only: it must
+    be readable *before* unlock (it's used during auth), so it can't be wrapped
+    under the user key — the same trust level as the stored refresh token.
+  - Tests: `vault-api` wiremock for the `client_credentials` form + a bad-key
+    `ServerStatus`; `vault-store` round-trip / delete / `NotFound` / 0600-mode /
+    Debug-redaction units; `vault-ipc` transport round-trips (`api_key` present
+    + absent-decodes-to-`None`, `ApiKeyStatus`). No new external dependencies.
+
 - **TUI in-place unlock.** When the agent is locked, `vault-tui` no longer
   dead-ends at a "run `vault unlock`" banner — it shows an interactive unlock
   prompt for the registered account: type the master password, or `Tab` to a

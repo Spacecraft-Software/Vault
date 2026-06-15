@@ -8,7 +8,10 @@
 //! that a real sync would drive once the access token is in hand.
 
 use vault_core::kdf::{KdfParams, KdfType, derive_master_key, stretch_master_key};
-use vault_store::{VaultCache, load_from_dir, save_to_dir};
+use vault_store::{
+    ApiKeyCreds, VaultCache, delete_apikey_from_dir, load_apikey_from_dir, load_from_dir,
+    save_apikey_to_dir, save_to_dir,
+};
 
 const fn fast_pbkdf2() -> KdfParams {
     KdfParams {
@@ -132,4 +135,61 @@ fn cache_wrong_key_fails_to_decrypt() {
     let loaded = load_from_dir(tmp.path()).unwrap();
     let err = loaded.load_payload(&bad, &bad).unwrap_err();
     assert!(matches!(err, vault_store::Error::Crypto(_)));
+}
+
+#[test]
+fn apikey_round_trip_and_delete() {
+    let tmp = tempfile::tempdir().unwrap();
+    let creds = ApiKeyCreds {
+        client_id: "user.abc123".into(),
+        client_secret: "s3cr3t".into(),
+    };
+    let path = save_apikey_to_dir(tmp.path(), &creds).unwrap();
+    assert!(path.exists());
+
+    let loaded = load_apikey_from_dir(tmp.path()).unwrap();
+    assert_eq!(loaded.client_id, "user.abc123");
+    assert_eq!(loaded.client_secret, "s3cr3t");
+
+    // delete removes it; a second delete is a no-op.
+    delete_apikey_from_dir(tmp.path()).unwrap();
+    assert!(!path.exists());
+    delete_apikey_from_dir(tmp.path()).unwrap();
+    let err = load_apikey_from_dir(tmp.path()).unwrap_err();
+    assert!(matches!(err, vault_store::Error::NotFound(_)));
+}
+
+#[test]
+fn apikey_load_missing_returns_not_found() {
+    let tmp = tempfile::tempdir().unwrap();
+    let err = load_apikey_from_dir(tmp.path()).unwrap_err();
+    assert!(matches!(err, vault_store::Error::NotFound(_)));
+}
+
+#[cfg(unix)]
+#[test]
+fn apikey_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let creds = ApiKeyCreds {
+        client_id: "user.abc123".into(),
+        client_secret: "s3cr3t".into(),
+    };
+    let path = save_apikey_to_dir(tmp.path(), &creds).unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "apikey.json must be 0600");
+}
+
+#[test]
+fn apikey_debug_redacts_secret() {
+    let creds = ApiKeyCreds {
+        client_id: "user.abc123".into(),
+        client_secret: "topsecret".into(),
+    };
+    let rendered = format!("{creds:?}");
+    assert!(rendered.contains("user.abc123"));
+    assert!(
+        !rendered.contains("topsecret"),
+        "Debug must not leak the client_secret: {rendered}"
+    );
 }

@@ -264,6 +264,65 @@ impl BitwardenClient {
         }
     }
 
+    /// `POST /connect/token` with `grant_type=client_credentials` — authenticate
+    /// with a Bitwarden **personal API key** (`client_id = "user.<uuid>"` +
+    /// `client_secret`, from the web vault). This grant is **not** 2FA-challenged,
+    /// so it's the way to obtain a token for an account with two-factor auth
+    /// enabled without an interactive TOTP prompt.
+    ///
+    /// The API key authenticates the *session* only: the returned
+    /// [`TokenResponse`] still carries the user key wrapped under the stretched
+    /// master key (`key`), so the caller must still derive the master key from
+    /// the master password to decrypt the vault — the API key never replaces it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Credential`] if `client_secret` is not valid UTF-8,
+    /// [`Error::ServerStatus`] on a rejected API key (a plain `400` — there is
+    /// no 2FA branch on this grant), or [`Error::Transport`] on transport failure.
+    pub async fn login_api_key(
+        &mut self,
+        client_id: &str,
+        client_secret: &[u8],
+    ) -> Result<TokenResponse> {
+        // Held in Zeroizing so the secret scrubs on drop even on early return.
+        let secret = Zeroizing::new(
+            std::str::from_utf8(client_secret)
+                .map_err(|_| Error::Credential("api-key client_secret is not valid UTF-8"))?
+                .to_owned(),
+        );
+        let url = self
+            .urls
+            .identity
+            .join("connect/token")
+            .map_err(|_| Error::BaseUrl("could not build token URL"))?;
+
+        let device = self.device_id.to_string();
+        let form: [(&str, &str); 7] = [
+            ("grant_type", "client_credentials"),
+            ("scope", "api"),
+            ("client_id", client_id),
+            ("client_secret", secret.as_str()),
+            ("deviceType", "14"),
+            ("deviceIdentifier", &device),
+            ("deviceName", &self.device_name),
+        ];
+
+        let resp = self.http.post(url).form(&form).send().await?;
+        let status = resp.status();
+        if status.is_success() {
+            let token: TokenResponse = resp.json().await?;
+            self.access_token = Some(Zeroizing::new(token.access_token.clone()));
+            self.refresh_token = token.refresh_token.clone().map(Zeroizing::new);
+            Ok(token)
+        } else {
+            Err(Error::ServerStatus {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            })
+        }
+    }
+
     /// `GET /sync` — fetch the full encrypted vault. Requires a prior `login_password`.
     ///
     /// # Errors

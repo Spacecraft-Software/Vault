@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use vault_api::{BaseUrls, BitwardenClient, SyncResponse};
+use vault_api::{BaseUrls, BitwardenClient, SyncResponse, TokenResponse};
 use vault_core::cipher::{Cipher, decrypt_user_key};
 use vault_core::kdf::{KdfParams, derive_master_key, stretch_master_key};
-use vault_ipc::proto::Error as IpcError;
+use vault_ipc::proto::{ApiKeyCreds, Error as IpcError};
 use vault_store::VaultCache;
 
 use crate::state::{Vault, account_dir_name};
@@ -26,8 +26,9 @@ pub async fn perform_unlock(
     email: &str,
     password: &[u8],
     device_id: Option<&str>,
+    api_key: Option<&ApiKeyCreds>,
 ) -> Result<Vault, IpcError> {
-    match online_unlock(server, email, password, device_id).await {
+    match online_unlock(server, email, password, device_id, api_key).await {
         Ok(vault) => Ok(vault),
         Err(IpcError::Network(net)) => {
             // Network down — recover from cache if we have one for this account.
@@ -47,6 +48,7 @@ async fn online_unlock(
     email: &str,
     password: &[u8],
     device_id: Option<&str>,
+    api_key: Option<&ApiKeyCreds>,
 ) -> Result<Vault, IpcError> {
     let email_lower = email.trim().to_lowercase();
     let urls = BaseUrls::self_hosted(server).map_err(|e| IpcError::Internal(e.to_string()))?;
@@ -70,10 +72,19 @@ async fn online_unlock(
     let stretch_enc = Zeroizing::new(stretch_enc);
     let stretch_mac = Zeroizing::new(stretch_mac);
 
-    let token = client
-        .login_password(&email_lower, password, params)
-        .await
-        .map_err(translate_login_err)?;
+    // Authenticate. An API key (request-supplied or previously persisted) uses
+    // the client_credentials grant, which skips 2FA; otherwise the password
+    // grant. Either way the master key derived above is what decrypts the vault.
+    let token = obtain_token(
+        &mut client,
+        &email_lower,
+        password,
+        params,
+        api_key,
+        server,
+        email,
+    )
+    .await?;
 
     let encrypted_user_key = token
         .key
@@ -112,6 +123,81 @@ async fn online_unlock(
         eprintln!("vault-agent: cache persist after unlock failed: {e}");
     }
     Ok(vault)
+}
+
+/// Authenticate `client` and return the token. Grant selection: request-supplied
+/// API-key creds (persisted on success, so future unlocks reuse them) → a
+/// previously stored API key → the password grant. The API-key grants use
+/// `client_credentials`, which skips 2FA; the password grant can surface
+/// [`IpcError::TwoFactorRequired`].
+async fn obtain_token(
+    client: &mut BitwardenClient,
+    email_lower: &str,
+    password: &[u8],
+    params: KdfParams,
+    api_key: Option<&ApiKeyCreds>,
+    server: &str,
+    email: &str,
+) -> Result<TokenResponse, IpcError> {
+    if let Some(creds) = api_key {
+        let token = client
+            .login_api_key(&creds.client_id, &creds.client_secret)
+            .await
+            .map_err(api_err)?;
+        // Enrollment succeeded — persist the key so plain `unlock` reuses it.
+        persist_apikey(server, email, creds)?;
+        return Ok(token);
+    }
+    if let Some(stored) =
+        cache_dir(server, email).and_then(|d| vault_store::load_apikey_from_dir(&d).ok())
+    {
+        return client
+            .login_api_key(&stored.client_id, stored.client_secret.as_bytes())
+            .await
+            .map_err(api_err);
+    }
+    client
+        .login_password(email_lower, password, params)
+        .await
+        .map_err(translate_login_err)
+}
+
+/// Persist a request-supplied API key (0600) for the account. The
+/// `client_secret` is valid UTF-8 here — `login_api_key` already verified it
+/// against the server.
+fn persist_apikey(server: &str, email: &str, creds: &ApiKeyCreds) -> Result<(), IpcError> {
+    let dir = cache_dir(server, email)
+        .ok_or_else(|| IpcError::Internal("no data directory".to_owned()))?;
+    let client_secret = String::from_utf8(creds.client_secret.clone())
+        .map_err(|_| IpcError::Internal("api-key client_secret is not valid UTF-8".to_owned()))?;
+    let store_creds = vault_store::ApiKeyCreds {
+        client_id: creds.client_id.clone(),
+        client_secret,
+    };
+    vault_store::save_apikey_to_dir(&dir, &store_creds)
+        .map_err(|e| IpcError::Internal(format!("write api key: {e}")))?;
+    Ok(())
+}
+
+/// Report whether an API key is stored for the account (never the secret).
+#[must_use]
+pub fn apikey_status(server: &str, email: &str) -> vault_ipc::proto::ApiKeyStatus {
+    let creds = cache_dir(server, email).and_then(|d| vault_store::load_apikey_from_dir(&d).ok());
+    vault_ipc::proto::ApiKeyStatus {
+        configured: creds.is_some(),
+        client_id: creds.map(|c| c.client_id),
+    }
+}
+
+/// Forget the stored API key for the account (idempotent — no key is success).
+///
+/// # Errors
+///
+/// [`IpcError::Internal`] if the data dir can't be located or the removal fails.
+pub fn apikey_forget(server: &str, email: &str) -> Result<(), IpcError> {
+    let dir = cache_dir(server, email)
+        .ok_or_else(|| IpcError::Internal("no data directory".to_owned()))?;
+    vault_store::delete_apikey_from_dir(&dir).map_err(|e| IpcError::Internal(e.to_string()))
 }
 
 /// Offline unlock from the encrypted local cache — no network. Recovers the

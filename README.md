@@ -82,6 +82,35 @@ stored token (no master password needed); only a genuinely offline box stays
 read-only. Five wrong PINs disable the PIN and require a master-password unlock
 — bounding brute-force of a short secret.
 
+### API-key login (2FA accounts)
+
+If your account has two-factor auth enabled, the password grant is rejected
+with a 2FA challenge that Vault can't answer interactively. Generate a
+**personal API key** in the web vault (Settings → Security → Keys → *View API
+Key*) and log in with it — the `client_credentials` grant skips the 2FA prompt:
+
+```sh
+BW_CLIENTID=user.xxxx BW_CLIENTSECRET=… vault login --api-key
+# or, interactively (prompts for client_id / client_secret), then:
+#   Master password: …
+```
+
+The API key authenticates the *session* only — **you still enter your master
+password** to decrypt the vault; the key just gets you past 2FA. On success the
+agent stores the key (`apikey.json`, `0600`, in the account data dir), so plain
+`vault unlock` and the TUI unlock reuse it automatically — no further 2FA, no
+re-entering the key. A stored key also lets a PIN/offline session go back online
+for `sync` and edits.
+
+```sh
+vault apikey status      # configured? (shows the non-secret client_id)
+vault apikey forget      # delete the stored key; logins revert to the password grant
+```
+
+The key is protected at rest by filesystem permissions (`0600`) only: it must
+be usable *before* the vault is unlocked, so it can't be encrypted under your
+key — the same trust level as the stored refresh token or an SSH private key.
+
 ## Configuration
 
 Persistent settings live at `$XDG_CONFIG_HOME/vault/config.toml`, managed with

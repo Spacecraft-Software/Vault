@@ -351,6 +351,62 @@ async fn create_secure_note_carries_securenote_marker() {
     assert_eq!(id, "note-id-1");
 }
 
+#[tokio::test]
+#[ignore = "links ring into a test binary; see file preamble"]
+async fn login_api_key_posts_client_credentials_grant() {
+    let server = MockServer::start().await;
+    let urls = BaseUrls::self_hosted(&server.uri()).unwrap();
+
+    // The body must carry the client_credentials grant + the API-key creds.
+    Mock::given(method("POST"))
+        .and(path("/identity/connect/token"))
+        .and(body_string_contains("grant_type=client_credentials"))
+        .and(body_string_contains("client_id=user.abc123"))
+        .and(body_string_contains("client_secret=s3cr3t"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "apikey-token",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+            "Key": "2.dGVzdA==|dGVzdA==|dGVzdA==",
+        })))
+        .mount(&server)
+        .await;
+
+    let mut client = BitwardenClient::new(urls, Uuid::new_v4(), "vault-test").unwrap();
+    let token = client
+        .login_api_key("user.abc123", b"s3cr3t")
+        .await
+        .unwrap();
+    assert_eq!(token.access_token, "apikey-token");
+    assert!(token.key.is_some(), "client_credentials still returns Key");
+    assert!(client.is_authenticated());
+}
+
+#[tokio::test]
+#[ignore = "links ring into a test binary; see file preamble"]
+async fn login_api_key_bad_key_surfaces_server_status() {
+    let server = MockServer::start().await;
+    let urls = BaseUrls::self_hosted(&server.uri()).unwrap();
+
+    Mock::given(method("POST"))
+        .and(path("/identity/connect/token"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": "invalid_client"
+        })))
+        .mount(&server)
+        .await;
+
+    let mut client = BitwardenClient::new(urls, Uuid::new_v4(), "vault-test").unwrap();
+    let err = client
+        .login_api_key("user.abc123", b"wrong")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        vault_api::Error::ServerStatus { status: 400, .. }
+    ));
+}
+
 fn urlencoded(s: &str) -> String {
     // wiremock body_string_contains needs the literal bytes that appear in
     // the form-encoded request body. reqwest's serde_urlencoded percent-
