@@ -220,6 +220,10 @@ pub struct AgentState {
     /// the selection — so it lives here for the agent's lifetime.
     #[cfg(feature = "clipboard")]
     pub clipboard: Option<Box<dyn crate::clipboard::Backend>>,
+    /// The configured backend mode (`clipboard.backend`). Drives `select` and
+    /// lets `Status` report `osc52` even when no native backend is held.
+    #[cfg(feature = "clipboard")]
+    pub clipboard_backend: crate::clipboard::BackendChoice,
     /// The last value we placed on the clipboard, kept so `lock()` (and thus
     /// `Quit`, idle-lock, and SIGTERM) can sweep a still-pending copy before
     /// the timer task would have fired. Zeroised on drop.
@@ -268,6 +272,8 @@ impl AgentState {
             shutdown_requested: false,
             #[cfg(feature = "clipboard")]
             clipboard: crate::clipboard::detect(),
+            #[cfg(feature = "clipboard")]
+            clipboard_backend: crate::clipboard::BackendChoice::Auto,
             #[cfg(feature = "clipboard")]
             last_copied: None,
             // 30 s follows common password-manager practice (and Vault PRD
@@ -751,10 +757,18 @@ impl AgentState {
         }
     }
 
-    /// Name of the live clipboard backend, for `Status`.
+    /// Backend label for `Status`: the live native backend's name when held,
+    /// else `"osc52"` when that mode is configured (the agent declines so the
+    /// client copies via the terminal), else `None` (no clipboard available).
     #[cfg(feature = "clipboard")]
     fn clipboard_backend_name(&self) -> Option<String> {
-        self.clipboard.as_ref().map(|cb| cb.name().to_owned())
+        self.clipboard.as_ref().map_or_else(
+            || {
+                (self.clipboard_backend == crate::clipboard::BackendChoice::Osc52)
+                    .then(|| "osc52".to_owned())
+            },
+            |cb| Some(cb.name().to_owned()),
+        )
     }
 }
 
@@ -1056,6 +1070,21 @@ mod tests {
         );
         s.clipboard = None;
         assert_eq!(s.status_snapshot().clipboard_backend, None);
+    }
+
+    #[cfg(feature = "clipboard")]
+    #[test]
+    fn status_reports_osc52_mode_without_a_native_backend() {
+        let mut s = AgentState::new(900);
+        s.clipboard = None;
+        // Auto / no backend → nothing to report.
+        assert_eq!(s.status_snapshot().clipboard_backend, None);
+        // osc52 mode is informative even though the agent holds no backend.
+        s.clipboard_backend = crate::clipboard::BackendChoice::Osc52;
+        assert_eq!(
+            s.status_snapshot().clipboard_backend.as_deref(),
+            Some("osc52")
+        );
     }
 
     #[test]

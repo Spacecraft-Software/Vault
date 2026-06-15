@@ -58,6 +58,57 @@ impl Backend for Arboard {
     }
 }
 
+/// Which clipboard backend the agent should use (`clipboard.backend`, PRD §7.5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BackendChoice {
+    /// Detect the native backend; if unavailable, decline so the client copies
+    /// via OSC52. The default and pre-config behavior.
+    #[default]
+    Auto,
+    /// Force the native (`arboard`) backend; warn if it can't initialise.
+    Arboard,
+    /// Use no native backend — the agent always declines, so the client (TUI)
+    /// copies through the terminal (OSC52). For SSH/tmux sessions.
+    Osc52,
+}
+
+impl BackendChoice {
+    /// Canonical string form (matches the config values), for logs and `Status`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Arboard => "arboard",
+            Self::Osc52 => "osc52",
+        }
+    }
+}
+
+/// Select the agent's clipboard backend for `choice`. `Osc52` deliberately
+/// yields `None` so the agent declines and the client copies via the terminal.
+pub fn select(choice: BackendChoice) -> Option<Box<dyn Backend>> {
+    match choice {
+        BackendChoice::Auto => detect(),
+        BackendChoice::Arboard => {
+            let backend = detect();
+            if backend.is_none() {
+                eprintln!(
+                    "vault-agent: clipboard.backend={} requested but unavailable; copies will be declined",
+                    choice.as_str()
+                );
+            }
+            backend
+        }
+        BackendChoice::Osc52 => {
+            eprintln!(
+                "vault-agent: clipboard.backend={} — declining agent-side copies so the client copies via the terminal",
+                choice.as_str()
+            );
+            None
+        }
+    }
+}
+
 /// Detect a usable backend, degrading to `None` (with a warning) when no
 /// display/compositor is reachable — copy requests then decline cleanly.
 pub fn detect() -> Option<Box<dyn Backend>> {
@@ -67,5 +118,24 @@ pub fn detect() -> Option<Box<dyn Backend>> {
             eprintln!("vault-agent: clipboard unavailable, copy will be declined: {e}");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BackendChoice;
+
+    #[test]
+    fn backend_choice_as_str_and_default() {
+        assert_eq!(BackendChoice::Auto.as_str(), "auto");
+        assert_eq!(BackendChoice::Arboard.as_str(), "arboard");
+        assert_eq!(BackendChoice::Osc52.as_str(), "osc52");
+        assert_eq!(BackendChoice::default(), BackendChoice::Auto);
+    }
+
+    #[test]
+    fn select_osc52_uses_no_native_backend() {
+        // CI-safe: Osc52 never touches the system clipboard.
+        assert!(super::select(BackendChoice::Osc52).is_none());
     }
 }
