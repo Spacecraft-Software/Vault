@@ -281,6 +281,55 @@ async fn get_request_defaults_to_password() {
 }
 
 #[tokio::test]
+async fn add_request_round_trips_card_write() {
+    use vault_ipc::proto::CardWrite;
+    let (mut a, mut b) = duplex(8 * 1024);
+    let req = Request::Add {
+        name: "Visa".into(),
+        cipher_type: 3,
+        folder: None,
+        notes: None,
+        username: None,
+        password: None,
+        totp: None,
+        uri: None,
+        card: Some(CardWrite {
+            brand: Some("Visa".into()),
+            number: Some(b"4111111111111111".to_vec()),
+            exp_month: Some("4".into()),
+            exp_year: Some("2030".into()),
+            code: Some(b"123".to_vec()),
+            ..CardWrite::default()
+        }),
+    };
+    write_frame(&mut a, &req).await.unwrap();
+    match read_frame::<_, Request>(&mut b).await.unwrap() {
+        Request::Add { card, .. } => {
+            let c = card.expect("card round-trips");
+            assert_eq!(c.number.as_deref(), Some(b"4111111111111111".as_slice()));
+            assert_eq!(c.exp_year.as_deref(), Some("2030"));
+            assert_eq!(c.code.as_deref(), Some(b"123".as_slice()));
+        }
+        other => panic!("expected Add, got {other:?}"),
+    }
+}
+
+#[test]
+fn card_write_debug_redacts_secrets() {
+    use vault_ipc::proto::CardWrite;
+    let c = CardWrite {
+        brand: Some("Visa".into()),
+        number: Some(b"4111111111111111".to_vec()),
+        code: Some(b"123".to_vec()),
+        ..CardWrite::default()
+    };
+    let rendered = format!("{c:?}");
+    assert!(rendered.contains("Visa"));
+    assert!(!rendered.contains("4111"), "number leaked: {rendered}");
+    assert!(!rendered.contains("123"), "cvv leaked: {rendered}");
+}
+
+#[tokio::test]
 async fn get_request_round_trips_card_field() {
     let (mut a, mut b) = duplex(8 * 1024);
     let req = Request::Get {

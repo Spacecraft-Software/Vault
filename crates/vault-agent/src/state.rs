@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 use vault_api::BitwardenClient;
 use vault_core::EncString;
-use vault_core::cipher::{Cipher, DecryptOptions, Login, LoginUri, PlainCipher};
+use vault_core::cipher::{Card, Cipher, DecryptOptions, Login, LoginUri, PlainCard, PlainCipher};
 use vault_ipc::proto::{Error as IpcError, Field, Item, ListEntry, Removed, Saved, Status};
 
 /// In-memory keys + ciphers held while the agent is unlocked.
@@ -256,6 +256,8 @@ pub struct CipherWrite {
     pub totp: Option<Vec<u8>>,
     /// Primary login URI.
     pub uri: Option<String>,
+    /// Card fields (card ciphers only); `number`/`code` are secret bytes.
+    pub card: Option<vault_ipc::proto::CardWrite>,
 }
 
 impl AgentState {
@@ -535,8 +537,15 @@ impl AgentState {
             .name
             .clone()
             .ok_or_else(|| IpcError::Internal("add requires a name".to_owned()))?;
+        // Decode the card sub-object (type 3) before the struct literal moves
+        // the other `w` fields. `PlainCard::drop` scrubs number/code.
+        let card = if cipher_type == 3 {
+            w.card.map(card_write_to_plain).transpose()?
+        } else {
+            None
+        };
         // `plain` owns every plaintext value; `PlainCipher::drop` scrubs the
-        // secret fields (password/totp/notes) when it falls out of scope.
+        // secret fields (password/totp/notes/card) when it falls out of scope.
         let plain = PlainCipher {
             id: String::new(),
             cipher_type,
@@ -547,8 +556,8 @@ impl AgentState {
             password: bytes_to_string(w.password)?,
             totp: bytes_to_string(w.totp)?,
             primary_uri: w.uri,
-            // add/edit build logins only; card/identity aren't created here.
-            card: None,
+            card,
+            // Identity write isn't built yet (read-only).
             identity: None,
         };
         let mut cipher = Cipher::from_plain(&plain, &v.user_enc, &v.user_mac);
@@ -579,9 +588,37 @@ impl AgentState {
         // the plaintext when the locals drop at the end of this call.
         let password = bytes_to_string(w.password)?.map(Zeroizing::new);
         let totp = bytes_to_string(w.totp)?.map(Zeroizing::new);
+        // Card edit: decode its secret bytes; non-secret fields stay owned for
+        // borrowing into the overlay.
+        let card_present = w.card.is_some();
+        let (card_cardholder, card_brand, card_exp_month, card_exp_year, card_number, card_code) =
+            match w.card {
+                Some(cw) => (
+                    cw.cardholder,
+                    cw.brand,
+                    cw.exp_month,
+                    cw.exp_year,
+                    bytes_to_string(cw.number)?.map(Zeroizing::new),
+                    bytes_to_string(cw.code)?.map(Zeroizing::new),
+                ),
+                None => (None, None, None, None, None, None),
+            };
         let v = self.vault.as_mut().ok_or(IpcError::Locked)?;
 
         let mut cipher = v.ciphers[idx].clone();
+        if card_present && cipher.cipher_type != 3 {
+            return Err(IpcError::Internal(
+                "card fields can only be edited on a card item".to_owned(),
+            ));
+        }
+        let card = card_present.then(|| CardEdit {
+            cardholder: card_cardholder.as_deref(),
+            brand: card_brand.as_deref(),
+            number: card_number.as_ref().map(|z| z.as_str()),
+            exp_month: card_exp_month.as_deref(),
+            exp_year: card_exp_year.as_deref(),
+            code: card_code.as_ref().map(|z| z.as_str()),
+        });
         let overlay = EditOverlay {
             name: w.name.as_deref(),
             folder_id,
@@ -591,6 +628,7 @@ impl AgentState {
             password: password.as_ref().map(|z| z.as_str()),
             totp: totp.as_ref().map(|z| z.as_str()),
             uri: w.uri.as_deref(),
+            card,
         };
         apply_cipher_edits(&mut cipher, &overlay, &v.user_enc, &v.user_mac);
 
@@ -903,6 +941,18 @@ struct EditOverlay<'a> {
     password: Option<&'a str>,
     totp: Option<&'a str>,
     uri: Option<&'a str>,
+    /// Card fields to set (card ciphers only); `Some` per field = change it.
+    card: Option<CardEdit<'a>>,
+}
+
+/// Card sub-overlay: borrowed plaintext for the card fields to change.
+struct CardEdit<'a> {
+    cardholder: Option<&'a str>,
+    brand: Option<&'a str>,
+    number: Option<&'a str>,
+    exp_month: Option<&'a str>,
+    exp_year: Option<&'a str>,
+    code: Option<&'a str>,
 }
 
 /// Apply `o` to an already-encrypted `cipher` in place, re-encrypting only the
@@ -948,6 +998,41 @@ fn apply_cipher_edits(
             login.uris = Some(uris);
         }
     }
+    // Card fields (the caller already checked the cipher is a card).
+    if let Some(c) = &o.card {
+        let card = cipher.card.get_or_insert_with(Card::default);
+        if let Some(v) = c.cardholder {
+            card.cardholder_name = Some(enc(v));
+        }
+        if let Some(v) = c.brand {
+            card.brand = Some(enc(v));
+        }
+        if let Some(v) = c.number {
+            card.number = Some(enc(v));
+        }
+        if let Some(v) = c.exp_month {
+            card.exp_month = Some(enc(v));
+        }
+        if let Some(v) = c.exp_year {
+            card.exp_year = Some(enc(v));
+        }
+        if let Some(v) = c.code {
+            card.code = Some(enc(v));
+        }
+    }
+}
+
+/// Convert a wire `CardWrite` to a `PlainCard`, decoding the secret number/code
+/// bytes to strings (zeroized on failure by `bytes_to_string`).
+fn card_write_to_plain(cw: vault_ipc::proto::CardWrite) -> Result<PlainCard, IpcError> {
+    Ok(PlainCard {
+        cardholder_name: cw.cardholder,
+        brand: cw.brand,
+        number: bytes_to_string(cw.number)?,
+        exp_month: cw.exp_month,
+        exp_year: cw.exp_year,
+        code: bytes_to_string(cw.code)?,
+    })
 }
 
 #[cfg(test)]
@@ -1370,6 +1455,7 @@ mod tests {
             password: None,
             totp: None,
             uri: None,
+            card: None,
         };
         apply_cipher_edits(&mut cipher, &overlay, &enc, &mac);
 
@@ -1397,6 +1483,7 @@ mod tests {
             password: None,
             totp: None,
             uri: Some("https://new.example"),
+            card: None,
         };
         apply_cipher_edits(&mut cipher, &overlay, &enc, &mac);
 
@@ -1404,6 +1491,61 @@ mod tests {
         assert_eq!(uris.len(), 2);
         assert_eq!(decrypt_uri(&uris[0], &enc, &mac), "https://new.example");
         assert_eq!(decrypt_uri(&uris[1], &enc, &mac), "https://two.example");
+    }
+
+    #[test]
+    fn apply_card_edits_sets_only_given_fields() {
+        let enc = [0x21u8; 32];
+        let mac = [0x22u8; 32];
+        let e =
+            |s: &str| Some(vault_core::EncString::encrypt(&enc, &mac, s.as_bytes()).serialize());
+        // A card with an existing brand + number; edit only the expiry.
+        let mut cipher = Cipher {
+            id: "card-1".into(),
+            cipher_type: 3,
+            card: Some(Card {
+                brand: e("Visa"),
+                number: e("4111111111111111"),
+                ..Card::default()
+            }),
+            ..Cipher::default()
+        };
+        let overlay = EditOverlay {
+            name: None,
+            folder_id: None,
+            folder_provided: false,
+            notes: None,
+            username: None,
+            password: None,
+            totp: None,
+            uri: None,
+            card: Some(CardEdit {
+                cardholder: None,
+                brand: None,
+                number: None,
+                exp_month: Some("5"),
+                exp_year: Some("2031"),
+                code: None,
+            }),
+        };
+        apply_cipher_edits(&mut cipher, &overlay, &enc, &mac);
+
+        let back = cipher
+            .decrypt(
+                &enc,
+                &mac,
+                DecryptOptions {
+                    card: true,
+                    ..DecryptOptions::default()
+                },
+            )
+            .unwrap();
+        let c = back.card.as_ref().unwrap();
+        assert_eq!(c.exp_month.as_deref(), Some("5"), "expiry updated");
+        assert_eq!(c.exp_year.as_deref(), Some("2031"));
+        // Untouched fields preserved.
+        assert_eq!(c.brand.as_deref(), Some("Visa"));
+        assert_eq!(c.number.as_deref(), Some("4111111111111111"));
     }
 
     fn login_with_two_uris(enc: &[u8; 32], mac: &[u8; 32]) -> Cipher {

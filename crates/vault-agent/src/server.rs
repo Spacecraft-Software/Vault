@@ -287,6 +287,7 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
             password,
             totp,
             uri,
+            card,
         } => {
             let w = crate::state::CipherWrite {
                 name: Some(name),
@@ -296,6 +297,7 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
                 password,
                 totp,
                 uri,
+                card,
             };
             let mut s = state.lock().await;
             let res = s.add_cipher(cipher_type, w).await;
@@ -315,6 +317,7 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
             password,
             totp,
             uri,
+            card,
         } => {
             let w = crate::state::CipherWrite {
                 name,
@@ -324,6 +327,7 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
                 password,
                 totp,
                 uri,
+                card,
             };
             let mut s = state.lock().await;
             let res = s.edit_cipher(&selector, w).await;

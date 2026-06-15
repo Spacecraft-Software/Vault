@@ -149,6 +149,9 @@ pub enum Request {
         totp: Option<Vec<u8>>,
         /// Primary login URI (login type only).
         uri: Option<String>,
+        /// Card fields (card type only). Serde-defaulted for forward-compat.
+        #[serde(default)]
+        card: Option<CardWrite>,
     },
 
     /// Edit an existing cipher. Only the `Some` fields change; `None` leaves
@@ -170,6 +173,10 @@ pub enum Request {
         totp: Option<Vec<u8>>,
         /// New primary URI.
         uri: Option<String>,
+        /// Card fields to change (card ciphers only); `Some` per field = set.
+        /// Serde-defaulted for forward-compat.
+        #[serde(default)]
+        card: Option<CardWrite>,
     },
 
     /// Enroll a PIN: encrypt the unwrapped user key under a key derived from
@@ -242,6 +249,42 @@ pub struct ApiKeyCreds {
     pub client_id: String,
     /// Bitwarden API client secret, sent only on the local UDS.
     pub client_secret: Vec<u8>,
+}
+
+/// Card fields for `Add`/`Edit` (local UDS only).
+///
+/// Each is `Option` so the same shape serves create (absent = unset) and edit
+/// (present = set). `number` and `code` are secret bytes, wiped by the agent
+/// after encryption.
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub struct CardWrite {
+    /// Cardholder name.
+    pub cardholder: Option<String>,
+    /// Card brand (`Visa`, …).
+    pub brand: Option<String>,
+    /// Card number (secret).
+    pub number: Option<Vec<u8>>,
+    /// Expiry month (`1`–`12`).
+    pub exp_month: Option<String>,
+    /// Expiry year.
+    pub exp_year: Option<String>,
+    /// Security code / CVV (secret).
+    pub code: Option<Vec<u8>>,
+}
+
+// Hand-written so the secret number/code never land in a log line; non-secret
+// fields are shown to aid debugging. Verified by a unit test.
+impl std::fmt::Debug for CardWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CardWrite")
+            .field("cardholder", &self.cardholder)
+            .field("brand", &self.brand)
+            .field("number", &self.number.as_ref().map(|_| "<redacted>"))
+            .field("exp_month", &self.exp_month)
+            .field("exp_year", &self.exp_year)
+            .field("code", &self.code.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// A two-factor code carried on the wire (local UDS only) to complete a 2FA

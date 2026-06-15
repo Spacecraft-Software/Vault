@@ -94,6 +94,59 @@ fn from_plain_omits_absent_login_fields() {
 }
 
 #[test]
+fn from_plain_then_decrypt_round_trips_card() {
+    use vault_core::cipher::PlainCard;
+    let enc = [0x77u8; 32];
+    let mac = [0x88u8; 32];
+    let plain = PlainCipher {
+        id: "card-1".into(),
+        cipher_type: 3,
+        folder_id: None,
+        name: Some("Visa".into()),
+        notes: None,
+        username: None,
+        password: None,
+        totp: None,
+        primary_uri: None,
+        card: Some(PlainCard {
+            cardholder_name: Some("A. Example".into()),
+            brand: Some("Visa".into()),
+            number: Some("4111111111111111".into()),
+            exp_month: Some("4".into()),
+            exp_year: Some("2030".into()),
+            code: Some("123".into()),
+        }),
+        identity: None,
+    };
+
+    let cipher = Cipher::from_plain(&plain, &enc, &mac);
+    assert_eq!(cipher.cipher_type, 3);
+    assert!(cipher.login.is_none(), "card has no login object");
+    let card = cipher.card.as_ref().expect("card emitted");
+    assert!(
+        card.number.as_deref().unwrap().starts_with("2."),
+        "encrypted"
+    );
+
+    let back = cipher
+        .decrypt(
+            &enc,
+            &mac,
+            DecryptOptions {
+                card: true,
+                ..DecryptOptions::default()
+            },
+        )
+        .unwrap();
+    let c = back.card.as_ref().expect("decrypted card");
+    assert_eq!(c.number.as_deref(), Some("4111111111111111"));
+    assert_eq!(c.code.as_deref(), Some("123"));
+    assert_eq!(c.brand.as_deref(), Some("Visa"));
+    assert_eq!(c.exp_month.as_deref(), Some("4"));
+    assert_eq!(c.cardholder_name.as_deref(), Some("A. Example"));
+}
+
+#[test]
 fn decrypt_card_fields() {
     let enc = [0x33u8; 32];
     let mac = [0x44u8; 32];
