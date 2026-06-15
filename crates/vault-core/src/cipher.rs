@@ -43,6 +43,12 @@ pub struct Cipher {
     /// Login-specific fields (present iff `cipher_type == 1`).
     #[serde(default)]
     pub login: Option<Login>,
+    /// Card-specific fields (present iff `cipher_type == 3`).
+    #[serde(default)]
+    pub card: Option<Card>,
+    /// Identity-specific fields (present iff `cipher_type == 4`).
+    #[serde(default)]
+    pub identity: Option<Identity>,
     /// User-defined custom fields.
     #[serde(default)]
     pub fields: Option<Vec<CustomField>>,
@@ -75,6 +81,90 @@ pub struct LoginUri {
     pub uri: Option<String>,
 }
 
+/// Card-specific encrypted fields (cipher type 3).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Card {
+    /// Encrypted cardholder name.
+    #[serde(default)]
+    pub cardholder_name: Option<String>,
+    /// Encrypted card brand (`Visa`, `Mastercard`, …).
+    #[serde(default)]
+    pub brand: Option<String>,
+    /// Encrypted card number.
+    #[serde(default)]
+    pub number: Option<String>,
+    /// Encrypted expiry month (`1`–`12`, as stored).
+    #[serde(default)]
+    pub exp_month: Option<String>,
+    /// Encrypted expiry year.
+    #[serde(default)]
+    pub exp_year: Option<String>,
+    /// Encrypted security code (CVV/CVC).
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+/// Identity-specific encrypted fields (cipher type 4).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Identity {
+    /// Encrypted title (`Mr`, `Ms`, …).
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Encrypted first name.
+    #[serde(default)]
+    pub first_name: Option<String>,
+    /// Encrypted middle name.
+    #[serde(default)]
+    pub middle_name: Option<String>,
+    /// Encrypted last name.
+    #[serde(default)]
+    pub last_name: Option<String>,
+    /// Encrypted username.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Encrypted company.
+    #[serde(default)]
+    pub company: Option<String>,
+    /// Encrypted Social Security Number (or national id).
+    #[serde(default)]
+    pub ssn: Option<String>,
+    /// Encrypted passport number.
+    #[serde(default)]
+    pub passport_number: Option<String>,
+    /// Encrypted driver's-license number.
+    #[serde(default)]
+    pub license_number: Option<String>,
+    /// Encrypted email.
+    #[serde(default)]
+    pub email: Option<String>,
+    /// Encrypted phone number.
+    #[serde(default)]
+    pub phone: Option<String>,
+    /// Encrypted address line 1.
+    #[serde(default)]
+    pub address1: Option<String>,
+    /// Encrypted address line 2.
+    #[serde(default)]
+    pub address2: Option<String>,
+    /// Encrypted address line 3.
+    #[serde(default)]
+    pub address3: Option<String>,
+    /// Encrypted city / locality.
+    #[serde(default)]
+    pub city: Option<String>,
+    /// Encrypted state / province.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Encrypted postal code.
+    #[serde(default)]
+    pub postal_code: Option<String>,
+    /// Encrypted country.
+    #[serde(default)]
+    pub country: Option<String>,
+}
+
 /// User-defined `Fields[]` entry.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
@@ -88,6 +178,90 @@ pub struct CustomField {
     /// Field type (0 = text, 1 = hidden, 2 = boolean, 3 = linked).
     #[serde(rename = "Type", default)]
     pub field_type: u8,
+}
+
+/// Decrypted card fields (cipher type 3).
+#[derive(Clone, Debug, Default)]
+pub struct PlainCard {
+    /// Cardholder name.
+    pub cardholder_name: Option<String>,
+    /// Card brand.
+    pub brand: Option<String>,
+    /// Card number (sensitive — zeroized on drop).
+    pub number: Option<String>,
+    /// Expiry month.
+    pub exp_month: Option<String>,
+    /// Expiry year.
+    pub exp_year: Option<String>,
+    /// Security code / CVV (sensitive — zeroized on drop).
+    pub code: Option<String>,
+}
+
+impl Drop for PlainCard {
+    fn drop(&mut self) {
+        for s in [self.number.as_mut(), self.code.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            s.zeroize();
+        }
+    }
+}
+
+/// Decrypted identity fields (cipher type 4).
+#[derive(Clone, Debug, Default)]
+pub struct PlainIdentity {
+    /// Title.
+    pub title: Option<String>,
+    /// First name.
+    pub first_name: Option<String>,
+    /// Middle name.
+    pub middle_name: Option<String>,
+    /// Last name.
+    pub last_name: Option<String>,
+    /// Username.
+    pub username: Option<String>,
+    /// Company.
+    pub company: Option<String>,
+    /// SSN / national id (sensitive — zeroized on drop).
+    pub ssn: Option<String>,
+    /// Passport number (sensitive — zeroized on drop).
+    pub passport_number: Option<String>,
+    /// License number (sensitive — zeroized on drop).
+    pub license_number: Option<String>,
+    /// Email.
+    pub email: Option<String>,
+    /// Phone.
+    pub phone: Option<String>,
+    /// Address line 1.
+    pub address1: Option<String>,
+    /// Address line 2.
+    pub address2: Option<String>,
+    /// Address line 3.
+    pub address3: Option<String>,
+    /// City.
+    pub city: Option<String>,
+    /// State / province.
+    pub state: Option<String>,
+    /// Postal code.
+    pub postal_code: Option<String>,
+    /// Country.
+    pub country: Option<String>,
+}
+
+impl Drop for PlainIdentity {
+    fn drop(&mut self) {
+        for s in [
+            self.ssn.as_mut(),
+            self.passport_number.as_mut(),
+            self.license_number.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            s.zeroize();
+        }
+    }
 }
 
 /// Decrypted view of a cipher — only the fields the caller asked for.
@@ -111,6 +285,10 @@ pub struct PlainCipher {
     pub totp: Option<String>,
     /// First decrypted URI (login items only).
     pub primary_uri: Option<String>,
+    /// Decrypted card fields (card items only, when asked for).
+    pub card: Option<PlainCard>,
+    /// Decrypted identity fields (identity items only, when asked for).
+    pub identity: Option<PlainIdentity>,
 }
 
 impl Drop for PlainCipher {
@@ -141,6 +319,10 @@ pub struct DecryptOptions {
     pub totp: bool,
     /// Decrypt the first `login.uris[].uri`. Default `false`.
     pub primary_uri: bool,
+    /// Decrypt the `card` sub-object (all its fields). Default `false`.
+    pub card: bool,
+    /// Decrypt the `identity` sub-object (all its fields). Default `false`.
+    pub identity: bool,
 }
 
 impl DecryptOptions {
@@ -153,6 +335,8 @@ impl DecryptOptions {
             password: true,
             totp: true,
             primary_uri: true,
+            card: true,
+            identity: true,
         }
     }
     /// Decrypt only `username` — useful for list views.
@@ -164,6 +348,8 @@ impl DecryptOptions {
             password: false,
             totp: false,
             primary_uri: false,
+            card: false,
+            identity: false,
         }
     }
 }
@@ -210,7 +396,49 @@ impl Cipher {
             password: None,
             totp: None,
             primary_uri: None,
+            card: None,
+            identity: None,
         };
+
+        if opts.card
+            && let Some(card) = self.card.as_ref()
+        {
+            let d = |s: Option<&str>| decrypt_optional(s, enc_key, mac_key);
+            out.card = Some(PlainCard {
+                cardholder_name: d(card.cardholder_name.as_deref())?,
+                brand: d(card.brand.as_deref())?,
+                number: d(card.number.as_deref())?,
+                exp_month: d(card.exp_month.as_deref())?,
+                exp_year: d(card.exp_year.as_deref())?,
+                code: d(card.code.as_deref())?,
+            });
+        }
+
+        if opts.identity
+            && let Some(id) = self.identity.as_ref()
+        {
+            let d = |s: Option<&str>| decrypt_optional(s, enc_key, mac_key);
+            out.identity = Some(PlainIdentity {
+                title: d(id.title.as_deref())?,
+                first_name: d(id.first_name.as_deref())?,
+                middle_name: d(id.middle_name.as_deref())?,
+                last_name: d(id.last_name.as_deref())?,
+                username: d(id.username.as_deref())?,
+                company: d(id.company.as_deref())?,
+                ssn: d(id.ssn.as_deref())?,
+                passport_number: d(id.passport_number.as_deref())?,
+                license_number: d(id.license_number.as_deref())?,
+                email: d(id.email.as_deref())?,
+                phone: d(id.phone.as_deref())?,
+                address1: d(id.address1.as_deref())?,
+                address2: d(id.address2.as_deref())?,
+                address3: d(id.address3.as_deref())?,
+                city: d(id.city.as_deref())?,
+                state: d(id.state.as_deref())?,
+                postal_code: d(id.postal_code.as_deref())?,
+                country: d(id.country.as_deref())?,
+            });
+        }
 
         if let Some(login) = self.login.as_ref() {
             if opts.username {
@@ -260,6 +488,10 @@ impl Cipher {
             name: plain.name.as_deref().map(&enc),
             notes: plain.notes.as_deref().map(&enc),
             login,
+            // Card/identity are read-only for now; `add`/`edit` only build
+            // logins, so these never round-trip through `from_plain`.
+            card: None,
+            identity: None,
             fields: None,
         }
     }
