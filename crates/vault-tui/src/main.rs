@@ -43,7 +43,7 @@ use vault_ipc::{default_socket_path, sanitize_socket_path};
 
 use app::{App, FormKind, FormSubmit, InputMode, RevealedSecret, UnlockState};
 
-const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Seconds before the TUI's own OSC52 fallback clear fires. Agent-side copies
 /// use the agent's configured default (`--clipboard-clear-secs`, reported back
@@ -51,8 +51,9 @@ const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// path, where the TUI runs the timer itself.
 const COPY_CLEAR_SECS: u64 = 30;
 
-/// Standard §13.2 attribution block — surfaced via `--version` and `--help`.
-const ATTRIBUTION: &str = "\
+/// Standard §13.2 attribution block — surfaced via `--version`, `--help`, and
+/// the TUI About overlay (`?` / `:about`).
+pub(crate) const ATTRIBUTION: &str = "\
 Maintained by Mohamed Hammad <Mohamed.Hammad@SpacecraftSoftware.org>
 Copyright (C) 2026 Mohamed Hammad & Spacecraft Software  |  License: GPL-3.0-or-later
 https://Vault.SpacecraftSoftware.org/";
@@ -248,6 +249,7 @@ async fn handle_key(state: &mut App, key: KeyEvent, socket: &Path) {
         InputMode::Form => handle_form_key(state, key, socket).await,
         InputMode::ConfirmDelete => handle_confirm_key(state, key, socket).await,
         InputMode::Unlock => handle_unlock_key(state, key, socket).await,
+        InputMode::About => handle_about_key(state, key),
     }
 }
 
@@ -319,6 +321,15 @@ async fn handle_normal_key(state: &mut App, key: KeyEvent, socket: &Path) {
         KeyCode::Char('a') => state.open_add_form(),
         KeyCode::Char('e') => state.open_edit_form(),
         KeyCode::Char('d') => state.open_confirm_delete(),
+        KeyCode::Char('?') => state.open_about(),
+        _ => {}
+    }
+}
+
+/// About-overlay keys — read-only; any of these dismiss it.
+const fn handle_about_key(state: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q' | '?') => state.close_about(),
         _ => {}
     }
 }
@@ -540,7 +551,10 @@ async fn execute_command(state: &mut App, socket: &Path, cmd: &str) {
                 Err(e) => state.set_toast(e.to_string()),
             }
         }
-        other => state.set_toast(format!("unknown command: {other} (q · r · sync · lock)")),
+        "about" => state.open_about(),
+        other => state.set_toast(format!(
+            "unknown command: {other} (q · r · sync · lock · about)"
+        )),
     }
 }
 

@@ -210,6 +210,8 @@ pub enum InputMode {
     ConfirmDelete,
     /// The agent is locked — keys edit the master-password / PIN entry.
     Unlock,
+    /// `?` pressed — the read-only About overlay is open.
+    About,
 }
 
 /// Which pane currently takes navigation keys.
@@ -1051,7 +1053,10 @@ impl App {
                 .and_then(FormState::focused_field_mut)
                 .map(|f| &mut f.value),
             InputMode::Unlock => self.unlock.as_mut().map(|u| &mut u.secret),
-            InputMode::Normal | InputMode::Generate | InputMode::ConfirmDelete => None,
+            InputMode::Normal
+            | InputMode::Generate
+            | InputMode::ConfirmDelete
+            | InputMode::About => None,
         }
     }
 
@@ -1177,6 +1182,16 @@ impl App {
     /// Close the generator overlay, dropping (and zeroising) its password.
     pub fn close_generator(&mut self) {
         self.generator = None;
+        self.mode = InputMode::Normal;
+    }
+
+    /// Open the read-only About overlay (`?` / `:about`).
+    pub const fn open_about(&mut self) {
+        self.mode = InputMode::About;
+    }
+
+    /// Close the About overlay, back to browsing.
+    pub const fn close_about(&mut self) {
         self.mode = InputMode::Normal;
     }
 
@@ -1775,6 +1790,15 @@ mod tests {
         app.cancel_command();
         assert_eq!(app.mode, InputMode::Normal);
         assert!(app.command.is_empty());
+    }
+
+    #[test]
+    fn about_overlay_open_and_close() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_about();
+        assert_eq!(app.mode, InputMode::About);
+        app.close_about();
+        assert_eq!(app.mode, InputMode::Normal);
     }
 
     #[test]
