@@ -10,6 +10,18 @@ range may break in any release.
 
 ### Added
 
+- **TUI identity create/edit (curated).** The `vault-tui` add/edit form (`a`/`e`)
+  now composes identity (type 4) items — the **Type** row cycles `login → secure
+  note → card → identity`. To fit the non-scrolling overlay it edits a curated
+  10-field subset (title, first/last name, email, phone, address1, city, state,
+  postal code, country); the long-tail fields and the SSN/passport/license
+  secrets stay CLI-only. On edit, email/phone prefill from the detail pane (the
+  composite Person/Address lines can't be split back, so those start blank =
+  leave unchanged). Builds the existing `IdentityWrite` on `Request::Add`/`Edit`
+  — no backend change. With this, **all four cipher types are editable from both
+  front-ends.** Tests: identity add carries the curated fields, identity edit
+  prefill/diff, 4-way type-toggle cycle.
+
 - **Create/edit identity ciphers.** `vault add … --type identity` and `vault
   edit` now build/update identity (type 4) items — the last cipher type to get a
   write path. The 15 non-secret fields (title, names, username, company, email,

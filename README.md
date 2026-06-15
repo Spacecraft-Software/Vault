@@ -127,10 +127,13 @@ vault edit "Jane Doe" --city "New Amber" --passport   # --passport prompts it
 `--identity-username`.) Editing identity fields on a non-identity item is
 rejected.
 
-The TUI can also create and edit cards: press `a` and cycle the **Type** row
-with `Space` (`login → secure note → card`), or `e` on a selected card. The
-card's number and CVV mask while unfocused; on edit they start blank (blank =
-leave unchanged), and the brand/expiry prefill from the detail pane.
+The TUI can also create and edit cards and identities: press `a` and cycle the
+**Type** row with `Space` (`login → secure note → card → identity`), or `e` on a
+selected item. The card's number and CVV mask while unfocused; on edit they start
+blank (blank = leave unchanged), and the brand/expiry prefill from the detail
+pane. The identity form edits a curated subset (title, first/last name, email,
+phone, address, city, state, postal, country); the long-tail fields and the
+SSN/passport/license secrets remain CLI-only.
 
 ### PIN unlock
 

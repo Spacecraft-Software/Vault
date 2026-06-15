@@ -447,7 +447,8 @@ impl fmt::Debug for GeneratorState {
 /// Index of each field in [`FormState::fields`]. Every field always exists; the
 /// *visible* subset depends on the cipher type, so values typed under one type
 /// survive a toggle to another. `F_NAME`..=`F_NOTES` are the shared/login rows;
-/// `F_CARDHOLDER`..=`F_CODE` are the card-only rows.
+/// `F_CARDHOLDER`..=`F_CODE` are card-only; `F_TITLE`..=`F_COUNTRY` are the
+/// curated identity rows.
 const F_NAME: usize = 0;
 const F_USER: usize = 1;
 const F_PASS: usize = 2;
@@ -459,6 +460,16 @@ const F_BRAND: usize = 7;
 const F_NUMBER: usize = 8;
 const F_EXPIRY: usize = 9;
 const F_CODE: usize = 10;
+const F_TITLE: usize = 11;
+const F_FIRST: usize = 12;
+const F_LAST: usize = 13;
+const F_EMAIL: usize = 14;
+const F_PHONE: usize = 15;
+const F_ADDRESS: usize = 16;
+const F_CITY: usize = 17;
+const F_STATE: usize = 18;
+const F_POSTAL: usize = 19;
+const F_COUNTRY: usize = 20;
 
 /// Which mutation the form drives.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -564,6 +575,54 @@ pub struct FormSubmit {
     pub exp_year: Option<String>,
     /// Card CVV/CVC (card type, secret).
     pub code: Option<String>,
+    /// Curated identity fields (identity type) — all non-secret.
+    pub identity: IdentityFields,
+}
+
+/// The curated identity fields the TUI form edits (all non-secret).
+#[derive(Clone, Debug, Default)]
+pub struct IdentityFields {
+    /// Title (`Mr`, `Ms`, …).
+    pub title: Option<String>,
+    /// First name.
+    pub first_name: Option<String>,
+    /// Last name.
+    pub last_name: Option<String>,
+    /// Email.
+    pub email: Option<String>,
+    /// Phone.
+    pub phone: Option<String>,
+    /// Address line 1.
+    pub address1: Option<String>,
+    /// City.
+    pub city: Option<String>,
+    /// State / province.
+    pub state: Option<String>,
+    /// Postal code.
+    pub postal_code: Option<String>,
+    /// Country.
+    pub country: Option<String>,
+}
+
+impl IdentityFields {
+    /// Whether any curated identity field is set (drives the edit "no changes"
+    /// gate without listing each field there).
+    fn any_set(&self) -> bool {
+        [
+            &self.title,
+            &self.first_name,
+            &self.last_name,
+            &self.email,
+            &self.phone,
+            &self.address1,
+            &self.city,
+            &self.state,
+            &self.postal_code,
+            &self.country,
+        ]
+        .iter()
+        .any(|o| o.is_some())
+    }
 }
 
 impl fmt::Debug for FormSubmit {
@@ -584,6 +643,7 @@ impl fmt::Debug for FormSubmit {
             .field("exp_month", &self.exp_month)
             .field("exp_year", &self.exp_year)
             .field("code", &redact(&self.code))
+            .field("identity", &self.identity)
             .finish()
     }
 }
@@ -596,6 +656,8 @@ impl FormState {
         [
             "Name", "User", "Pass", "URI", "Folder", "Notes", // shared / login
             "Holder", "Brand", "Number", "Expiry", "CVV", // card
+            "Title", "First", "Last", "Email", "Phone", "Address", "City", "State", "Postal",
+            "Country", // identity (curated)
         ]
         .into_iter()
         .map(|label| FormField {
@@ -637,11 +699,16 @@ impl FormState {
         if let Some(fo) = entry.folder.as_deref() {
             prefill(F_FOLDER, fo);
         }
-        if let Some(d) = detail.filter(|d| entry.cipher_type == 3 && d.id == entry.id) {
+        if let Some(d) = detail.filter(|d| d.id == entry.id) {
             for (label, value) in &d.lines {
-                match label.as_str() {
-                    "Brand" => prefill(F_BRAND, value),
-                    "Exp" => prefill(F_EXPIRY, value),
+                // Only fields that map 1:1 to a form row prefill. The identity
+                // pane's `Person`/`Address` are composites that can't be split
+                // back, so those rows start blank = leave-unchanged.
+                match (entry.cipher_type, label.as_str()) {
+                    (3, "Brand") => prefill(F_BRAND, value),
+                    (3, "Exp") => prefill(F_EXPIRY, value),
+                    (4, "Email") => prefill(F_EMAIL, value),
+                    (4, "Phone") => prefill(F_PHONE, value),
                     _ => {}
                 }
             }
@@ -683,6 +750,13 @@ impl FormState {
                 F_FOLDER,
                 F_NOTES,
             ],
+            // Identity exposes a curated subset (the long-tail fields + the
+            // SSN/passport/license secrets are CLI-only — they'd overflow the
+            // non-scrolling overlay).
+            4 => vec![
+                F_NAME, F_TITLE, F_FIRST, F_LAST, F_EMAIL, F_PHONE, F_ADDRESS, F_CITY, F_STATE,
+                F_POSTAL, F_COUNTRY, F_FOLDER, F_NOTES,
+            ],
             // Secure notes (and anything else) edit only the metadata fields
             // every cipher type carries.
             _ => vec![F_NAME, F_FOLDER, F_NOTES],
@@ -720,13 +794,15 @@ impl FormState {
             .unwrap_or_else(|| self.row_count() - 1);
     }
 
-    /// Cycle login → secure note → card → login (no-op unless the Type row has
-    /// focus). Focus stays on row 0, so the row count change can't overflow it.
+    /// Cycle login → secure note → card → identity → login (no-op unless the
+    /// Type row has focus). Focus stays on row 0, so the row count change can't
+    /// overflow it.
     pub const fn toggle_type(&mut self) {
         if self.on_type_row() {
             self.cipher_type = match self.cipher_type {
                 1 => 2,
                 2 => 3,
+                3 => 4,
                 _ => 1,
             };
         }
@@ -738,6 +814,7 @@ impl FormState {
         match self.cipher_type {
             1 => "login",
             3 => "card",
+            4 => "identity",
             _ => "secure note",
         }
     }
@@ -812,6 +889,18 @@ impl FormState {
             }
             _ => (None, None),
         };
+        let identity = IdentityFields {
+            title: take(F_TITLE),
+            first_name: take(F_FIRST),
+            last_name: take(F_LAST),
+            email: take(F_EMAIL),
+            phone: take(F_PHONE),
+            address1: take(F_ADDRESS),
+            city: take(F_CITY),
+            state: take(F_STATE),
+            postal_code: take(F_POSTAL),
+            country: take(F_COUNTRY),
+        };
         match self.kind {
             FormKind::Add => {
                 if name.as_deref().is_none_or(str::is_empty) {
@@ -819,7 +908,7 @@ impl FormState {
                 }
             }
             FormKind::Edit { .. } => {
-                if [
+                let metadata_unchanged = [
                     &name,
                     &username,
                     &password,
@@ -833,8 +922,8 @@ impl FormState {
                     &expiry,
                 ]
                 .iter()
-                .all(|o| o.is_none())
-                {
+                .all(|o| o.is_none());
+                if metadata_unchanged && !identity.any_set() {
                     return Err("no changes to save".to_owned());
                 }
             }
@@ -854,6 +943,7 @@ impl FormState {
             exp_month,
             exp_year,
             code,
+            identity,
         })
     }
 }
@@ -2268,10 +2358,12 @@ mod tests {
         assert_eq!(form.cipher_type, 2);
         let labels: Vec<&str> = form.rows().iter().map(|r| r.label).collect();
         assert_eq!(labels, ["Type", "Name", "Folder", "Notes"]);
-        // One more step is the card type.
+        // Next steps are card, then identity.
         app.form_toggle_type();
         assert_eq!(app.form.as_ref().expect("form open").cipher_type, 3);
-        // A third wraps back to login — the typed username survived the cycle.
+        app.form_toggle_type();
+        assert_eq!(app.form.as_ref().expect("form open").cipher_type, 4);
+        // A fourth wraps back to login — the typed username survived the cycle.
         app.form_toggle_type();
         let form = app.form.as_ref().expect("form open");
         assert_eq!(form.cipher_type, 1);
@@ -2485,6 +2577,103 @@ mod tests {
         assert!(parse_expiry("13/2030").is_err(), "month out of range");
         assert!(parse_expiry("04/").is_err(), "empty year");
         assert!(parse_expiry("ab/2030").is_err(), "non-numeric month");
+    }
+
+    /// A type-4 list entry for the identity form tests.
+    fn identity_entry() -> ListEntry {
+        ListEntry {
+            id: "id-jane".to_owned(),
+            name: "Jane Doe".to_owned(),
+            cipher_type: 4,
+            username: None,
+            folder: None,
+        }
+    }
+
+    #[test]
+    fn add_identity_form_carries_curated_fields() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_add_form();
+        app.form_toggle_type(); // login → secure note
+        app.form_toggle_type(); // secure note → card
+        app.form_toggle_type(); // card → identity
+        let form = app.form.as_ref().expect("form open");
+        assert_eq!(form.cipher_type, 4);
+        let labels: Vec<&str> = form.rows().iter().map(|r| r.label).collect();
+        assert_eq!(
+            labels,
+            [
+                "Type", "Name", "Title", "First", "Last", "Email", "Phone", "Address", "City",
+                "State", "Postal", "Country", "Folder", "Notes"
+            ]
+        );
+        let type_into = |app: &mut App, s: &str| {
+            for c in s.chars() {
+                app.form_push(c);
+            }
+        };
+        app.form_focus_next(); // → Name
+        type_into(&mut app, "Jane Doe");
+        app.form_focus_next(); // → Title (blank)
+        app.form_focus_next(); // → First
+        type_into(&mut app, "Jane");
+        app.form_focus_next(); // → Last
+        type_into(&mut app, "Doe");
+        app.form_focus_next(); // → Email
+        type_into(&mut app, "jane@example.org");
+
+        let data = app.form_submit_data().expect("valid identity add");
+        assert_eq!(data.cipher_type, 4);
+        assert_eq!(data.name.as_deref(), Some("Jane Doe"));
+        assert_eq!(data.identity.first_name.as_deref(), Some("Jane"));
+        assert_eq!(data.identity.last_name.as_deref(), Some("Doe"));
+        assert_eq!(data.identity.email.as_deref(), Some("jane@example.org"));
+        assert_eq!(data.identity.title, None, "blank field rides as unset");
+    }
+
+    #[test]
+    fn edit_identity_prefills_email_phone_and_diffs_city() {
+        let mut app = App::browsing(status(), vec![identity_entry()]);
+        // The detail pane's on-select fetch — Person/Address are composites that
+        // can't be split back, so only Email/Phone prefill.
+        app.detail = Some(DetailView {
+            id: "id-jane".to_owned(),
+            lines: vec![
+                ("Person".to_owned(), "Jane Doe".to_owned()),
+                ("Email".to_owned(), "jane@example.org".to_owned()),
+                ("Phone".to_owned(), "+1 555 0100".to_owned()),
+                ("Address".to_owned(), "1 Void Navy Way, Amber".to_owned()),
+            ],
+        });
+        app.open_edit_form();
+        let form = app.form.as_ref().expect("form open");
+        let rows = form.rows();
+        let value_of = |label: &str| {
+            rows.iter()
+                .find(|r| r.label == label)
+                .map(|r| r.value.to_owned())
+                .expect("row exists")
+        };
+        assert_eq!(value_of("Email"), "jane@example.org");
+        assert_eq!(value_of("Phone"), "+1 555 0100");
+        assert_eq!(value_of("First"), "", "composite name not prefilled");
+
+        // Edit rows: Name Title First Last Email Phone Address City State ...
+        // Walk to City (index 7) and type a value.
+        for _ in 0..7 {
+            app.form_focus_next();
+        }
+        for c in "Amber".chars() {
+            app.form_push(c);
+        }
+        let data = app.form_submit_data().expect("valid identity edit");
+        assert_eq!(data.identity.city.as_deref(), Some("Amber"));
+        assert_eq!(
+            data.identity.email, None,
+            "untouched prefill stays unchanged"
+        );
+        assert_eq!(data.identity.first_name, None);
+        assert_eq!(data.name, None);
     }
 
     #[test]
