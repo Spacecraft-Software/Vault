@@ -23,8 +23,8 @@ use tokio::net::UnixStream;
 use zeroize::{Zeroize, Zeroizing};
 
 use vault_ipc::proto::{
-    ApiKeyCreds, ApiKeyStatus, CardWrite, Error as IpcError, Field, Item, ListEntry, PinStatus,
-    Removed, Request, Response, Saved, Status, TwoFactorCode,
+    ApiKeyCreds, ApiKeyStatus, CardWrite, Error as IpcError, Field, IdentityWrite, Item, ListEntry,
+    PinStatus, Removed, Request, Response, Saved, Status, TwoFactorCode,
 };
 use vault_ipc::{default_socket_path, read_frame, sanitize_socket_path, write_frame};
 
@@ -232,6 +232,9 @@ enum Cmd {
         /// Card expiry as `MM/YYYY` or `MM/YY` (card only).
         #[arg(long)]
         expiry: Option<String>,
+        /// Identity fields (identity only).
+        #[command(flatten)]
+        identity: IdentityArgs,
         /// Emit JSON instead of a human-readable confirmation.
         #[arg(long)]
         json: bool,
@@ -277,6 +280,9 @@ enum Cmd {
         /// Replace the card security code (CVV) — prompted on the terminal.
         #[arg(long)]
         code: bool,
+        /// Identity fields to change (identity only).
+        #[command(flatten)]
+        identity: IdentityArgs,
         /// Emit JSON instead of a human-readable confirmation.
         #[arg(long)]
         json: bool,
@@ -479,6 +485,8 @@ enum KindArg {
     Note,
     /// Payment card (type 3).
     Card,
+    /// Identity (type 4).
+    Identity,
 }
 
 impl KindArg {
@@ -488,6 +496,127 @@ impl KindArg {
             Self::Login => 1,
             Self::Note => 2,
             Self::Card => 3,
+            Self::Identity => 4,
+        }
+    }
+}
+
+/// Identity (type 4) fields, shared by `add` and `edit` via `#[command(flatten)]`.
+/// Non-secret fields are flags; ssn/passport/license are prompted on the
+/// terminal when their bool flag is set (never argv — they'd leak to history).
+#[derive(clap::Args, Debug, Default)]
+struct IdentityArgs {
+    /// Title, e.g. `Mr`/`Ms` (identity only).
+    #[arg(long)]
+    title: Option<String>,
+    /// First name (identity only).
+    #[arg(long)]
+    first_name: Option<String>,
+    /// Middle name (identity only).
+    #[arg(long)]
+    middle_name: Option<String>,
+    /// Last name (identity only).
+    #[arg(long)]
+    last_name: Option<String>,
+    /// Identity username (identity only; the login username is `--username`).
+    #[arg(long = "identity-username")]
+    username: Option<String>,
+    /// Company (identity only).
+    #[arg(long)]
+    company: Option<String>,
+    /// Email (identity only).
+    #[arg(long)]
+    email: Option<String>,
+    /// Phone (identity only).
+    #[arg(long)]
+    phone: Option<String>,
+    /// Address line 1 (identity only).
+    #[arg(long)]
+    address1: Option<String>,
+    /// Address line 2 (identity only).
+    #[arg(long)]
+    address2: Option<String>,
+    /// Address line 3 (identity only).
+    #[arg(long)]
+    address3: Option<String>,
+    /// City (identity only).
+    #[arg(long)]
+    city: Option<String>,
+    /// State / province (identity only).
+    #[arg(long)]
+    state: Option<String>,
+    /// Postal code (identity only).
+    #[arg(long)]
+    postal_code: Option<String>,
+    /// Country (identity only).
+    #[arg(long)]
+    country: Option<String>,
+    /// Set the SSN / national id — prompted on the terminal (identity only).
+    #[arg(long)]
+    ssn: bool,
+    /// Set the passport number — prompted on the terminal (identity only).
+    #[arg(long)]
+    passport: bool,
+    /// Set the license number — prompted on the terminal (identity only).
+    #[arg(long)]
+    license: bool,
+}
+
+impl IdentityArgs {
+    /// Whether any identity flag was passed (gates building an `IdentityWrite`
+    /// on `edit`).
+    const fn any_set(&self) -> bool {
+        self.title.is_some()
+            || self.first_name.is_some()
+            || self.middle_name.is_some()
+            || self.last_name.is_some()
+            || self.username.is_some()
+            || self.company.is_some()
+            || self.email.is_some()
+            || self.phone.is_some()
+            || self.address1.is_some()
+            || self.address2.is_some()
+            || self.address3.is_some()
+            || self.city.is_some()
+            || self.state.is_some()
+            || self.postal_code.is_some()
+            || self.country.is_some()
+            || self.ssn
+            || self.passport
+            || self.license
+    }
+
+    /// Build an `IdentityWrite`, prompting on the terminal for each sensitive
+    /// field whose bool flag is set.
+    fn into_write(self) -> IdentityWrite {
+        IdentityWrite {
+            title: self.title,
+            first_name: self.first_name,
+            middle_name: self.middle_name,
+            last_name: self.last_name,
+            username: self.username,
+            company: self.company,
+            ssn: self
+                .ssn
+                .then(|| read_tty_line("SSN / national id: ").map(String::into_bytes))
+                .flatten(),
+            passport_number: self
+                .passport
+                .then(|| read_tty_line("Passport number: ").map(String::into_bytes))
+                .flatten(),
+            license_number: self
+                .license
+                .then(|| read_tty_line("License number: ").map(String::into_bytes))
+                .flatten(),
+            email: self.email,
+            phone: self.phone,
+            address1: self.address1,
+            address2: self.address2,
+            address3: self.address3,
+            city: self.city,
+            state: self.state,
+            postal_code: self.postal_code,
+            country: self.country,
         }
     }
 }
@@ -570,6 +699,7 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
             cardholder,
             brand,
             expiry,
+            identity,
             json,
         } => {
             cmd_add(
@@ -585,6 +715,7 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
                     cardholder,
                     brand,
                     expiry,
+                    identity,
                     json,
                 },
             )
@@ -604,6 +735,7 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
             expiry,
             number,
             code,
+            identity,
             json,
         } => {
             cmd_edit(
@@ -622,6 +754,7 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
                     expiry,
                     number,
                     code,
+                    identity,
                     json,
                 },
             )
@@ -1343,6 +1476,7 @@ struct AddArgs {
     cardholder: Option<String>,
     brand: Option<String>,
     expiry: Option<String>,
+    identity: IdentityArgs,
     json: bool,
 }
 
@@ -1365,6 +1499,10 @@ async fn cmd_add(ep: Endpoint<'_>, args: AddArgs) -> Result<(), u8> {
     } else {
         None
     };
+
+    // Identity (type 4): non-secret fields from flags; ssn/passport/license
+    // prompted on the terminal when their bool flag is set.
+    let identity = matches!(args.kind, KindArg::Identity).then(|| args.identity.into_write());
 
     // Password (login only): generate locally or read from stdin. Empty stdin
     // means "no password" — a login with just a username is valid.
@@ -1397,6 +1535,7 @@ async fn cmd_add(ep: Endpoint<'_>, args: AddArgs) -> Result<(), u8> {
         totp: None,
         uri,
         card,
+        identity,
     };
     let mut stream = connect(ep).await?;
     let resp = exchange(&mut stream, &req).await?;
@@ -1426,6 +1565,7 @@ struct EditArgs {
     expiry: Option<String>,
     number: bool,
     code: bool,
+    identity: IdentityArgs,
     json: bool,
 }
 
@@ -1473,6 +1613,10 @@ async fn cmd_edit(ep: Endpoint<'_>, args: EditArgs) -> Result<(), u8> {
         None
     };
 
+    // Identity edit: build a write if any identity flag was passed; sensitive
+    // fields are prompted on the terminal when their bool flag is set.
+    let identity = args.identity.any_set().then(|| args.identity.into_write());
+
     let req = Request::Edit {
         selector: args.selector,
         name: args.name,
@@ -1483,6 +1627,7 @@ async fn cmd_edit(ep: Endpoint<'_>, args: EditArgs) -> Result<(), u8> {
         totp: None,
         uri: args.uri,
         card,
+        identity,
     };
     let mut stream = connect(ep).await?;
     let resp = exchange(&mut stream, &req).await?;

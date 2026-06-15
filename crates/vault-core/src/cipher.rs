@@ -492,6 +492,30 @@ impl Cipher {
         } else {
             None
         };
+        let identity = if plain.cipher_type == 4 {
+            plain.identity.as_ref().map(|i| Identity {
+                title: i.title.as_deref().map(&enc),
+                first_name: i.first_name.as_deref().map(&enc),
+                middle_name: i.middle_name.as_deref().map(&enc),
+                last_name: i.last_name.as_deref().map(&enc),
+                username: i.username.as_deref().map(&enc),
+                company: i.company.as_deref().map(&enc),
+                ssn: i.ssn.as_deref().map(&enc),
+                passport_number: i.passport_number.as_deref().map(&enc),
+                license_number: i.license_number.as_deref().map(&enc),
+                email: i.email.as_deref().map(&enc),
+                phone: i.phone.as_deref().map(&enc),
+                address1: i.address1.as_deref().map(&enc),
+                address2: i.address2.as_deref().map(&enc),
+                address3: i.address3.as_deref().map(&enc),
+                city: i.city.as_deref().map(&enc),
+                state: i.state.as_deref().map(&enc),
+                postal_code: i.postal_code.as_deref().map(&enc),
+                country: i.country.as_deref().map(&enc),
+            })
+        } else {
+            None
+        };
         Self {
             id: plain.id.clone(),
             cipher_type: plain.cipher_type,
@@ -501,8 +525,7 @@ impl Cipher {
             notes: plain.notes.as_deref().map(&enc),
             login,
             card,
-            // Identity write isn't built yet (read-only); see CLAUDE.md.
-            identity: None,
+            identity,
             fields: None,
         }
     }

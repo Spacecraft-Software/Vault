@@ -109,8 +109,22 @@ vault add "My Visa" --type card --brand Visa --expiry 04/2030
 vault edit "My Visa" --expiry 05/2031 --code   # --code re-prompts the CVV
 ```
 
-`--expiry` accepts `MM/YYYY` or `MM/YY`. Identity create/edit is still pending
-(identities are read-only for now). Editing card fields on a non-card item is
+`--expiry` accepts `MM/YYYY` or `MM/YY`. Editing card fields on a non-card item
+is rejected.
+
+Create an identity with `vault add … --type identity` — the non-secret fields
+are flags; SSN, passport, and license numbers are prompted on the terminal when
+you pass the matching bool flag (never argv):
+
+```sh
+vault add "Jane Doe" --type identity --first-name Jane --last-name Doe \
+  --email jane@example.org --city Amber --ssn
+#   SSN / national id: …
+vault edit "Jane Doe" --city "New Amber" --passport   # --passport prompts it
+```
+
+(The login username is `--username`; the identity's own username field is
+`--identity-username`.) Editing identity fields on a non-identity item is
 rejected.
 
 The TUI can also create and edit cards: press `a` and cycle the **Type** row

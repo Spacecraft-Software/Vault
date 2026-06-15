@@ -492,6 +492,7 @@ async fn submit_form(state: &mut App, socket: &Path) {
             totp: None,
             uri,
             card,
+            identity: None,
         },
         FormKind::Edit { id, .. } => Request::Edit {
             selector: id,
@@ -503,6 +504,7 @@ async fn submit_form(state: &mut App, socket: &Path) {
             totp: None,
             uri,
             card,
+            identity: None,
         },
     };
     match client::request(socket, &req).await {

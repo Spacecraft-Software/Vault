@@ -301,6 +301,7 @@ async fn add_request_round_trips_card_write() {
             code: Some(b"123".to_vec()),
             ..CardWrite::default()
         }),
+        identity: None,
     };
     write_frame(&mut a, &req).await.unwrap();
     match read_frame::<_, Request>(&mut b).await.unwrap() {
@@ -327,6 +328,60 @@ fn card_write_debug_redacts_secrets() {
     assert!(rendered.contains("Visa"));
     assert!(!rendered.contains("4111"), "number leaked: {rendered}");
     assert!(!rendered.contains("123"), "cvv leaked: {rendered}");
+}
+
+#[tokio::test]
+async fn add_request_round_trips_identity_write() {
+    use vault_ipc::proto::IdentityWrite;
+    let (mut a, mut b) = duplex(8 * 1024);
+    let req = Request::Add {
+        name: "Jane Doe".into(),
+        cipher_type: 4,
+        folder: None,
+        notes: None,
+        username: None,
+        password: None,
+        totp: None,
+        uri: None,
+        card: None,
+        identity: Some(IdentityWrite {
+            first_name: Some("Jane".into()),
+            last_name: Some("Doe".into()),
+            email: Some("jane@example.org".into()),
+            ssn: Some(b"123-45-6789".to_vec()),
+            ..IdentityWrite::default()
+        }),
+    };
+    write_frame(&mut a, &req).await.unwrap();
+    match read_frame::<_, Request>(&mut b).await.unwrap() {
+        Request::Add { identity, .. } => {
+            let i = identity.expect("identity round-trips");
+            assert_eq!(i.first_name.as_deref(), Some("Jane"));
+            assert_eq!(i.email.as_deref(), Some("jane@example.org"));
+            assert_eq!(i.ssn.as_deref(), Some(b"123-45-6789".as_slice()));
+        }
+        other => panic!("expected Add, got {other:?}"),
+    }
+}
+
+#[test]
+fn identity_write_debug_redacts_secrets() {
+    use vault_ipc::proto::IdentityWrite;
+    let i = IdentityWrite {
+        first_name: Some("Jane".into()),
+        ssn: Some(b"123-45-6789".to_vec()),
+        passport_number: Some(b"X1234567".to_vec()),
+        license_number: Some(b"D9999999".to_vec()),
+        ..IdentityWrite::default()
+    };
+    let rendered = format!("{i:?}");
+    assert!(rendered.contains("Jane"));
+    assert!(!rendered.contains("123-45"), "ssn leaked: {rendered}");
+    assert!(
+        !rendered.contains("X1234567"),
+        "passport leaked: {rendered}"
+    );
+    assert!(!rendered.contains("D9999999"), "license leaked: {rendered}");
 }
 
 #[tokio::test]

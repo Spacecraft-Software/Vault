@@ -15,7 +15,9 @@ use zeroize::Zeroizing;
 
 use vault_api::BitwardenClient;
 use vault_core::EncString;
-use vault_core::cipher::{Card, Cipher, DecryptOptions, Login, LoginUri, PlainCard, PlainCipher};
+use vault_core::cipher::{
+    Card, Cipher, DecryptOptions, Identity, Login, LoginUri, PlainCard, PlainCipher, PlainIdentity,
+};
 use vault_ipc::proto::{Error as IpcError, Field, Item, ListEntry, Removed, Saved, Status};
 
 /// In-memory keys + ciphers held while the agent is unlocked.
@@ -258,6 +260,9 @@ pub struct CipherWrite {
     pub uri: Option<String>,
     /// Card fields (card ciphers only); `number`/`code` are secret bytes.
     pub card: Option<vault_ipc::proto::CardWrite>,
+    /// Identity fields (identity ciphers only); ssn/passport/license are secret
+    /// bytes.
+    pub identity: Option<vault_ipc::proto::IdentityWrite>,
 }
 
 impl AgentState {
@@ -537,15 +542,21 @@ impl AgentState {
             .name
             .clone()
             .ok_or_else(|| IpcError::Internal("add requires a name".to_owned()))?;
-        // Decode the card sub-object (type 3) before the struct literal moves
-        // the other `w` fields. `PlainCard::drop` scrubs number/code.
+        // Decode the card/identity sub-objects before the struct literal moves
+        // the other `w` fields. Their `Drop`s scrub the secret members.
         let card = if cipher_type == 3 {
             w.card.map(card_write_to_plain).transpose()?
         } else {
             None
         };
+        let identity = if cipher_type == 4 {
+            w.identity.map(identity_write_to_plain).transpose()?
+        } else {
+            None
+        };
         // `plain` owns every plaintext value; `PlainCipher::drop` scrubs the
-        // secret fields (password/totp/notes/card) when it falls out of scope.
+        // secret fields (password/totp/notes/card/identity) when it falls out of
+        // scope.
         let plain = PlainCipher {
             id: String::new(),
             cipher_type,
@@ -557,8 +568,7 @@ impl AgentState {
             totp: bytes_to_string(w.totp)?,
             primary_uri: w.uri,
             card,
-            // Identity write isn't built yet (read-only).
-            identity: None,
+            identity,
         };
         let mut cipher = Cipher::from_plain(&plain, &v.user_enc, &v.user_mac);
         v.ensure_online().await?;
@@ -603,12 +613,21 @@ impl AgentState {
                 ),
                 None => (None, None, None, None, None, None),
             };
+        // Identity edit: decode into an owned `PlainIdentity` (its `Drop` scrubs
+        // ssn/passport/license); the overlay borrows `&str` out of it.
+        let identity_present = w.identity.is_some();
+        let identity_plain = w.identity.map(identity_write_to_plain).transpose()?;
         let v = self.vault.as_mut().ok_or(IpcError::Locked)?;
 
         let mut cipher = v.ciphers[idx].clone();
         if card_present && cipher.cipher_type != 3 {
             return Err(IpcError::Internal(
                 "card fields can only be edited on a card item".to_owned(),
+            ));
+        }
+        if identity_present && cipher.cipher_type != 4 {
+            return Err(IpcError::Internal(
+                "identity fields can only be edited on an identity item".to_owned(),
             ));
         }
         let card = card_present.then(|| CardEdit {
@@ -618,6 +637,26 @@ impl AgentState {
             exp_month: card_exp_month.as_deref(),
             exp_year: card_exp_year.as_deref(),
             code: card_code.as_ref().map(|z| z.as_str()),
+        });
+        let identity = identity_plain.as_ref().map(|p| IdentityEdit {
+            title: p.title.as_deref(),
+            first_name: p.first_name.as_deref(),
+            middle_name: p.middle_name.as_deref(),
+            last_name: p.last_name.as_deref(),
+            username: p.username.as_deref(),
+            company: p.company.as_deref(),
+            ssn: p.ssn.as_deref(),
+            passport_number: p.passport_number.as_deref(),
+            license_number: p.license_number.as_deref(),
+            email: p.email.as_deref(),
+            phone: p.phone.as_deref(),
+            address1: p.address1.as_deref(),
+            address2: p.address2.as_deref(),
+            address3: p.address3.as_deref(),
+            city: p.city.as_deref(),
+            state: p.state.as_deref(),
+            postal_code: p.postal_code.as_deref(),
+            country: p.country.as_deref(),
         });
         let overlay = EditOverlay {
             name: w.name.as_deref(),
@@ -629,6 +668,7 @@ impl AgentState {
             totp: totp.as_ref().map(|z| z.as_str()),
             uri: w.uri.as_deref(),
             card,
+            identity,
         };
         apply_cipher_edits(&mut cipher, &overlay, &v.user_enc, &v.user_mac);
 
@@ -943,6 +983,8 @@ struct EditOverlay<'a> {
     uri: Option<&'a str>,
     /// Card fields to set (card ciphers only); `Some` per field = change it.
     card: Option<CardEdit<'a>>,
+    /// Identity fields to set (identity ciphers only); `Some` per field = change.
+    identity: Option<IdentityEdit<'a>>,
 }
 
 /// Card sub-overlay: borrowed plaintext for the card fields to change.
@@ -953,6 +995,28 @@ struct CardEdit<'a> {
     exp_month: Option<&'a str>,
     exp_year: Option<&'a str>,
     code: Option<&'a str>,
+}
+
+/// Identity sub-overlay: borrowed plaintext for the identity fields to change.
+struct IdentityEdit<'a> {
+    title: Option<&'a str>,
+    first_name: Option<&'a str>,
+    middle_name: Option<&'a str>,
+    last_name: Option<&'a str>,
+    username: Option<&'a str>,
+    company: Option<&'a str>,
+    ssn: Option<&'a str>,
+    passport_number: Option<&'a str>,
+    license_number: Option<&'a str>,
+    email: Option<&'a str>,
+    phone: Option<&'a str>,
+    address1: Option<&'a str>,
+    address2: Option<&'a str>,
+    address3: Option<&'a str>,
+    city: Option<&'a str>,
+    state: Option<&'a str>,
+    postal_code: Option<&'a str>,
+    country: Option<&'a str>,
 }
 
 /// Apply `o` to an already-encrypted `cipher` in place, re-encrypting only the
@@ -1020,6 +1084,58 @@ fn apply_cipher_edits(
             card.code = Some(enc(v));
         }
     }
+    // Identity fields (the caller already checked the cipher is an identity).
+    if let Some(i) = &o.identity {
+        let id = cipher.identity.get_or_insert_with(Identity::default);
+        let set = |slot: &mut Option<String>, v: Option<&str>| {
+            if let Some(v) = v {
+                *slot = Some(enc(v));
+            }
+        };
+        set(&mut id.title, i.title);
+        set(&mut id.first_name, i.first_name);
+        set(&mut id.middle_name, i.middle_name);
+        set(&mut id.last_name, i.last_name);
+        set(&mut id.username, i.username);
+        set(&mut id.company, i.company);
+        set(&mut id.ssn, i.ssn);
+        set(&mut id.passport_number, i.passport_number);
+        set(&mut id.license_number, i.license_number);
+        set(&mut id.email, i.email);
+        set(&mut id.phone, i.phone);
+        set(&mut id.address1, i.address1);
+        set(&mut id.address2, i.address2);
+        set(&mut id.address3, i.address3);
+        set(&mut id.city, i.city);
+        set(&mut id.state, i.state);
+        set(&mut id.postal_code, i.postal_code);
+        set(&mut id.country, i.country);
+    }
+}
+
+/// Convert a wire `IdentityWrite` to a `PlainIdentity`, decoding the secret
+/// ssn/passport/license bytes to strings (zeroized on failure / on drop).
+fn identity_write_to_plain(iw: vault_ipc::proto::IdentityWrite) -> Result<PlainIdentity, IpcError> {
+    Ok(PlainIdentity {
+        title: iw.title,
+        first_name: iw.first_name,
+        middle_name: iw.middle_name,
+        last_name: iw.last_name,
+        username: iw.username,
+        company: iw.company,
+        ssn: bytes_to_string(iw.ssn)?,
+        passport_number: bytes_to_string(iw.passport_number)?,
+        license_number: bytes_to_string(iw.license_number)?,
+        email: iw.email,
+        phone: iw.phone,
+        address1: iw.address1,
+        address2: iw.address2,
+        address3: iw.address3,
+        city: iw.city,
+        state: iw.state,
+        postal_code: iw.postal_code,
+        country: iw.country,
+    })
 }
 
 /// Convert a wire `CardWrite` to a `PlainCard`, decoding the secret number/code
@@ -1456,6 +1572,7 @@ mod tests {
             totp: None,
             uri: None,
             card: None,
+            identity: None,
         };
         apply_cipher_edits(&mut cipher, &overlay, &enc, &mac);
 
@@ -1484,6 +1601,7 @@ mod tests {
             totp: None,
             uri: Some("https://new.example"),
             card: None,
+            identity: None,
         };
         apply_cipher_edits(&mut cipher, &overlay, &enc, &mac);
 
@@ -1527,6 +1645,7 @@ mod tests {
                 exp_year: Some("2031"),
                 code: None,
             }),
+            identity: None,
         };
         apply_cipher_edits(&mut cipher, &overlay, &enc, &mac);
 
@@ -1546,6 +1665,76 @@ mod tests {
         // Untouched fields preserved.
         assert_eq!(c.brand.as_deref(), Some("Visa"));
         assert_eq!(c.number.as_deref(), Some("4111111111111111"));
+    }
+
+    #[test]
+    fn apply_identity_edits_sets_only_given_fields() {
+        let enc = [0x31u8; 32];
+        let mac = [0x32u8; 32];
+        let e =
+            |s: &str| Some(vault_core::EncString::encrypt(&enc, &mac, s.as_bytes()).serialize());
+        // An identity with an existing name + ssn; edit only the email + city.
+        let mut cipher = Cipher {
+            id: "id-1".into(),
+            cipher_type: 4,
+            identity: Some(Identity {
+                first_name: e("Jane"),
+                last_name: e("Doe"),
+                ssn: e("123-45-6789"),
+                ..Identity::default()
+            }),
+            ..Cipher::default()
+        };
+        let overlay = EditOverlay {
+            name: None,
+            folder_id: None,
+            folder_provided: false,
+            notes: None,
+            username: None,
+            password: None,
+            totp: None,
+            uri: None,
+            card: None,
+            identity: Some(IdentityEdit {
+                title: None,
+                first_name: None,
+                middle_name: None,
+                last_name: None,
+                username: None,
+                company: None,
+                ssn: None,
+                passport_number: None,
+                license_number: None,
+                email: Some("jane@example.org"),
+                phone: None,
+                address1: None,
+                address2: None,
+                address3: None,
+                city: Some("Amber"),
+                state: None,
+                postal_code: None,
+                country: None,
+            }),
+        };
+        apply_cipher_edits(&mut cipher, &overlay, &enc, &mac);
+
+        let back = cipher
+            .decrypt(
+                &enc,
+                &mac,
+                DecryptOptions {
+                    identity: true,
+                    ..DecryptOptions::default()
+                },
+            )
+            .unwrap();
+        let i = back.identity.as_ref().unwrap();
+        assert_eq!(i.email.as_deref(), Some("jane@example.org"), "email set");
+        assert_eq!(i.city.as_deref(), Some("Amber"), "city set");
+        // Untouched fields preserved.
+        assert_eq!(i.first_name.as_deref(), Some("Jane"));
+        assert_eq!(i.last_name.as_deref(), Some("Doe"));
+        assert_eq!(i.ssn.as_deref(), Some("123-45-6789"));
     }
 
     fn login_with_two_uris(enc: &[u8; 32], mac: &[u8; 32]) -> Cipher {
