@@ -72,9 +72,11 @@ vault pin status         # enrolled? attempts remaining?
 vault pin disable        # forget the PIN
 ```
 
-A PIN session is **read-only** (browse / `get` / copy from the encrypted cache);
-`sync` and edits need a master-password unlock. Five wrong PINs disable the PIN
-and require a master-password unlock — bounding brute-force of a short secret.
+A PIN session reads from the encrypted cache, and — once the network is
+reachable — transparently goes online for `sync` and edits by refreshing a
+stored token (no master password needed); only a genuinely offline box stays
+read-only. Five wrong PINs disable the PIN and require a master-password unlock
+— bounding brute-force of a short secret.
 
 ## Configuration
 

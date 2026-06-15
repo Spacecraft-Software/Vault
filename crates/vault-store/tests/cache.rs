@@ -70,6 +70,7 @@ fn pin_fields_round_trip() {
     let mut cache = VaultCache::new("dev".into(), "https://x".into(), "a@b");
     cache.pin_protected_user_key = Some("2.ppp|qqq|rrr".into());
     cache.pin_failures = 3;
+    cache.refresh_token = Some("2.rt0|rt1|rt2".into());
     save_to_dir(tmp.path(), &cache).unwrap();
 
     let loaded = load_from_dir(tmp.path()).unwrap();
@@ -78,6 +79,7 @@ fn pin_fields_round_trip() {
         Some("2.ppp|qqq|rrr")
     );
     assert_eq!(loaded.pin_failures, 3);
+    assert_eq!(loaded.refresh_token.as_deref(), Some("2.rt0|rt1|rt2"));
 }
 
 /// A schema-1 cache (no `protected_user_key` / `kdf` / pin fields) must still

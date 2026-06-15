@@ -43,6 +43,11 @@ pub struct Vault {
     pub protected_user_key: String,
     /// Account KDF parameters (for offline master-key derivation / re-persist).
     pub kdf: vault_core::kdf::KdfParams,
+    /// `OAuth2` refresh token (decrypted, in memory) when one is available — from
+    /// the login token on an online unlock, or decrypted from the cache on an
+    /// offline/PIN unlock. Lets a token-less session go online via
+    /// [`Vault::ensure_online`] and is persisted (encrypted) by `persist_cache`.
+    pub refresh_token: Option<Zeroizing<String>>,
     /// Stable device id this session unlocked with (persisted to the cache).
     pub device_id: String,
     /// Most recent sync time (ISO 8601 UTC), or `None` if never synced.
@@ -71,10 +76,59 @@ impl Vault {
             .map_err(|e| IpcError::Internal(format!("encrypt cache: {e}")))?;
         cache.protected_user_key = Some(self.protected_user_key.clone());
         cache.kdf = Some(self.kdf);
+        // Persist the refresh token encrypted under the user key, so a later
+        // cache/PIN unlock can recover it and go online without the password.
+        if let Some(rt) = self.refresh_token.as_ref() {
+            cache.refresh_token =
+                Some(EncString::encrypt(&self.user_enc, &self.user_mac, rt.as_bytes()).serialize());
+        }
         vault_store::save_to_dir(&dir, &cache)
             .map_err(|e| IpcError::Internal(format!("write cache: {e}")))?;
         Ok(())
     }
+
+    /// Ensure the vault has a live, authenticated client — establishing one
+    /// from the held refresh token if the session was unlocked from cache
+    /// (offline / PIN). Returns `Error::Offline` when there's no token and no
+    /// way to get one (truly offline, or no refresh token persisted).
+    ///
+    /// # Errors
+    ///
+    /// [`IpcError::Offline`] if no client can be established;
+    /// [`IpcError::Internal`] on a malformed server URL.
+    pub async fn ensure_online(&mut self) -> Result<(), IpcError> {
+        if self.client.is_some() {
+            return Ok(());
+        }
+        let Some(refresh) = self.refresh_token.as_ref() else {
+            return Err(IpcError::Offline);
+        };
+        let urls = vault_api::BaseUrls::self_hosted(&self.server)
+            .map_err(|e| IpcError::Internal(e.to_string()))?;
+        let device =
+            uuid::Uuid::parse_str(&self.device_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
+        let mut client = vault_api::BitwardenClient::with_refresh_token(
+            urls,
+            device,
+            "vault-agent",
+            rt_string(refresh),
+        )
+        .map_err(|e| IpcError::Internal(e.to_string()))?;
+        // A failed refresh (network down, or token revoked) → stay offline.
+        client.refresh().await.map_err(|_| IpcError::Offline)?;
+        // Keep the (possibly rotated) refresh token in memory for re-persist.
+        if let Some(rt) = client.refresh_token() {
+            self.refresh_token = Some(Zeroizing::new(rt.to_owned()));
+        }
+        self.client = Some(client);
+        Ok(())
+    }
+}
+
+/// Clone a `Zeroizing<String>` refresh token into a plain `String` for the API
+/// call (the client re-wraps it in `Zeroizing`).
+fn rt_string(rt: &Zeroizing<String>) -> String {
+    rt.as_str().to_owned()
 }
 
 /// Wrong-PIN attempts allowed before the PIN is wiped and a master-password
@@ -335,6 +389,7 @@ impl AgentState {
             .decrypt_name(&v.user_enc, &v.user_mac)
             .map_err(|e| IpcError::Decrypt(e.to_string()))?
             .unwrap_or_else(|| "<unnamed>".to_owned());
+        v.ensure_online().await?;
         v.client
             .as_mut()
             .ok_or(IpcError::Offline)?
@@ -389,6 +444,7 @@ impl AgentState {
             primary_uri: w.uri,
         };
         let mut cipher = Cipher::from_plain(&plain, &v.user_enc, &v.user_mac);
+        v.ensure_online().await?;
         let id = v
             .client
             .as_mut()
@@ -431,6 +487,7 @@ impl AgentState {
         apply_cipher_edits(&mut cipher, &overlay, &v.user_enc, &v.user_mac);
 
         let id = cipher.id.clone();
+        v.ensure_online().await?;
         v.client
             .as_mut()
             .ok_or(IpcError::Offline)?
@@ -455,6 +512,7 @@ impl AgentState {
     /// that surfaces as `IpcError::Network`.
     pub async fn resync(&mut self) -> Result<(), IpcError> {
         let v = self.vault.as_mut().ok_or(IpcError::Locked)?;
+        v.ensure_online().await?;
         let sync = v
             .client
             .as_mut()
@@ -1120,6 +1178,7 @@ mod tests {
                 memory_kib: None,
                 parallelism: None,
             },
+            refresh_token: None,
             device_id: "00000000-0000-0000-0000-000000000000".into(),
             last_sync: None,
         }
@@ -1145,6 +1204,22 @@ mod tests {
         assert!(matches!(err, IpcError::Offline), "got {err:?}");
         // A read path still works (no ciphers, but not an error).
         assert!(s.list_entries().is_ok());
+    }
+
+    #[test]
+    fn ensure_online_ok_with_client_offline_without() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("rt");
+        // A live client → Ok with no network call (short-circuits).
+        let mut v = stub_vault();
+        assert!(rt.block_on(v.ensure_online()).is_ok());
+        // No client and no refresh token → Offline (can't establish a session).
+        let mut v = offline_vault();
+        assert!(matches!(
+            rt.block_on(v.ensure_online()),
+            Err(IpcError::Offline)
+        ));
     }
 
     #[test]
