@@ -263,6 +263,12 @@ pub struct UnlockState {
     pub pin_enabled: bool,
     /// Last failed-unlock message, shown under the field.
     pub error: Option<String>,
+    /// In the second step of a 2FA unlock: the `secret` field now holds the
+    /// authenticator code and `password` holds the stashed master password.
+    pub awaiting_2fa: bool,
+    /// Master password stashed after the first attempt 2FA-challenged, to
+    /// resend with the code. Empty until then; zeroised on drop.
+    pub password: Zeroizing<Vec<u8>>,
 }
 
 impl UnlockState {
@@ -277,6 +283,19 @@ impl UnlockState {
                 email: self.email.clone(),
                 pin: secret,
             }
+        } else if self.awaiting_2fa {
+            // Second step: `secret` is the authenticator code; resend the
+            // stashed password with it.
+            Request::Unlock {
+                server: self.server.clone(),
+                email: self.email.clone(),
+                password: self.password.to_vec(),
+                device_id: self.device_id.clone(),
+                api_key: None,
+                two_factor: Some(vault_ipc::proto::TwoFactorCode {
+                    token: self.secret.as_str().to_owned(),
+                }),
+            }
         } else {
             Request::Unlock {
                 server: self.server.clone(),
@@ -286,8 +305,18 @@ impl UnlockState {
                 // The agent auto-uses any API key persisted at
                 // `vault login --api-key`; the TUI never re-supplies it.
                 api_key: None,
+                two_factor: None,
             }
         }
+    }
+
+    /// Enter the 2FA code step: stash the typed master password, clear the field
+    /// for the authenticator code, and drop any prior error.
+    pub fn begin_2fa(&mut self) {
+        self.password = Zeroizing::new(self.secret.as_str().as_bytes().to_vec());
+        self.secret.clear();
+        self.awaiting_2fa = true;
+        self.error = None;
     }
 }
 
@@ -852,6 +881,7 @@ impl App {
     pub fn toggle_pin(&mut self) {
         if let Some(u) = self.unlock.as_mut()
             && u.pin_enabled
+            && !u.awaiting_2fa
         {
             u.use_pin = !u.use_pin;
             u.secret.clear();
@@ -2265,6 +2295,8 @@ mod tests {
             use_pin: false,
             pin_enabled,
             error: None,
+            awaiting_2fa: false,
+            password: Zeroizing::new(Vec::new()),
         }
     }
 
@@ -2280,12 +2312,14 @@ mod tests {
                 password,
                 device_id,
                 api_key,
+                two_factor,
             } => {
                 assert_eq!(server, "https://vault.example.org");
                 assert_eq!(email, "me@example.org");
                 assert_eq!(password, b"hunter2");
                 assert_eq!(device_id.as_deref(), Some("dev-1"));
                 assert!(api_key.is_none(), "TUI never supplies an API key");
+                assert!(two_factor.is_none(), "no 2FA before a challenge");
             }
             other => panic!("expected Unlock, got {other:?}"),
         }
@@ -2301,6 +2335,38 @@ mod tests {
             }
             other => panic!("expected UnlockPin, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn begin_2fa_stashes_password_and_request_carries_the_code() {
+        use vault_ipc::proto::Request;
+        let mut app = App::unlock_screen(status(), unlock_state(true));
+        app.input_insert_str("hunter2"); // master password
+        if let Some(u) = app.unlock.as_mut() {
+            u.begin_2fa();
+        }
+        let u = app.unlock.as_ref().unwrap();
+        assert!(u.awaiting_2fa);
+        assert_eq!(u.password.as_slice(), b"hunter2", "password stashed");
+        assert!(u.secret.as_str().is_empty(), "field cleared for the code");
+        // Type the authenticator code → Unlock carries the stashed password +
+        // the code as two_factor.
+        app.input_insert_str("123456");
+        match app.unlock.as_ref().unwrap().request() {
+            Request::Unlock {
+                password,
+                two_factor,
+                ..
+            } => {
+                assert_eq!(password, b"hunter2");
+                assert_eq!(two_factor.expect("2fa code").token, "123456");
+            }
+            other => panic!("expected Unlock, got {other:?}"),
+        }
+        // Tab must not switch to PIN mid-2FA even with a PIN enrolled.
+        app.toggle_pin();
+        assert!(app.unlock.as_ref().unwrap().awaiting_2fa);
+        assert!(!app.unlock.as_ref().unwrap().use_pin);
     }
 
     #[test]

@@ -61,6 +61,13 @@ config file; `login` and `unlock` then resolve those from the profile, so their
 once registered. `login` is the first-time "authenticate and verify sync";
 `unlock` is the routine "hand the agent my key again".
 
+If the account has two-factor auth, `login`/`unlock` prompt for your
+**authenticator (TOTP) code** after the password (read from the controlling
+terminal, so it works even with the password piped in); supply it up front with
+`--totp 123456` or `$BW_TOTP` for scripts. The TUI shows an "Authenticator code"
+step in its unlock screen. An [API key](#api-key-login-2fa-accounts) skips the
+2FA prompt entirely; only the authenticator provider is supported so far.
+
 ### PIN unlock
 
 For quick access without re-typing the master password, enroll a PIN (after an

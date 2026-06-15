@@ -10,6 +10,26 @@ range may break in any release.
 
 ### Added
 
+- **Interactive TOTP two-factor auth.** A 2FA-enabled account is no longer a
+  dead end on the password grant: on `Error::TwoFactorRequired`, prompt for the
+  authenticator code and resubmit the token grant with it.
+  - `vault-api`: `login_password` gains `two_factor: Option<&TwoFactor>` and
+    appends `twoFactorToken`/`twoFactorProvider`/`twoFactorRemember`; a wrong
+    code re-challenges so the caller re-prompts.
+  - `vault-ipc`: `TwoFactorCode` + serde-defaulted `two_factor` on
+    `Request::Unlock` (forward-compatible). `vault-agent` threads it into the
+    password grant (provider `0` = authenticator).
+  - `vault-cli`: `vault login`/`unlock` resubmit on a challenge, reading the
+    code from the **controlling terminal** (`/dev/tty`) so it works even with
+    the password piped to stdin; `--totp` / `$BW_TOTP` supply it non-
+    interactively. `vault-tui`: an "Authenticator code" step in the unlock
+    screen (stashes the password, resubmits with the code).
+  - Scope: the authenticator/TOTP provider only; other providers (email, Duo,
+    WebAuthn) and "remember this device" are future work. An API key still
+    bypasses 2FA entirely.
+  - Tests: `vault-api` wiremock challenge→resubmit; `vault-ipc` transport
+    round-trip; `vault-tui` `begin_2fa`/request-with-code units.
+
 - **`tui.vim` — vim jump motions in the TUI.** Opt-in (`vault config set tui.vim
   true`): on top of the default `hjkl`, the browser gains `gg` (top), `G`
   (bottom), and `Ctrl-d`/`Ctrl-u` (half-page; a fixed step — the pure-render

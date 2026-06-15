@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 use vault_api::{BaseUrls, BitwardenClient, SyncResponse, TokenResponse};
 use vault_core::cipher::{Cipher, decrypt_user_key};
 use vault_core::kdf::{KdfParams, derive_master_key, stretch_master_key};
-use vault_ipc::proto::{ApiKeyCreds, Error as IpcError};
+use vault_ipc::proto::{ApiKeyCreds, Error as IpcError, TwoFactorCode};
 use vault_store::VaultCache;
 
 use crate::state::{Vault, account_dir_name};
@@ -27,8 +27,9 @@ pub async fn perform_unlock(
     password: &[u8],
     device_id: Option<&str>,
     api_key: Option<&ApiKeyCreds>,
+    two_factor: Option<&TwoFactorCode>,
 ) -> Result<Vault, IpcError> {
-    match online_unlock(server, email, password, device_id, api_key).await {
+    match online_unlock(server, email, password, device_id, api_key, two_factor).await {
         Ok(vault) => Ok(vault),
         Err(IpcError::Network(net)) => {
             // Network down — recover from cache if we have one for this account.
@@ -49,6 +50,7 @@ async fn online_unlock(
     password: &[u8],
     device_id: Option<&str>,
     api_key: Option<&ApiKeyCreds>,
+    two_factor: Option<&TwoFactorCode>,
 ) -> Result<Vault, IpcError> {
     let email_lower = email.trim().to_lowercase();
     let urls = BaseUrls::self_hosted(server).map_err(|e| IpcError::Internal(e.to_string()))?;
@@ -81,6 +83,7 @@ async fn online_unlock(
         password,
         params,
         api_key,
+        two_factor,
         server,
         email,
     )
@@ -130,12 +133,14 @@ async fn online_unlock(
 /// previously stored API key → the password grant. The API-key grants use
 /// `client_credentials`, which skips 2FA; the password grant can surface
 /// [`IpcError::TwoFactorRequired`].
+#[allow(clippy::too_many_arguments)] // a flat unlock helper; grouping into a struct would obscure more than it helps
 async fn obtain_token(
     client: &mut BitwardenClient,
     email_lower: &str,
     password: &[u8],
     params: KdfParams,
     api_key: Option<&ApiKeyCreds>,
+    two_factor: Option<&TwoFactorCode>,
     server: &str,
     email: &str,
 ) -> Result<TokenResponse, IpcError> {
@@ -156,8 +161,15 @@ async fn obtain_token(
             .await
             .map_err(api_err);
     }
+    // Password grant: the authenticator code (provider 0), when the client
+    // resends one after a `TwoFactorRequired` challenge.
+    let tf = two_factor.map(|t| vault_api::TwoFactor {
+        provider: 0,
+        token: t.token.clone(),
+        remember: false,
+    });
     client
-        .login_password(email_lower, password, params)
+        .login_password(email_lower, password, params, tf.as_ref())
         .await
         .map_err(translate_login_err)
 }

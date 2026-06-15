@@ -25,6 +25,21 @@ pub const CLIENT_ID: &str = "cli";
 /// Bitwarden device-type for desktop / CLI clients.
 pub const DEVICE_TYPE_CLI: u32 = 14;
 
+/// A two-factor token to satisfy a 2FA challenge on the password grant.
+///
+/// `token` is the code (e.g. a 6-digit authenticator code); `provider` is the
+/// Bitwarden two-factor provider id (`0` = authenticator/TOTP); `remember` asks
+/// the server to skip 2FA on later logins from this device.
+#[derive(Clone, Debug)]
+pub struct TwoFactor {
+    /// Bitwarden two-factor provider id (`0` = authenticator/TOTP).
+    pub provider: u32,
+    /// The one-time code entered by the user.
+    pub token: String,
+    /// Whether to ask the server to remember this device.
+    pub remember: bool,
+}
+
 /// REST client for a single Bitwarden / Vaultwarden account.
 #[derive(Debug)]
 pub struct BitwardenClient {
@@ -193,16 +208,22 @@ impl BitwardenClient {
     /// The supplied password is consumed to compute the master-password hash
     /// and discarded; only the resulting hash leaves this function.
     ///
+    /// When the account has 2FA enabled, the first call (with `two_factor =
+    /// None`) returns [`Error::TwoFactorRequired`]; the caller prompts for a
+    /// code and calls again with `two_factor = Some(..)`. A wrong code returns
+    /// `TwoFactorRequired` again, so the caller can re-prompt.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::TwoFactorRequired`] if the account has 2FA enabled,
-    /// [`Error::ServerStatus`] on a bad password / other non-success status,
-    /// or a crypto error if master-key derivation fails.
+    /// Returns [`Error::TwoFactorRequired`] if 2FA is required (and not yet, or
+    /// incorrectly, supplied), [`Error::ServerStatus`] on a bad password / other
+    /// non-success status, or a crypto error if master-key derivation fails.
     pub async fn login_password(
         &mut self,
         email: &str,
         password: &[u8],
         params: KdfParams,
+        two_factor: Option<&TwoFactor>,
     ) -> Result<TokenResponse> {
         let email_lower = email.trim().to_lowercase();
         let master_key = derive_master_key(password, email_lower.as_bytes(), params)?;
@@ -214,16 +235,25 @@ impl BitwardenClient {
             .join("connect/token")
             .map_err(|_| Error::BaseUrl("could not build token URL"))?;
 
-        let form: [(&str, &str); 8] = [
+        let device = self.device_id.to_string();
+        let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", "password"),
             ("username", email_lower.as_str()),
             ("password", hash.as_str()),
             ("scope", "api offline_access"),
             ("client_id", CLIENT_ID),
             ("deviceType", "14"),
-            ("deviceIdentifier", &self.device_id.to_string()),
+            ("deviceIdentifier", &device),
             ("deviceName", &self.device_name),
         ];
+        // Bind the 2FA field strings so they outlive the borrow into `form`.
+        let provider_str;
+        if let Some(tf) = two_factor {
+            provider_str = tf.provider.to_string();
+            form.push(("twoFactorToken", tf.token.as_str()));
+            form.push(("twoFactorProvider", provider_str.as_str()));
+            form.push(("twoFactorRemember", if tf.remember { "1" } else { "0" }));
+        }
 
         let resp = self
             .http

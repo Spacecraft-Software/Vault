@@ -129,7 +129,7 @@ async fn login_sync_cache_round_trip() {
     let prelogin = client.prelogin(EMAIL).await.unwrap();
     let params = prelogin.into_kdf_params().unwrap();
     let token = client
-        .login_password(EMAIL, PASSWORD.as_bytes(), params)
+        .login_password(EMAIL, PASSWORD.as_bytes(), params, None)
         .await
         .unwrap();
     assert_eq!(token.access_token, "test-access-token");
@@ -180,7 +180,7 @@ async fn wrong_password_surfaces_server_status() {
 
     let mut client = BitwardenClient::new(urls, Uuid::new_v4(), "vault-test").unwrap();
     let err = client
-        .login_password(EMAIL, b"wrong", pbkdf2_params())
+        .login_password(EMAIL, b"wrong", pbkdf2_params(), None)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -220,7 +220,7 @@ async fn delete_cipher_sends_authorized_delete() {
     let mut client = BitwardenClient::new(urls, Uuid::new_v4(), "vault-test").unwrap();
     // Prime token via login_password (uses the token mock above).
     client
-        .login_password(EMAIL, PASSWORD.as_bytes(), pbkdf2_params())
+        .login_password(EMAIL, PASSWORD.as_bytes(), pbkdf2_params(), None)
         .await
         .unwrap();
 
@@ -286,7 +286,7 @@ async fn create_and_update_cipher_send_authorized_requests() {
 
     let mut client = BitwardenClient::new(urls, Uuid::new_v4(), "vault-test").unwrap();
     client
-        .login_password(EMAIL, PASSWORD.as_bytes(), pbkdf2_params())
+        .login_password(EMAIL, PASSWORD.as_bytes(), pbkdf2_params(), None)
         .await
         .unwrap();
 
@@ -343,7 +343,7 @@ async fn create_secure_note_carries_securenote_marker() {
 
     let mut client = BitwardenClient::new(urls, Uuid::new_v4(), "vault-test").unwrap();
     client
-        .login_password(EMAIL, PASSWORD.as_bytes(), pbkdf2_params())
+        .login_password(EMAIL, PASSWORD.as_bytes(), pbkdf2_params(), None)
         .await
         .unwrap();
 
@@ -405,6 +405,63 @@ async fn login_api_key_bad_key_surfaces_server_status() {
         err,
         vault_api::Error::ServerStatus { status: 400, .. }
     ));
+}
+
+#[tokio::test]
+#[ignore = "links ring into a test binary; see file preamble"]
+async fn login_password_two_factor_challenge_then_resubmit() {
+    let server = MockServer::start().await;
+    let urls = BaseUrls::self_hosted(&server.uri()).unwrap();
+
+    // First attempt → 400 with the 2FA-required shape. `up_to_n_times(1)` so it
+    // matches only the first request; the coded resubmit falls through to the
+    // success mock below.
+    Mock::given(method("POST"))
+        .and(path("/identity/connect/token"))
+        .and(body_string_contains("grant_type=password"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "TwoFactorProviders": [0],
+            "TwoFactorProviders2": { "0": {} }
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    // Resubmit carrying the authenticator code → 200 + token.
+    Mock::given(method("POST"))
+        .and(path("/identity/connect/token"))
+        .and(body_string_contains("twoFactorToken=123456"))
+        .and(body_string_contains("twoFactorProvider=0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "tfa-token",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+            "Key": "2.dGVzdA==|dGVzdA==|dGVzdA==",
+        })))
+        .mount(&server)
+        .await;
+
+    let mut client = BitwardenClient::new(urls, Uuid::new_v4(), "vault-test").unwrap();
+    let err = client
+        .login_password(EMAIL, PASSWORD.as_bytes(), pbkdf2_params(), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, vault_api::Error::TwoFactorRequired(_)),
+        "first attempt must 2FA-challenge: {err:?}"
+    );
+
+    let tf = vault_api::TwoFactor {
+        provider: 0,
+        token: "123456".to_owned(),
+        remember: false,
+    };
+    let token = client
+        .login_password(EMAIL, PASSWORD.as_bytes(), pbkdf2_params(), Some(&tf))
+        .await
+        .unwrap();
+    assert_eq!(token.access_token, "tfa-token");
+    assert!(client.is_authenticated());
 }
 
 fn urlencoded(s: &str) -> String {

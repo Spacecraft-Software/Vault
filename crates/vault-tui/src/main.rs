@@ -230,6 +230,8 @@ async fn locked_screen(socket: &Path, s: Status) -> App {
             use_pin: false,
             pin_enabled,
             error: None,
+            awaiting_2fa: false,
+            password: zeroize::Zeroizing::new(Vec::new()),
         },
     )
 }
@@ -294,6 +296,19 @@ async fn submit_unlock(state: &mut App, socket: &Path) {
     drop(req);
     match resp {
         Ok(Response::Ok) => *state = load_app(socket).await,
+        // A 2FA challenge isn't a failure: stash the password and switch the
+        // field to the authenticator code (or show "wrong code" if already in
+        // that step).
+        Ok(Response::Error(IpcError::TwoFactorRequired)) => {
+            if let Some(u) = state.unlock.as_mut() {
+                if u.awaiting_2fa {
+                    u.error = Some("incorrect code — try again".to_owned());
+                    u.secret.clear();
+                } else {
+                    u.begin_2fa();
+                }
+            }
+        }
         Ok(Response::Error(e)) => state.unlock_failed(e.to_string()),
         Ok(other) => state.unlock_failed(format!("unexpected response: {other:?}")),
         Err(e) => state.unlock_failed(e.to_string()),
