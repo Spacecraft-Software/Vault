@@ -206,6 +206,9 @@ pub struct AgentState {
     /// on unlock so a restarted agent can resume without the master password
     /// (opt-in; PRD §7.3 carve-out). Off by default; no-op on non-Linux.
     pub session_keyring: bool,
+    /// Seconds between agent-side background `/sync`es while unlocked; `0`
+    /// disables. Drives [`server::scheduled_sync_loop`](crate::server::scheduled_sync_loop).
+    pub sync_interval_secs: u64,
     /// Throttle for refreshing the keyring entry's deadline on activity — we
     /// only re-arm the timeout periodically, not on every request.
     last_session_refresh: Option<Instant>,
@@ -260,6 +263,7 @@ impl AgentState {
             last_activity: Instant::now(),
             idle_lock_secs,
             session_keyring: false,
+            sync_interval_secs: 0,
             last_session_refresh: None,
             shutdown_requested: false,
             #[cfg(feature = "clipboard")]
@@ -1315,6 +1319,21 @@ mod tests {
             rt.block_on(v.ensure_online()),
             Err(IpcError::Offline)
         ));
+    }
+
+    #[test]
+    fn scheduled_sync_on_locked_agent_is_a_safe_noop() {
+        // The background-sync loop calls resync() only when unlocked, but the
+        // invariant it relies on is that a locked resync is a clean `Locked`
+        // skip — and that a sync never defers the idle-lock countdown.
+        let mut s = AgentState::new(900);
+        let before = s.last_activity;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("rt");
+        let err = rt.block_on(s.resync()).unwrap_err();
+        assert!(matches!(err, IpcError::Locked), "got {err:?}");
+        assert_eq!(s.last_activity, before, "resync must not touch()");
     }
 
     #[test]

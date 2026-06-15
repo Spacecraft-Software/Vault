@@ -71,6 +71,10 @@ struct Args {
     /// idle-lock TTL (opt-in; PRD §7.3 carve-out). No effect on non-Linux.
     #[arg(long)]
     session_keyring: bool,
+    /// Seconds between background `/sync`es while unlocked; `0` disables. Keeps
+    /// the cache fresh without a manual `vault sync`.
+    #[arg(long, default_value_t = 0)]
+    sync_interval_secs: u64,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -90,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
     let agent = AgentState::new(args.idle_lock_secs);
     let mut agent = agent;
     agent.session_keyring = args.session_keyring;
+    agent.sync_interval_secs = args.sync_interval_secs;
     // Opt-in: resume an unlocked session left in the kernel keyring by a prior
     // agent (e.g. after a crash / restart), within its idle-lock deadline.
     try_resume(&mut agent);
@@ -98,6 +103,11 @@ async fn main() -> anyhow::Result<()> {
     if args.idle_lock_secs > 0 {
         let st = state.clone();
         tokio::spawn(server::idle_lock_loop(st));
+    }
+
+    if args.sync_interval_secs > 0 {
+        let st = state.clone();
+        tokio::spawn(server::scheduled_sync_loop(st));
     }
 
     // PRD §7.3: lock on SIGTERM. Locking also sweeps a still-pending

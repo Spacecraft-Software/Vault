@@ -26,6 +26,7 @@ pub const KNOWN_KEYS: &[&str] = &[
     "clipboard.clear_secs",
     "agent.idle_lock_secs",
     "agent.session_keyring",
+    "sync.interval_secs",
 ];
 
 /// The full user configuration. Every field is optional — absence means "use
@@ -38,6 +39,8 @@ pub struct Config {
     pub clipboard: ClipboardCfg,
     /// Agent settings.
     pub agent: AgentCfg,
+    /// Background-sync settings.
+    pub sync: SyncCfg,
     /// Registered account profile (written by `vault register`). Skipped from
     /// the file until something is set, so an unregistered config carries no
     /// empty `[account]` table.
@@ -63,6 +66,15 @@ pub struct AgentCfg {
     /// session keyring (opt-in; Linux-only). `true` passes `--session-keyring`
     /// to the auto-spawned agent.
     pub session_keyring: Option<bool>,
+}
+
+/// `[sync]` table.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SyncCfg {
+    /// Seconds between agent-side background `/sync`es while unlocked; `0` (or
+    /// unset) disables. Takes effect on the next agent (auto-)spawn.
+    pub interval_secs: Option<u64>,
 }
 
 /// `[account]` table — the registered account, written by `vault register`
@@ -109,6 +121,12 @@ impl Config {
         self.agent.session_keyring
     }
 
+    /// Effective `sync.interval_secs`, if set.
+    #[must_use]
+    pub const fn sync_interval_secs(&self) -> Option<u64> {
+        self.sync.interval_secs
+    }
+
     /// The registered account profile.
     #[must_use]
     pub const fn account(&self) -> &AccountCfg {
@@ -136,6 +154,7 @@ impl Config {
             "clipboard.clear_secs" => Ok(self.clipboard.clear_secs.map(|v| v.to_string())),
             "agent.idle_lock_secs" => Ok(self.agent.idle_lock_secs.map(|v| v.to_string())),
             "agent.session_keyring" => Ok(self.agent.session_keyring.map(|v| v.to_string())),
+            "sync.interval_secs" => Ok(self.sync.interval_secs.map(|v| v.to_string())),
             other => Err(other.to_owned()),
         }
     }
@@ -158,6 +177,10 @@ impl Config {
             }
             "agent.session_keyring" => {
                 self.agent.session_keyring = Some(parse_bool(key, raw)?);
+                Ok(())
+            }
+            "sync.interval_secs" => {
+                self.sync.interval_secs = Some(parse_u64(key, raw)?);
                 Ok(())
             }
             other => Err(unknown_key(other)),
@@ -183,6 +206,10 @@ impl Config {
                 self.agent.session_keyring = None;
                 Ok(())
             }
+            "sync.interval_secs" => {
+                self.sync.interval_secs = None;
+                Ok(())
+            }
             other => Err(unknown_key(other)),
         }
     }
@@ -205,6 +232,10 @@ pub fn agent_args(cfg: &Config) -> Vec<OsString> {
     // Boolean flag: present only when explicitly enabled.
     if cfg.session_keyring() == Some(true) {
         args.push(OsString::from("--session-keyring"));
+    }
+    if let Some(secs) = cfg.sync_interval_secs() {
+        args.push(OsString::from("--sync-interval-secs"));
+        args.push(OsString::from(secs.to_string()));
     }
     args
 }
@@ -413,6 +444,30 @@ mod tests {
             !agent_args(&c).contains(&OsString::from("--session-keyring")),
             "false must not emit the flag"
         );
+
+        // sync.interval_secs emits a value flag when set.
+        c.set("sync.interval_secs", "300").expect("set");
+        let args = agent_args(&c);
+        let i = args
+            .iter()
+            .position(|a| a == &OsString::from("--sync-interval-secs"))
+            .expect("flag present");
+        assert_eq!(args[i + 1], OsString::from("300"));
+    }
+
+    #[test]
+    fn sync_interval_round_trips() {
+        let mut c = Config::default();
+        assert_eq!(c.get("sync.interval_secs").unwrap(), None);
+        assert!(agent_args(&c).is_empty(), "unset → no flag");
+        c.set("sync.interval_secs", "120").expect("set");
+        assert_eq!(c.sync_interval_secs(), Some(120));
+        let text = toml::to_string_pretty(&c).expect("serialise");
+        let back: Config = toml::from_str(&text).expect("parse");
+        assert_eq!(back.sync_interval_secs(), Some(120));
+        c.unset("sync.interval_secs").expect("unset");
+        assert_eq!(c.sync_interval_secs(), None);
+        assert!(c.set("sync.interval_secs", "soon").is_err());
     }
 
     #[test]
