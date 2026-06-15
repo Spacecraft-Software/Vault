@@ -194,12 +194,12 @@ async fn load_app(socket: &Path) -> App {
         Ok(Response::Error(err)) => App::message("Error", err.to_string(), None),
         Ok(other) => App::message("Error", format!("unexpected response: {other:?}"), None),
     };
-    // Reserved accessibility preference (`ui.reduced_motion`): record it on the
-    // App so a future animated element can honor it. No visible effect yet.
-    app.reduced_motion = vault_config::load()
-        .ok()
-        .and_then(|c| c.reduced_motion())
-        .unwrap_or(false);
+    // Apply TUI config preferences: `tui.vim` (vim motions) and the reserved
+    // `ui.reduced_motion` flag. One load, both flags.
+    if let Ok(cfg) = vault_config::load() {
+        app.vim = cfg.tui_vim().unwrap_or(false);
+        app.reduced_motion = cfg.reduced_motion().unwrap_or(false);
+    }
     app
 }
 
@@ -302,6 +302,44 @@ async fn submit_unlock(state: &mut App, socket: &Path) {
 
 /// Normal-mode keys — navigation, reveal/copy, and mode entry.
 async fn handle_normal_key(state: &mut App, key: KeyEvent, socket: &Path) {
+    // Vim mode (`tui.vim`) adds jump motions and remaps the generator to Ctrl-g
+    // so `g` can be the `gg` prefix. Intercept before the normal match (which
+    // matches `g`/`u`/`d` without checking modifiers).
+    if state.vim {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('g') if !ctrl => {
+                if state.take_pending_g() {
+                    state.move_top();
+                } else {
+                    state.arm_pending_g();
+                }
+                return;
+            }
+            KeyCode::Char('g') if ctrl => {
+                state.clear_pending_g();
+                state.open_generator();
+                return;
+            }
+            KeyCode::Char('G') => {
+                state.clear_pending_g();
+                state.move_bottom();
+                return;
+            }
+            KeyCode::Char('d') if ctrl => {
+                state.clear_pending_g();
+                state.page_down();
+                return;
+            }
+            KeyCode::Char('u') if ctrl => {
+                state.clear_pending_g();
+                state.page_up();
+                return;
+            }
+            // Any other key cancels a pending `g` and falls through.
+            _ => state.clear_pending_g(),
+        }
+    }
     match key.code {
         KeyCode::Char('q') => state.quit(),
         // Esc peels back one layer: an active search filter first, then quit.

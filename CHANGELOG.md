@@ -10,6 +10,18 @@ range may break in any release.
 
 ### Added
 
+- **`tui.vim` — vim jump motions in the TUI.** Opt-in (`vault config set tui.vim
+  true`): on top of the default `hjkl`, the browser gains `gg` (top), `G`
+  (bottom), and `Ctrl-d`/`Ctrl-u` (half-page; a fixed step — the pure-render
+  `App` has no viewport height). Because `g` becomes the `gg` prefix in vim
+  mode, the generator overlay moves from `g` to `Ctrl-g`; non-vim mode is
+  unchanged (`g` opens the generator). Read by `vault-tui` directly (not relayed
+  to the agent). New `App` motions (`move_top`/`move_bottom`/`page_up`/
+  `page_down`, reusing the focus-aware re-masking `move_*` pattern) + a `gg`
+  prefix state machine. Completes the PRD §7.1 config registry. Tested in
+  `vault-config` (round-trip / reject / not-an-agent-flag) and `vault-tui` (jump
+  + clamp + empty-list no-op + the `gg` arm/take sequence).
+
 - **`ui.reduced_motion` config key (reserved).** Completes the PRD §7.1 config
   registry with the accessibility preference to suppress animated TUI elements.
   The TUI has no animations yet (it's fully event-driven — no spinner, no

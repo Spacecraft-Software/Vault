@@ -29,6 +29,7 @@ pub const KNOWN_KEYS: &[&str] = &[
     "agent.session_keyring",
     "sync.interval_secs",
     "ui.reduced_motion",
+    "tui.vim",
 ];
 
 /// Accepted values for `clipboard.backend`.
@@ -48,6 +49,8 @@ pub struct Config {
     pub sync: SyncCfg,
     /// TUI rendering preferences.
     pub ui: UiCfg,
+    /// TUI keymap preferences.
+    pub tui: TuiCfg,
     /// Registered account profile (written by `vault register`). Skipped from
     /// the file until something is set, so an unregistered config carries no
     /// empty `[account]` table.
@@ -98,6 +101,16 @@ pub struct UiCfg {
     /// accessibility. Reserved: the TUI has no animations yet, so this records
     /// the preference for when they land.
     pub reduced_motion: Option<bool>,
+}
+
+/// `[tui]` table — TUI-only keymap preferences (read by `vault-tui` directly,
+/// never relayed to the agent).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TuiCfg {
+    /// Enable vim-style jump motions (`gg`/`G`/`Ctrl-d`/`Ctrl-u`); the generator
+    /// overlay moves from `g` to `Ctrl-g` while on.
+    pub vim: Option<bool>,
 }
 
 /// `[account]` table — the registered account, written by `vault register`
@@ -162,6 +175,12 @@ impl Config {
         self.ui.reduced_motion
     }
 
+    /// Effective `tui.vim`, if set.
+    #[must_use]
+    pub const fn tui_vim(&self) -> Option<bool> {
+        self.tui.vim
+    }
+
     /// The registered account profile.
     #[must_use]
     pub const fn account(&self) -> &AccountCfg {
@@ -192,6 +211,7 @@ impl Config {
             "agent.session_keyring" => Ok(self.agent.session_keyring.map(|v| v.to_string())),
             "sync.interval_secs" => Ok(self.sync.interval_secs.map(|v| v.to_string())),
             "ui.reduced_motion" => Ok(self.ui.reduced_motion.map(|v| v.to_string())),
+            "tui.vim" => Ok(self.tui.vim.map(|v| v.to_string())),
             other => Err(other.to_owned()),
         }
     }
@@ -228,6 +248,10 @@ impl Config {
                 self.ui.reduced_motion = Some(parse_bool(key, raw)?);
                 Ok(())
             }
+            "tui.vim" => {
+                self.tui.vim = Some(parse_bool(key, raw)?);
+                Ok(())
+            }
             other => Err(unknown_key(other)),
         }
     }
@@ -261,6 +285,10 @@ impl Config {
             }
             "ui.reduced_motion" => {
                 self.ui.reduced_motion = None;
+                Ok(())
+            }
+            "tui.vim" => {
+                self.tui.vim = None;
                 Ok(())
             }
             other => Err(unknown_key(other)),
@@ -572,6 +600,24 @@ mod tests {
         assert!(c.set("ui.reduced_motion", "sometimes").is_err());
         c.unset("ui.reduced_motion").expect("unset");
         assert_eq!(c.reduced_motion(), None);
+    }
+
+    #[test]
+    fn tui_vim_round_trips_and_is_tui_only() {
+        let mut c = Config::default();
+        assert_eq!(c.tui_vim(), None);
+        c.set("tui.vim", "true").expect("set true");
+        assert_eq!(c.tui_vim(), Some(true));
+        assert!(
+            !agent_args(&c).contains(&OsString::from("--vim")),
+            "tui.vim must not become an agent flag"
+        );
+        let text = toml::to_string_pretty(&c).expect("serialise");
+        let back: Config = toml::from_str(&text).expect("parse");
+        assert_eq!(back.tui_vim(), Some(true));
+        assert!(c.set("tui.vim", "maybe").is_err());
+        c.unset("tui.vim").expect("unset");
+        assert_eq!(c.tui_vim(), None);
     }
 
     #[test]
