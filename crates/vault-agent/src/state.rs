@@ -43,7 +43,7 @@ pub struct Vault {
     pub protected_user_key: String,
     /// Account KDF parameters (for offline master-key derivation / re-persist).
     pub kdf: vault_core::kdf::KdfParams,
-    /// OAuth2 refresh token (decrypted, in memory) when one is available — from
+    /// `OAuth2` refresh token (decrypted, in memory) when one is available — from
     /// the login token on an online unlock, or decrypted from the cache on an
     /// offline/PIN unlock. Lets a token-less session go online via
     /// [`Vault::ensure_online`] and is persisted (encrypted) by `persist_cache`.

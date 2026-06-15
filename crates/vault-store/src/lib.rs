@@ -63,7 +63,7 @@ pub struct VaultCache {
     /// agent restart; reset to 0 on a correct PIN or a fresh enrollment.
     #[serde(default)]
     pub pin_failures: u32,
-    /// The OAuth2 refresh token encrypted under the user key (an `EncString`),
+    /// The `OAuth2` refresh token encrypted under the user key (an `EncString`),
     /// so a cache/PIN unlock can mint a live access token without the master
     /// password. `None` when none has been persisted.
     #[serde(default)]
