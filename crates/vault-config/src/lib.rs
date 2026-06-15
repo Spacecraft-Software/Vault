@@ -22,7 +22,11 @@ use serde::{Deserialize, Serialize};
 
 /// Every recognised config key, in display order. `config get` with no key
 /// lists exactly these; `set`/`get`/`unset` reject anything not here.
-pub const KNOWN_KEYS: &[&str] = &["clipboard.clear_secs", "agent.idle_lock_secs"];
+pub const KNOWN_KEYS: &[&str] = &[
+    "clipboard.clear_secs",
+    "agent.idle_lock_secs",
+    "agent.session_keyring",
+];
 
 /// The full user configuration. Every field is optional — absence means "use
 /// the consumer's own default" — so the on-disk file only carries what the
@@ -55,6 +59,10 @@ pub struct ClipboardCfg {
 pub struct AgentCfg {
     /// Idle-lock timeout in seconds; `0` disables auto-lock.
     pub idle_lock_secs: Option<u64>,
+    /// Resume an unlocked session across agent restarts via the Linux kernel
+    /// session keyring (opt-in; Linux-only). `true` passes `--session-keyring`
+    /// to the auto-spawned agent.
+    pub session_keyring: Option<bool>,
 }
 
 /// `[account]` table — the registered account, written by `vault register`
@@ -95,6 +103,12 @@ impl Config {
         self.agent.idle_lock_secs
     }
 
+    /// Effective `agent.session_keyring`, if set.
+    #[must_use]
+    pub const fn session_keyring(&self) -> Option<bool> {
+        self.agent.session_keyring
+    }
+
     /// The registered account profile.
     #[must_use]
     pub const fn account(&self) -> &AccountCfg {
@@ -121,6 +135,7 @@ impl Config {
         match key {
             "clipboard.clear_secs" => Ok(self.clipboard.clear_secs.map(|v| v.to_string())),
             "agent.idle_lock_secs" => Ok(self.agent.idle_lock_secs.map(|v| v.to_string())),
+            "agent.session_keyring" => Ok(self.agent.session_keyring.map(|v| v.to_string())),
             other => Err(other.to_owned()),
         }
     }
@@ -139,6 +154,10 @@ impl Config {
             }
             "agent.idle_lock_secs" => {
                 self.agent.idle_lock_secs = Some(parse_u64(key, raw)?);
+                Ok(())
+            }
+            "agent.session_keyring" => {
+                self.agent.session_keyring = Some(parse_bool(key, raw)?);
                 Ok(())
             }
             other => Err(unknown_key(other)),
@@ -160,6 +179,10 @@ impl Config {
                 self.agent.idle_lock_secs = None;
                 Ok(())
             }
+            "agent.session_keyring" => {
+                self.agent.session_keyring = None;
+                Ok(())
+            }
             other => Err(unknown_key(other)),
         }
     }
@@ -179,12 +202,26 @@ pub fn agent_args(cfg: &Config) -> Vec<OsString> {
         args.push(OsString::from("--idle-lock-secs"));
         args.push(OsString::from(secs.to_string()));
     }
+    // Boolean flag: present only when explicitly enabled.
+    if cfg.session_keyring() == Some(true) {
+        args.push(OsString::from("--session-keyring"));
+    }
     args
 }
 
 fn parse_u64(key: &str, raw: &str) -> Result<u64, String> {
     raw.parse::<u64>()
         .map_err(|_| format!("{key}: expected a non-negative integer, got '{raw}'"))
+}
+
+fn parse_bool(key: &str, raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(format!(
+            "{key}: expected a boolean (true/false), got '{raw}'"
+        )),
+    }
 }
 
 fn unknown_key(key: &str) -> String {
@@ -367,5 +404,34 @@ mod tests {
                 OsString::from("600"),
             ]
         );
+
+        // The boolean flag appears only when explicitly true.
+        c.set("agent.session_keyring", "true").expect("set");
+        assert!(agent_args(&c).contains(&OsString::from("--session-keyring")));
+        c.set("agent.session_keyring", "false").expect("set");
+        assert!(
+            !agent_args(&c).contains(&OsString::from("--session-keyring")),
+            "false must not emit the flag"
+        );
+    }
+
+    #[test]
+    fn session_keyring_round_trips() {
+        let mut c = Config::default();
+        assert_eq!(c.get("agent.session_keyring").unwrap(), None);
+        c.set("agent.session_keyring", "on").expect("set on");
+        assert_eq!(c.session_keyring(), Some(true));
+        assert_eq!(
+            c.get("agent.session_keyring").unwrap().as_deref(),
+            Some("true")
+        );
+        // Survives a toml round-trip.
+        let text = toml::to_string_pretty(&c).expect("serialise");
+        let back: Config = toml::from_str(&text).expect("parse");
+        assert_eq!(back.session_keyring(), Some(true));
+        // Unset clears it; a non-boolean is rejected.
+        c.unset("agent.session_keyring").expect("unset");
+        assert_eq!(c.session_keyring(), None);
+        assert!(c.set("agent.session_keyring", "maybe").is_err());
     }
 }

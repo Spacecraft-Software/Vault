@@ -22,6 +22,7 @@ use vault_ipc::default_socket_path;
 #[cfg(feature = "clipboard")]
 mod clipboard;
 mod server;
+mod session;
 mod state;
 mod unlock;
 
@@ -65,6 +66,11 @@ struct Args {
     /// build without clipboard support.
     #[arg(long)]
     clipboard_clear_secs: Option<u64>,
+    /// Mirror the user key into the Linux kernel session keyring on unlock so a
+    /// restarted agent resumes without the master password, within the
+    /// idle-lock TTL (opt-in; PRD §7.3 carve-out). No effect on non-Linux.
+    #[arg(long)]
+    session_keyring: bool,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -82,6 +88,11 @@ async fn main() -> anyhow::Result<()> {
     };
     #[cfg(not(feature = "clipboard"))]
     let agent = AgentState::new(args.idle_lock_secs);
+    let mut agent = agent;
+    agent.session_keyring = args.session_keyring;
+    // Opt-in: resume an unlocked session left in the kernel keyring by a prior
+    // agent (e.g. after a crash / restart), within its idle-lock deadline.
+    try_resume(&mut agent);
     let state = Arc::new(Mutex::new(agent));
 
     if args.idle_lock_secs > 0 {
@@ -115,6 +126,40 @@ async fn main() -> anyhow::Result<()> {
 fn resolve_clear_secs(flag: Option<u64>, env: Option<&str>) -> u64 {
     flag.or_else(|| env.and_then(|v| v.parse().ok()))
         .unwrap_or(30)
+}
+
+/// Opt-in session resume: if a prior agent left an unlocked session in the
+/// kernel keyring and it hasn't passed its idle-lock deadline, rebuild the
+/// vault from it + the on-disk cache so the agent comes up unlocked. Any
+/// failure (disabled, no entry, expired, missing cache) leaves it locked.
+fn try_resume(agent: &mut AgentState) {
+    if !agent.session_keyring {
+        return;
+    }
+    let Some(blob) = session::load() else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    // deadline_unix == 0 means "no expiry" (idle-lock disabled).
+    if blob.deadline_unix != 0 && now >= blob.deadline_unix {
+        session::clear();
+        return;
+    }
+    let Some(cache) = unlock::load_cache(&blob.server, &blob.email) else {
+        return;
+    };
+    let user_enc = zeroize::Zeroizing::new(blob.user_enc);
+    let user_mac = zeroize::Zeroizing::new(blob.user_mac);
+    match unlock::vault_from_user_key(&cache, &blob.server, &blob.email, user_enc, user_mac) {
+        Ok(vault) => {
+            agent.vault = Some(vault);
+            agent.touch();
+            eprintln!("vault-agent: resumed session from kernel keyring");
+        }
+        Err(e) => eprintln!("vault-agent: keyring resume failed: {e}"),
+    }
 }
 
 fn pick_socket(cli: Option<PathBuf>) -> anyhow::Result<PathBuf> {

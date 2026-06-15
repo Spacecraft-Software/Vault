@@ -98,6 +98,7 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
                 Ok(vault) => {
                     let mut s = state.lock().await;
                     s.vault = Some(vault);
+                    s.persist_session();
                     s.touch();
                     Response::Ok
                 }
@@ -112,6 +113,7 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
                 Ok(vault) => {
                     let mut s = state.lock().await;
                     s.vault = Some(vault);
+                    s.persist_session();
                     s.touch();
                     Response::Ok
                 }
@@ -149,7 +151,8 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
         }
         Request::Lock => {
             let mut s = state.lock().await;
-            s.lock();
+            // Explicit lock: also forget any persisted keyring session.
+            s.lock_and_clear_session();
             s.touch();
             Response::Ok
         }
@@ -367,7 +370,8 @@ pub async fn idle_lock_loop(state: Arc<Mutex<AgentState>>) {
         sleep(Duration::from_secs(15)).await;
         let mut s = state.lock().await;
         if s.idle_lock_due() {
-            s.lock();
+            // Idle-lock is a security event: forget the keyring session too.
+            s.lock_and_clear_session();
             eprintln!("vault-agent: idle-lock triggered");
         }
         if s.shutdown_requested {

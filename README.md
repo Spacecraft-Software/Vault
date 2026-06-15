@@ -111,6 +111,26 @@ The key is protected at rest by filesystem permissions (`0600`) only: it must
 be usable *before* the vault is unlocked, so it can't be encrypted under your
 key — the same trust level as the stored refresh token or an SSH private key.
 
+### Stay unlocked across restarts (Linux, opt-in)
+
+By default the agent holds the key only in its own memory, so any restart
+(crash, `stop-agent`, logout) means a fresh unlock. On Linux you can opt into
+resuming a session across an agent restart:
+
+```sh
+vault config set agent.session_keyring true
+```
+
+With this on, an unlock also mirrors the key into the Linux **kernel session
+keyring** (kernel memory, never on disk, never swapped, evicted on logout). A
+restarted agent reads it back and comes up unlocked — but only within the
+idle-lock window (`agent.idle_lock_secs`): the keyring entry self-expires, so a
+dead agent's session doesn't linger. An explicit `vault lock` (or idle-lock)
+forgets it and forces a full unlock; a plain `stop-agent`/`SIGTERM` leaves it so
+the next auto-spawn resumes. This is an opt-in relaxation of Vault's "key never
+leaves the agent" posture (PRD §7.3); it's off by default and a no-op on
+non-Linux.
+
 ## Configuration
 
 Persistent settings live at `$XDG_CONFIG_HOME/vault/config.toml`, managed with
@@ -123,8 +143,9 @@ vault config set agent.idle_lock_secs 600
 vault config unset clipboard.clear_secs
 ```
 
-Recognised keys: `clipboard.clear_secs` (auto-clear window, `0` disables) and
-`agent.idle_lock_secs` (idle-lock timeout, `0` disables). When the CLI
+Recognised keys: `clipboard.clear_secs` (auto-clear window, `0` disables),
+`agent.idle_lock_secs` (idle-lock timeout, `0` disables), and
+`agent.session_keyring` (resume across restarts; see above). When the CLI
 auto-starts the agent, these populate its launch flags. Wipe the on-disk item
 cache (and drop a running agent's keys) with `vault purge`.
 

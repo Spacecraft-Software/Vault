@@ -32,6 +32,7 @@ clipboard = ["dep:arboard"]
 anyhow = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 zeroize = { workspace = true }
 uuid = { workspace = true }
@@ -42,6 +43,11 @@ vault-core = { path = "../vault-core" }
 vault-ipc = { path = "../vault-ipc" }
 vault-store = { path = "../vault-store" }
 vault-api = { path = "../vault-api" }
+
+# Linux kernel session keyring — backs the opt-in `agent.session_keyring`
+# session-resume feature. Pure Rust (no libkeyutils C dep). Linux-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-keyutils = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
