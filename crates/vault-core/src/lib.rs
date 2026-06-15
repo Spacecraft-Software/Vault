@@ -14,6 +14,7 @@ pub mod export;
 pub mod generate;
 pub mod kdf;
 pub mod login;
+pub mod totp;
 
 pub use cipher::{Cipher, DecryptOptions, Login, PlainCipher, decrypt_user_key};
 pub use enc_string::EncString;
