@@ -77,6 +77,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         InputMode::Generate => render_generator(frame, app, body),
         InputMode::Form => render_form(frame, app, body),
         InputMode::ConfirmDelete => render_confirm(frame, app, body),
+        InputMode::About => render_about(frame, body),
         InputMode::Normal | InputMode::Search | InputMode::Command | InputMode::Unlock => {}
     }
     render_status_bar(frame, app, status_bar);
@@ -310,6 +311,49 @@ const fn onoff(b: bool) -> &'static str {
     if b { "on" } else { "off" }
 }
 
+/// Centered read-only About overlay (Standard §13.2), drawn over the browser.
+/// Renders from `crate::PKG_VERSION` + `crate::ATTRIBUTION` so it can't drift
+/// from `vault-tui --version`.
+fn render_about(frame: &mut Frame, area: Rect) {
+    let amber = hex(steelbore::MOLTEN_AMBER);
+    let steel = hex(steelbore::STEEL_BLUE);
+    let info = hex(steelbore::INFO);
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Vault v{}", crate::PKG_VERSION),
+            Style::default().fg(amber).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    lines.extend(
+        crate::ATTRIBUTION
+            .lines()
+            .map(|l| Line::from(Span::styled(l.to_owned(), Style::default().fg(info)))),
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Esc close",
+        Style::default().fg(steel).add_modifier(Modifier::ITALIC),
+    )));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(amber))
+        .title(" About ")
+        .style(Style::default().bg(hex(steelbore::VOID_NAVY)));
+    // Wider/taller than the generator overlay so the long §13.2 lines fit
+    // without clipping the URL or hint.
+    let overlay = centered(area, 80, 60);
+    frame.render_widget(ratatui::widgets::Clear, overlay);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(block),
+        overlay,
+    );
+}
+
 /// Centered add/edit form overlay, drawn over the browser.
 fn render_form(frame: &mut Frame, app: &App, area: Rect) {
     let Some(form) = app.form.as_ref() else {
@@ -450,7 +494,8 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         | InputMode::Generate
         | InputMode::Form
         | InputMode::ConfirmDelete
-        | InputMode::Unlock => None,
+        | InputMode::Unlock
+        | InputMode::About => None,
     };
     if let Some(input) = editing {
         spans.push(Span::styled(
@@ -769,5 +814,29 @@ mod tests {
         assert!(text.contains("Generate"), "overlay title missing:\n{text}");
         assert!(text.contains(&pw), "generated password missing:\n{text}");
         assert!(text.contains("Length 20"), "options line missing:\n{text}");
+    }
+
+    #[test]
+    fn about_overlay_renders_attribution() {
+        let mut app = App::browsing(status(), vec![login_entry()]);
+        app.open_about();
+        let text = draw(&app);
+        assert!(text.contains("About"), "overlay title missing:\n{text}");
+        assert!(
+            text.contains(&format!("v{}", crate::PKG_VERSION)),
+            "version missing:\n{text}"
+        );
+        assert!(
+            text.contains("Mohamed Hammad"),
+            "maintainer missing:\n{text}"
+        );
+        assert!(
+            text.contains("GPL-3.0-or-later"),
+            "license missing:\n{text}"
+        );
+        assert!(
+            text.contains("SpacecraftSoftware.org"),
+            "URL missing:\n{text}"
+        );
     }
 }

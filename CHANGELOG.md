@@ -10,6 +10,16 @@ range may break in any release.
 
 ### Added
 
+- **TUI About overlay.** `vault-tui` gains a read-only About screen (open with
+  `?` or `:about`, dismiss with `Esc`/`q`) showing the version, maintainer,
+  copyright/license, and canonical URL — rendered from the same
+  `ATTRIBUTION`/`PKG_VERSION` constants as `vault-tui --version`, so it can't
+  drift. This was the last unfilled v0.1 success criterion that the Standard
+  §13.2 block appears "in `--version`, `--help`, README, **and the TUI About
+  screen**" (PRD §14). New `InputMode::About` + `render_about` (modeled on the
+  generator overlay); a `TestBackend` test asserts the §13.2 content reaches the
+  screen.
+
 - **`clipboard.backend` selection.** New config key choosing how the TUI's copy
   keys reach a clipboard: `auto` (default — native `arboard`, else the TUI falls
   back to OSC52), `arboard` (force native; warns if unavailable), or `osc52`
