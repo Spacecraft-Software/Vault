@@ -77,7 +77,7 @@ pub async fn spawn_and_connect(socket: &Path) -> Result<UnixStream, String> {
     // env/default precedence. A manually launched agent is unaffected. A
     // malformed config shouldn't block bringing the agent up, so fall back to
     // no extra args (the agent then keeps its defaults).
-    let extra = crate::config::load().map(|c| crate::config::agent_args(&c));
+    let extra = vault_config::load().map(|c| vault_config::agent_args(&c));
     if let Err(msg) = &extra {
         eprintln!("vault: ignoring config for auto-spawn: {msg}");
     }
