@@ -547,6 +547,9 @@ impl AgentState {
             password: bytes_to_string(w.password)?,
             totp: bytes_to_string(w.totp)?,
             primary_uri: w.uri,
+            // add/edit build logins only; card/identity aren't created here.
+            card: None,
+            identity: None,
         };
         let mut cipher = Cipher::from_plain(&plain, &v.user_enc, &v.user_mac);
         v.ensure_online().await?;
@@ -689,6 +692,19 @@ impl AgentState {
                 primary_uri: true,
                 ..DecryptOptions::default()
             },
+            Field::CardNumber | Field::CardBrand | Field::CardExpiry | Field::CardCode => {
+                DecryptOptions {
+                    card: true,
+                    ..DecryptOptions::default()
+                }
+            }
+            Field::IdentityName
+            | Field::IdentityEmail
+            | Field::IdentityPhone
+            | Field::IdentityAddress => DecryptOptions {
+                identity: true,
+                ..DecryptOptions::default()
+            },
         };
         let plain = cipher
             .decrypt(&v.user_enc, &v.user_mac, opts)
@@ -707,6 +723,14 @@ impl AgentState {
             },
             Field::Notes => plain.notes.clone(),
             Field::Uri => plain.primary_uri.clone(),
+            Field::CardNumber => plain.card.as_ref().and_then(|c| c.number.clone()),
+            Field::CardBrand => plain.card.as_ref().and_then(|c| c.brand.clone()),
+            Field::CardCode => plain.card.as_ref().and_then(|c| c.code.clone()),
+            Field::CardExpiry => plain.card.as_ref().and_then(card_expiry),
+            Field::IdentityName => plain.identity.as_ref().and_then(identity_name),
+            Field::IdentityEmail => plain.identity.as_ref().and_then(|i| i.email.clone()),
+            Field::IdentityPhone => plain.identity.as_ref().and_then(|i| i.phone.clone()),
+            Field::IdentityAddress => plain.identity.as_ref().and_then(identity_address),
         };
         let value = value.ok_or_else(|| IpcError::NoSuchField {
             item: name.clone(),
@@ -789,6 +813,68 @@ impl AgentState {
 #[cfg(feature = "clipboard")]
 fn should_clear_clipboard(current: Option<&str>, written: &str) -> bool {
     current.is_none_or(|c| c == written)
+}
+
+/// Compose a card's expiry as `MM/YYYY` (month zero-padded), `None` if neither
+/// month nor year is present.
+fn card_expiry(c: &vault_core::cipher::PlainCard) -> Option<String> {
+    match (c.exp_month.as_deref(), c.exp_year.as_deref()) {
+        (None, None) => None,
+        (month, year) => {
+            let m = month.unwrap_or_default();
+            let mm = if m.len() == 1 {
+                format!("0{m}")
+            } else {
+                m.to_owned()
+            };
+            Some(format!("{mm}/{}", year.unwrap_or_default()))
+        }
+    }
+}
+
+/// Join an identity's first/middle/last names with spaces, `None` if all empty.
+fn identity_name(i: &vault_core::cipher::PlainIdentity) -> Option<String> {
+    let parts: Vec<&str> = [
+        i.first_name.as_deref(),
+        i.middle_name.as_deref(),
+        i.last_name.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|s| !s.is_empty())
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+/// Compose an identity's address: street lines, then `City State Postal`, then
+/// country — each non-empty part on its own line. `None` if nothing is set.
+fn identity_address(i: &vault_core::cipher::PlainIdentity) -> Option<String> {
+    let mut lines: Vec<String> = [
+        i.address1.as_deref(),
+        i.address2.as_deref(),
+        i.address3.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|s| !s.is_empty())
+    .map(str::to_owned)
+    .collect();
+    let csp: Vec<&str> = [
+        i.city.as_deref(),
+        i.state.as_deref(),
+        i.postal_code.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|s| !s.is_empty())
+    .collect();
+    if !csp.is_empty() {
+        lines.push(csp.join(" "));
+    }
+    if let Some(country) = i.country.as_deref().filter(|s| !s.is_empty()) {
+        lines.push(country.to_owned());
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// Decode an optional secret byte buffer into a `String`, zeroising the bytes
@@ -1163,6 +1249,46 @@ mod tests {
         // A field the cipher lacks still surfaces as NoSuchField.
         assert!(matches!(
             s.get_item(Some("totp-1"), "github", Field::Username),
+            Err(IpcError::NoSuchField { .. })
+        ));
+    }
+
+    #[test]
+    fn get_item_card_fields() {
+        let enc = [7u8; 32];
+        let mac = [9u8; 32];
+        let mut v = stub_vault();
+        v.user_enc = Zeroizing::new(enc);
+        v.user_mac = Zeroizing::new(mac);
+        let e =
+            |s: &str| Some(vault_core::EncString::encrypt(&enc, &mac, s.as_bytes()).serialize());
+        v.ciphers.push(Cipher {
+            id: "card-1".into(),
+            cipher_type: 3,
+            name: Some(vault_core::EncString::encrypt(&enc, &mac, b"Visa").serialize()),
+            card: Some(vault_core::cipher::Card {
+                number: e("4111111111111111"),
+                exp_month: e("4"),
+                exp_year: e("2030"),
+                code: e("123"),
+                ..vault_core::cipher::Card::default()
+            }),
+            ..Cipher::default()
+        });
+        let mut s = AgentState::new(900);
+        s.vault = Some(v);
+
+        let num = s
+            .get_item(Some("card-1"), "Visa", Field::CardNumber)
+            .unwrap();
+        assert_eq!(num.value, "4111111111111111");
+        let exp = s
+            .get_item(Some("card-1"), "Visa", Field::CardExpiry)
+            .unwrap();
+        assert_eq!(exp.value, "04/2030", "month zero-padded, joined with year");
+        // No brand set → NoSuchField.
+        assert!(matches!(
+            s.get_item(Some("card-1"), "Visa", Field::CardBrand),
             Err(IpcError::NoSuchField { .. })
         ));
     }

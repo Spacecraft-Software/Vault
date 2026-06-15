@@ -416,6 +416,14 @@ enum FieldArg {
     Totp,
     Notes,
     Uri,
+    CardNumber,
+    CardBrand,
+    CardExpiry,
+    CardCode,
+    IdentityName,
+    IdentityEmail,
+    IdentityPhone,
+    IdentityAddress,
 }
 
 impl From<FieldArg> for Field {
@@ -426,6 +434,14 @@ impl From<FieldArg> for Field {
             FieldArg::Totp => Self::Totp,
             FieldArg::Notes => Self::Notes,
             FieldArg::Uri => Self::Uri,
+            FieldArg::CardNumber => Self::CardNumber,
+            FieldArg::CardBrand => Self::CardBrand,
+            FieldArg::CardExpiry => Self::CardExpiry,
+            FieldArg::CardCode => Self::CardCode,
+            FieldArg::IdentityName => Self::IdentityName,
+            FieldArg::IdentityEmail => Self::IdentityEmail,
+            FieldArg::IdentityPhone => Self::IdentityPhone,
+            FieldArg::IdentityAddress => Self::IdentityAddress,
         }
     }
 }

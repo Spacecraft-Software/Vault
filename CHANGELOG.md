@@ -10,6 +10,19 @@ range may break in any release.
 
 ### Added
 
+- **Card & identity cipher types (read, CLI).** `vault-core` now models card
+  (type 3) and identity (type 4) ciphers — full field sets, decrypted into
+  `PlainCard`/`PlainIdentity` (sensitive fields zeroized on drop) via new
+  `DecryptOptions { card, identity }`. New `Field` selectors —
+  `card-number`/`card-brand`/`card-expiry`/`card-code` and
+  `identity-name`/`identity-email`/`identity-phone`/`identity-address` — make
+  them readable: `vault get <item> --field card-number`. The agent composes the
+  derived ones (`card-expiry` → `MM/YYYY`; `identity-name`/`-address` joined).
+  Rendering them in the TUI detail pane is the next slice (the list path only
+  carries name/username today). Tests: vault-core card/identity decrypt;
+  vault-agent `get_item` card-number/expiry + `NoSuchField`; vault-ipc `Field`
+  round-trip. No new deps.
+
 - **Live TOTP codes from login ciphers.** A login's stored `totp` field (an
   `otpauth://totp/…` URI or a bare base32 secret) now yields the **current RFC
   6238 code** rather than the raw secret: `vault get <item> --field totp` prints

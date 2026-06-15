@@ -410,6 +410,22 @@ pub enum Field {
     Notes,
     /// First `Login.Uris[].Uri`.
     Uri,
+    /// `Card.Number`.
+    CardNumber,
+    /// `Card.Brand`.
+    CardBrand,
+    /// `Card.ExpMonth`/`Card.ExpYear` composed as `MM/YYYY`.
+    CardExpiry,
+    /// `Card.Code` (CVV/CVC).
+    CardCode,
+    /// `Identity` first/middle/last name, space-joined.
+    IdentityName,
+    /// `Identity.Email`.
+    IdentityEmail,
+    /// `Identity.Phone`.
+    IdentityPhone,
+    /// `Identity` address lines + city/state/postal/country.
+    IdentityAddress,
 }
 
 /// Re-export the full cipher payload from `vault-core` when needed.

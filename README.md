@@ -81,6 +81,19 @@ In the TUI, press `t` to copy the current code for the selected item. Standard
 authenticator secrets are supported (`otpauth://totp/…` URIs or a bare base32
 secret; SHA1/SHA256/SHA512).
 
+### Cards & identities
+
+Card (type 3) and identity (type 4) ciphers are readable from the CLI via
+`--field`:
+
+```sh
+vault get visa --field card-number     # also: card-brand, card-expiry, card-code
+vault get me   --field identity-email  # also: identity-name, identity-phone, identity-address
+```
+
+Rendering these in the TUI detail pane is coming next; for now the TUI shows the
+item name/type and copies login fields.
+
 ### PIN unlock
 
 For quick access without re-typing the master password, enroll a PIN (after an

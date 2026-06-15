@@ -281,6 +281,21 @@ async fn get_request_defaults_to_password() {
 }
 
 #[tokio::test]
+async fn get_request_round_trips_card_field() {
+    let (mut a, mut b) = duplex(8 * 1024);
+    let req = Request::Get {
+        id: Some("card-1".into()),
+        name: "Visa".into(),
+        field: Some(Field::CardNumber),
+    };
+    write_frame(&mut a, &req).await.unwrap();
+    match read_frame::<_, Request>(&mut b).await.unwrap() {
+        Request::Get { field, .. } => assert_eq!(field, Some(Field::CardNumber)),
+        other => panic!("expected Get, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn oversized_length_prefix_is_rejected() {
     // Forge a frame whose declared length exceeds MAX_FRAME — read_frame
     // must reject without allocating gigabytes.
