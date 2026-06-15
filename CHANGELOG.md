@@ -10,6 +10,21 @@ range may break in any release.
 
 ### Added
 
+- **`clipboard.backend` selection.** New config key choosing how the TUI's copy
+  keys reach a clipboard: `auto` (default — native `arboard`, else the TUI falls
+  back to OSC52), `arboard` (force native; warns if unavailable), or `osc52`
+  (the agent declines so the TUI copies through the terminal via an OSC52
+  escape — for SSH/tmux, so copies land on the *local* machine). The agent
+  can't emit OSC52 itself (no terminal); `osc52` just makes it step aside for
+  the TUI's existing client-side path.
+  - `clipboard::BackendChoice` + `select()` (wrapping the existing `detect()`);
+    a `--clipboard-backend` flag (defined unconditionally so a headless agent
+    accepts it as a no-op) flowing from the config like the other keys.
+    `vault status` reports `osc52` even with no native backend held.
+  - Tests: `vault-config` validation/round-trip + `agent_args` emission;
+    `BackendChoice` `as_str`/default, `select(osc52)` is `None` (CI-safe), and a
+    `Status` test for the `osc52`-mode label.
+
 - **Scheduled background sync.** New `sync.interval_secs` config key: while
   unlocked, the agent re-pulls `/sync` on that cadence (a `tokio` interval task,
   `server::scheduled_sync_loop`), refreshing the in-memory vault and the

@@ -145,6 +145,7 @@ vault config unset clipboard.clear_secs
 ```
 
 Recognised keys: `clipboard.clear_secs` (auto-clear window, `0` disables),
+`clipboard.backend` (`auto`/`arboard`/`osc52`; see below),
 `agent.idle_lock_secs` (idle-lock timeout, `0` disables),
 `agent.session_keyring` (resume across restarts; see above), and
 `sync.interval_secs` (background `/sync` interval while unlocked, `0` disables).
@@ -156,6 +157,18 @@ With `sync.interval_secs` set, the agent re-pulls `/sync` on that cadence while
 unlocked — keeping the in-memory vault and offline cache fresh without a manual
 `vault sync`. It's best-effort (a locked, offline, or failed sync is skipped)
 and never defers the idle-lock countdown.
+
+`clipboard.backend` picks how the TUI's copy keys reach a clipboard:
+
+- `auto` (default) — the agent uses its native backend (`arboard`: Wayland /
+  X11 / macOS); if none is reachable it declines and the TUI falls back to
+  OSC52.
+- `arboard` — force the native backend (warns if unavailable).
+- `osc52` — the agent never copies; the TUI writes to the clipboard through the
+  terminal via an OSC52 escape. Use this **over SSH/tmux** so copies land on
+  your *local* machine (needs a terminal that supports OSC52; inside tmux,
+  `set-clipboard on`). The agent itself can't emit OSC52 — it's a daemon with no
+  terminal — so this just makes it step aside for the TUI.
 
 ## Repository layout
 

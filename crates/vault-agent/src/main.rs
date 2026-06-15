@@ -75,6 +75,23 @@ struct Args {
     /// the cache fresh without a manual `vault sync`.
     #[arg(long, default_value_t = 0)]
     sync_interval_secs: u64,
+    /// Which clipboard backend to use: `auto` (detect native, else the client
+    /// falls back to OSC52), `arboard` (force native), or `osc52` (decline so
+    /// the client copies via the terminal — for SSH). No effect on a build
+    /// without clipboard support (it has no clipboard regardless).
+    #[arg(long, value_enum, default_value_t = ClipboardBackendArg::Auto)]
+    clipboard_backend: ClipboardBackendArg,
+}
+
+/// CLI spelling of [`clipboard::BackendChoice`]. Defined unconditionally so a
+/// headless agent still accepts `--clipboard-backend` from the config-derived
+/// auto-spawn flags (it's a no-op there).
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
+enum ClipboardBackendArg {
+    #[default]
+    Auto,
+    Arboard,
+    Osc52,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -88,6 +105,13 @@ async fn main() -> anyhow::Result<()> {
             args.clipboard_clear_secs,
             std::env::var("VAULT_CLIPBOARD_CLEAR_SECS").ok().as_deref(),
         );
+        let choice = match args.clipboard_backend {
+            ClipboardBackendArg::Auto => clipboard::BackendChoice::Auto,
+            ClipboardBackendArg::Arboard => clipboard::BackendChoice::Arboard,
+            ClipboardBackendArg::Osc52 => clipboard::BackendChoice::Osc52,
+        };
+        a.clipboard_backend = choice;
+        a.clipboard = clipboard::select(choice);
         a
     };
     #[cfg(not(feature = "clipboard"))]

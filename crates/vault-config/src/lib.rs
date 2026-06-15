@@ -24,10 +24,14 @@ use serde::{Deserialize, Serialize};
 /// lists exactly these; `set`/`get`/`unset` reject anything not here.
 pub const KNOWN_KEYS: &[&str] = &[
     "clipboard.clear_secs",
+    "clipboard.backend",
     "agent.idle_lock_secs",
     "agent.session_keyring",
     "sync.interval_secs",
 ];
+
+/// Accepted values for `clipboard.backend`.
+pub const CLIPBOARD_BACKENDS: &[&str] = &["auto", "arboard", "osc52"];
 
 /// The full user configuration. Every field is optional — absence means "use
 /// the consumer's own default" — so the on-disk file only carries what the
@@ -54,6 +58,11 @@ pub struct Config {
 pub struct ClipboardCfg {
     /// Seconds before a copied secret is auto-cleared; `0` disables.
     pub clear_secs: Option<u64>,
+    /// Which clipboard backend the agent uses: `auto` (detect native, else the
+    /// client falls back to OSC52), `arboard` (force the native backend), or
+    /// `osc52` (agent declines so the TUI copies via the terminal — for SSH).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 /// `[agent]` table.
@@ -109,6 +118,12 @@ impl Config {
         self.clipboard.clear_secs
     }
 
+    /// Effective `clipboard.backend` (`auto`/`arboard`/`osc52`), if set.
+    #[must_use]
+    pub fn clipboard_backend(&self) -> Option<&str> {
+        self.clipboard.backend.as_deref()
+    }
+
     /// Effective `agent.idle_lock_secs`, if set.
     #[must_use]
     pub const fn idle_lock_secs(&self) -> Option<u64> {
@@ -152,6 +167,7 @@ impl Config {
     pub fn get(&self, key: &str) -> Result<Option<String>, String> {
         match key {
             "clipboard.clear_secs" => Ok(self.clipboard.clear_secs.map(|v| v.to_string())),
+            "clipboard.backend" => Ok(self.clipboard.backend.clone()),
             "agent.idle_lock_secs" => Ok(self.agent.idle_lock_secs.map(|v| v.to_string())),
             "agent.session_keyring" => Ok(self.agent.session_keyring.map(|v| v.to_string())),
             "sync.interval_secs" => Ok(self.sync.interval_secs.map(|v| v.to_string())),
@@ -169,6 +185,10 @@ impl Config {
         match key {
             "clipboard.clear_secs" => {
                 self.clipboard.clear_secs = Some(parse_u64(key, raw)?);
+                Ok(())
+            }
+            "clipboard.backend" => {
+                self.clipboard.backend = Some(parse_clipboard_backend(raw)?);
                 Ok(())
             }
             "agent.idle_lock_secs" => {
@@ -198,6 +218,10 @@ impl Config {
                 self.clipboard.clear_secs = None;
                 Ok(())
             }
+            "clipboard.backend" => {
+                self.clipboard.backend = None;
+                Ok(())
+            }
             "agent.idle_lock_secs" => {
                 self.agent.idle_lock_secs = None;
                 Ok(())
@@ -225,6 +249,10 @@ pub fn agent_args(cfg: &Config) -> Vec<OsString> {
         args.push(OsString::from("--clipboard-clear-secs"));
         args.push(OsString::from(secs.to_string()));
     }
+    if let Some(backend) = cfg.clipboard_backend() {
+        args.push(OsString::from("--clipboard-backend"));
+        args.push(OsString::from(backend));
+    }
     if let Some(secs) = cfg.idle_lock_secs() {
         args.push(OsString::from("--idle-lock-secs"));
         args.push(OsString::from(secs.to_string()));
@@ -243,6 +271,18 @@ pub fn agent_args(cfg: &Config) -> Vec<OsString> {
 fn parse_u64(key: &str, raw: &str) -> Result<u64, String> {
     raw.parse::<u64>()
         .map_err(|_| format!("{key}: expected a non-negative integer, got '{raw}'"))
+}
+
+fn parse_clipboard_backend(raw: &str) -> Result<String, String> {
+    let v = raw.trim().to_ascii_lowercase();
+    if CLIPBOARD_BACKENDS.contains(&v.as_str()) {
+        Ok(v)
+    } else {
+        Err(format!(
+            "clipboard.backend: expected one of {}, got '{raw}'",
+            CLIPBOARD_BACKENDS.join("/")
+        ))
+    }
 }
 
 fn parse_bool(key: &str, raw: &str) -> Result<bool, String> {
@@ -365,9 +405,16 @@ mod tests {
     #[test]
     fn known_keys_are_all_reachable_by_get_set_unset() {
         for key in KNOWN_KEYS {
+            // A value valid for the key's type ("1" works for the integer /
+            // boolean keys; the enum key needs one of its variants).
+            let val = if *key == "clipboard.backend" {
+                "auto"
+            } else {
+                "1"
+            };
             let mut c = Config::default();
             assert!(c.get(key).is_ok(), "get missing {key}");
-            assert!(c.set(key, "1").is_ok(), "set missing {key}");
+            assert!(c.set(key, val).is_ok(), "set missing {key}");
             assert!(c.unset(key).is_ok(), "unset missing {key}");
         }
     }
@@ -453,6 +500,28 @@ mod tests {
             .position(|a| a == &OsString::from("--sync-interval-secs"))
             .expect("flag present");
         assert_eq!(args[i + 1], OsString::from("300"));
+    }
+
+    #[test]
+    fn clipboard_backend_validates_and_round_trips() {
+        let mut c = Config::default();
+        assert_eq!(c.clipboard_backend(), None);
+        for v in ["auto", "arboard", "osc52", "OSC52"] {
+            c.set("clipboard.backend", v).expect("valid backend");
+        }
+        assert_eq!(c.clipboard_backend(), Some("osc52")); // lower-cased
+        assert!(
+            agent_args(&c).contains(&OsString::from("--clipboard-backend")),
+            "set backend must emit the flag"
+        );
+        // Survives a toml round-trip.
+        let text = toml::to_string_pretty(&c).expect("serialise");
+        let back: Config = toml::from_str(&text).expect("parse");
+        assert_eq!(back.clipboard_backend(), Some("osc52"));
+        // Invalid value rejected; unset clears.
+        assert!(c.set("clipboard.backend", "xclip").is_err());
+        c.unset("clipboard.backend").expect("unset");
+        assert_eq!(c.clipboard_backend(), None);
     }
 
     #[test]
