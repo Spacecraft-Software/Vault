@@ -341,6 +341,40 @@ pub struct FolderItem {
 }
 
 /// A secret currently shown in the detail pane: which item and field it
+/// Cached non-sensitive display fields for the selected card/identity item,
+/// fetched on selection. Sensitive fields (card number/CVV) are *not* here —
+/// they stay masked and are fetched only via reveal, like passwords.
+#[derive(Clone, Debug, Default)]
+pub struct DetailView {
+    /// Id of the item these fields belong to (cache key).
+    pub id: String,
+    /// Ordered `(label, value)` pairs to show in the detail pane.
+    pub lines: Vec<(String, String)>,
+}
+
+/// The field `Space` reveals for a cipher type: a login's password or a card's
+/// number. Identity and secure-note items have no masked secret (`None`).
+#[must_use]
+pub const fn primary_secret_field(cipher_type: u8) -> Option<Field> {
+    match cipher_type {
+        1 => Some(Field::Password),
+        3 => Some(Field::CardNumber),
+        _ => None,
+    }
+}
+
+/// The field `c` copies for a cipher type, with its toast label: a login's
+/// password, a card's number, or an identity's email.
+#[must_use]
+pub const fn primary_copy_field(cipher_type: u8) -> Option<(Field, &'static str)> {
+    match cipher_type {
+        1 => Some((Field::Password, "password")),
+        3 => Some((Field::CardNumber, "card number")),
+        4 => Some((Field::IdentityEmail, "email")),
+        _ => None,
+    }
+}
+
 /// belongs to, plus the plaintext. The value is zeroised on drop and never
 /// surfaced by `Debug`, so an `App` dump can't leak it.
 #[derive(Clone)]
@@ -776,6 +810,9 @@ pub struct App {
     pub confirm_delete: Option<(String, String)>,
     /// Secret currently revealed in the detail pane, if any.
     pub revealed: Option<RevealedSecret>,
+    /// Cached non-sensitive fields for the selected card/identity, `Some` while
+    /// such an item is selected (populated on select; `None` for logins/notes).
+    pub detail: Option<DetailView>,
     /// When a pending OSC52 fallback copy should be cleared from the terminal
     /// clipboard. The TUI owns this timer (the agent can't — it has no
     /// terminal); the run loop races it against input.
@@ -819,6 +856,7 @@ impl App {
             form: None,
             confirm_delete: None,
             revealed: None,
+            detail: None,
             osc52_clear_at: None,
             toast: None,
             unlock: None,
@@ -855,6 +893,7 @@ impl App {
             form: None,
             confirm_delete: None,
             revealed: None,
+            detail: None,
             osc52_clear_at: None,
             toast: None,
             unlock: None,
@@ -1938,6 +1977,22 @@ mod tests {
         app.cancel_command();
         assert_eq!(app.mode, InputMode::Normal);
         assert!(app.command.is_empty());
+    }
+
+    #[test]
+    fn primary_fields_by_cipher_type() {
+        use super::{Field, primary_copy_field, primary_secret_field};
+        assert_eq!(primary_secret_field(1), Some(Field::Password));
+        assert_eq!(primary_secret_field(3), Some(Field::CardNumber));
+        assert_eq!(primary_secret_field(4), None); // identity: no masked secret
+        assert_eq!(primary_secret_field(2), None); // secure note
+        assert_eq!(primary_copy_field(1), Some((Field::Password, "password")));
+        assert_eq!(
+            primary_copy_field(3),
+            Some((Field::CardNumber, "card number"))
+        );
+        assert_eq!(primary_copy_field(4), Some((Field::IdentityEmail, "email")));
+        assert_eq!(primary_copy_field(2), None);
     }
 
     #[test]

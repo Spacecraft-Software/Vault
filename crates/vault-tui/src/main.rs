@@ -141,6 +141,9 @@ async fn run(socket: &Path) -> anyhow::Result<()> {
     });
 
     loop {
+        // Refresh the card/identity detail cache for the current selection
+        // before drawing (cheap no-op unless the selection changed).
+        ensure_detail(&mut state, socket).await;
         terminal.draw(|f| ui::render(f, &state))?;
         if state.should_quit {
             break;
@@ -372,7 +375,16 @@ async fn handle_normal_key(state: &mut App, key: KeyEvent, socket: &Path) {
         }
         KeyCode::Char('r') => *state = load_app(socket).await,
         KeyCode::Char(' ') => toggle_reveal(state, socket).await,
-        KeyCode::Char('c') => copy_field(state, socket, Field::Password, "password").await,
+        // `c` copies the primary field for the selected item's type: login
+        // password / card number / identity email.
+        KeyCode::Char('c') => {
+            if let Some((field, label)) = state
+                .selected_entry()
+                .and_then(|e| app::primary_copy_field(e.cipher_type))
+            {
+                copy_field(state, socket, field, label).await;
+            }
+        }
         KeyCode::Char('u') => copy_field(state, socket, Field::Username, "username").await,
         KeyCode::Char('o') => copy_field(state, socket, Field::Uri, "URI").await,
         KeyCode::Char('t') => copy_field(state, socket, Field::Totp, "TOTP code").await,
@@ -663,27 +675,75 @@ async fn toggle_reveal(state: &mut App, socket: &Path) {
     let Some(sel) = state.selected_entry() else {
         return;
     };
-    if state.is_revealed(&sel.id, Field::Password) {
+    // The masked secret depends on the cipher type: login password / card
+    // number. Items without one (identity, secure note) can't be revealed.
+    let Some(field) = app::primary_secret_field(sel.cipher_type) else {
+        return;
+    };
+    if state.is_revealed(&sel.id, field) {
         state.hide_revealed();
         return;
     }
     let req = Request::Get {
         id: Some(sel.id.clone()),
         name: sel.name.clone(),
-        field: Some(Field::Password),
+        field: Some(field),
     };
     match client::request(socket, &req).await {
         Ok(Response::Item(item)) => {
-            state.reveal(RevealedSecret::new(
-                sel.id,
-                Field::Password,
-                item.value.clone(),
-            ));
+            state.reveal(RevealedSecret::new(sel.id, field, item.value.clone()));
         }
         Ok(Response::Error(e)) => state.set_toast(format!("reveal failed: {e}")),
         Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
         Err(e) => state.set_toast(e.to_string()),
     }
+}
+
+/// Fetch one field's value for an item, or `None` on a missing field / error.
+async fn fetch_field(socket: &Path, id: &str, name: &str, field: Field) -> Option<String> {
+    let req = Request::Get {
+        id: Some(id.to_owned()),
+        name: name.to_owned(),
+        field: Some(field),
+    };
+    match client::request(socket, &req).await {
+        Ok(Response::Item(item)) => Some(item.value.clone()),
+        _ => None,
+    }
+}
+
+/// Keep `state.detail` populated with the selected card/identity's non-sensitive
+/// fields. A no-op when the selection is unchanged, a login/note, or absent —
+/// run once per loop iteration before drawing. Sensitive fields (card number /
+/// CVV) are never fetched here; they reveal on demand like passwords.
+async fn ensure_detail(state: &mut App, socket: &Path) {
+    let Some(sel) = state.selected_entry().filter(|_| state.items_focused()) else {
+        state.detail = None;
+        return;
+    };
+    if state.detail.as_ref().is_some_and(|d| d.id == sel.id) {
+        return; // already cached for this item
+    }
+    let specs: &[(&str, Field)] = match sel.cipher_type {
+        3 => &[("Brand", Field::CardBrand), ("Exp", Field::CardExpiry)],
+        4 => &[
+            ("Person", Field::IdentityName),
+            ("Email", Field::IdentityEmail),
+            ("Phone", Field::IdentityPhone),
+            ("Address", Field::IdentityAddress),
+        ],
+        _ => {
+            state.detail = None;
+            return;
+        }
+    };
+    let mut lines = Vec::new();
+    for (label, field) in specs {
+        if let Some(value) = fetch_field(socket, &sel.id, &sel.name, *field).await {
+            lines.push(((*label).to_owned(), value));
+        }
+    }
+    state.detail = Some(app::DetailView { id: sel.id, lines });
 }
 
 /// Ask the agent to copy `field` of the selected item to the clipboard, with a

@@ -232,30 +232,62 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
             ))]
         },
         |e| {
+            let steel = hex(steelbore::STEEL_BLUE);
             let folder = e.folder.clone().unwrap_or_else(|| "(unfiled)".to_owned());
-            let username = e.username.clone().unwrap_or_else(|| "—".to_owned());
             let mut lines = vec![
                 field_line("Name", &e.name, amber),
                 field_line("Type", type_label(e.cipher_type), info),
-                field_line("User", &username, info),
-                field_line("Folder", &folder, info),
-                field_line("Id", &e.id, info),
             ];
-            // Logins carry a password; show it masked, revealed on demand.
-            if e.cipher_type == 1 {
-                if app.is_revealed(&e.id, Field::Password) {
+            // A masked field shown in amber when revealed, steel when hidden.
+            let masked = |lines: &mut Vec<Line>, label: &str, field: Field| {
+                if app.is_revealed(&e.id, field) {
                     let value = app.revealed.as_ref().map_or(MASK, |r| r.value());
-                    lines.push(field_line("Pass", value, amber));
+                    lines.push(field_line(label, value, amber));
                 } else {
-                    lines.push(field_line("Pass", MASK, hex(steelbore::STEEL_BLUE)));
+                    lines.push(field_line(label, MASK, steel));
                 }
-            }
+            };
+            // Non-sensitive fields fetched for the selected card/identity.
+            let extra = app.detail.as_ref().filter(|d| d.id == e.id);
+            let hint = match e.cipher_type {
+                1 => {
+                    let username = e.username.clone().unwrap_or_else(|| "—".to_owned());
+                    lines.push(field_line("User", &username, info));
+                    lines.push(field_line("Folder", &folder, info));
+                    lines.push(field_line("Id", &e.id, info));
+                    masked(&mut lines, "Pass", Field::Password);
+                    "Space reveal · c/u/o copy"
+                }
+                3 => {
+                    if let Some(d) = extra {
+                        for (label, value) in &d.lines {
+                            lines.push(field_line(label, value, info));
+                        }
+                    }
+                    masked(&mut lines, "Number", Field::CardNumber);
+                    lines.push(field_line("CVV", MASK, steel));
+                    lines.push(field_line("Folder", &folder, info));
+                    "Space reveal number · c copy number"
+                }
+                4 => {
+                    if let Some(d) = extra {
+                        for (label, value) in &d.lines {
+                            lines.push(field_line(label, value, info));
+                        }
+                    }
+                    lines.push(field_line("Folder", &folder, info));
+                    "c copy email"
+                }
+                _ => {
+                    lines.push(field_line("Folder", &folder, info));
+                    lines.push(field_line("Id", &e.id, info));
+                    "—"
+                }
+            };
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "Space reveal · c/u/o copy",
-                Style::default()
-                    .fg(hex(steelbore::STEEL_BLUE))
-                    .add_modifier(Modifier::ITALIC),
+                hint,
+                Style::default().fg(steel).add_modifier(Modifier::ITALIC),
             )));
             lines
         },
@@ -848,5 +880,67 @@ mod tests {
             text.contains("SpacecraftSoftware.org"),
             "URL missing:\n{text}"
         );
+    }
+
+    #[test]
+    fn card_detail_shows_fields_and_masks_number() {
+        use crate::app::DetailView;
+        use vault_ipc::proto::Field;
+        let card = ListEntry {
+            id: "card1".into(),
+            name: "Visa".into(),
+            cipher_type: 3,
+            username: None,
+            folder: Some("Wallet".into()),
+        };
+        let mut app = App::browsing(status(), vec![card]);
+        app.detail = Some(DetailView {
+            id: "card1".into(),
+            lines: vec![
+                ("Brand".into(), "Visa".into()),
+                ("Exp".into(), "04/2030".into()),
+            ],
+        });
+        let text = draw(&app);
+        assert!(text.contains("Brand"), "brand label missing:\n{text}");
+        assert!(text.contains("04/2030"), "expiry missing:\n{text}");
+        assert!(text.contains("Number"), "number label missing:\n{text}");
+        assert!(text.contains("CVV"), "cvv label missing:\n{text}");
+        assert!(text.contains(MASK), "number must be masked:\n{text}");
+        assert!(
+            !text.contains("4111"),
+            "raw card number must not appear unless revealed:\n{text}"
+        );
+
+        // After revealing the card number, it shows.
+        app.reveal(RevealedSecret::new(
+            "card1".into(),
+            Field::CardNumber,
+            "4111111111111111".into(),
+        ));
+        assert!(draw(&app).contains("4111111111111111"), "revealed number");
+    }
+
+    #[test]
+    fn identity_detail_shows_contact_fields() {
+        use crate::app::DetailView;
+        let id = ListEntry {
+            id: "id1".into(),
+            name: "Me".into(),
+            cipher_type: 4,
+            username: None,
+            folder: None,
+        };
+        let mut app = App::browsing(status(), vec![id]);
+        app.detail = Some(DetailView {
+            id: "id1".into(),
+            lines: vec![
+                ("Email".into(), "alice@example.org".into()),
+                ("Phone".into(), "+1 555 0100".into()),
+            ],
+        });
+        let text = draw(&app);
+        assert!(text.contains("alice@example.org"), "email missing:\n{text}");
+        assert!(text.contains("+1 555 0100"), "phone missing:\n{text}");
     }
 }

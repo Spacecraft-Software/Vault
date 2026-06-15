@@ -91,8 +91,12 @@ vault get visa --field card-number     # also: card-brand, card-expiry, card-cod
 vault get me   --field identity-email  # also: identity-name, identity-phone, identity-address
 ```
 
-Rendering these in the TUI detail pane is coming next; for now the TUI shows the
-item name/type and copies login fields.
+In the TUI, selecting a card or identity shows its fields in the detail pane:
+card brand/expiry with the number masked (`Space` reveals it, re-masked when you
+navigate away) and the CVV masked; identity name/email/phone/address. `c` copies
+the primary field — a card's number, an identity's email (and a login's
+password). The number/CVV are fetched only on reveal, so no card secret enters
+the TUI until you ask.
 
 ### PIN unlock
 

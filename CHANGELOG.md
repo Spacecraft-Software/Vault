@@ -10,6 +10,18 @@ range may break in any release.
 
 ### Added
 
+- **TUI card/identity detail render.** Selecting a card or identity in
+  `vault-tui` now shows its fields in the detail pane: card brand/expiry with a
+  masked number (`Space` reveals it, re-masked on navigation) and masked CVV;
+  identity name/email/phone/address. `c` copies the primary field per type (card
+  number / identity email / login password); `Space` reveals the primary secret
+  (card number / login password). Non-sensitive fields are fetched on select via
+  the existing `Request::Get`; the card number/CVV are fetched **only on reveal**
+  — no card secret enters the TUI until asked. No proto/agent/core change
+  (reuses the PR #23 `Field` selectors). This completes card/identity support
+  end-to-end (CLI + TUI). Tests: `primary_secret_field`/`primary_copy_field`
+  units + `TestBackend` renders for card (masked number, revealed) and identity.
+
 - **Card & identity cipher types (read, CLI).** `vault-core` now models card
   (type 3) and identity (type 4) ciphers — full field sets, decrypted into
   `PlainCard`/`PlainIdentity` (sensitive fields zeroized on drop) via new
