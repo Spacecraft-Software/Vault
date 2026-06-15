@@ -148,11 +148,14 @@ vault config unset clipboard.clear_secs
 Recognised keys: `clipboard.clear_secs` (auto-clear window, `0` disables),
 `clipboard.backend` (`auto`/`arboard`/`osc52`; see below),
 `agent.idle_lock_secs` (idle-lock timeout, `0` disables),
-`agent.session_keyring` (resume across restarts; see above), and
-`sync.interval_secs` (background `/sync` interval while unlocked, `0` disables).
-When the CLI auto-starts the agent, these populate its launch flags (changes
-apply on the next agent spawn). Wipe the on-disk item cache (and drop a running
-agent's keys) with `vault purge`.
+`agent.session_keyring` (resume across restarts; see above),
+`sync.interval_secs` (background `/sync` interval while unlocked, `0` disables),
+and `ui.reduced_motion` (suppress animated TUI elements — **reserved**: the TUI
+has no animations yet, so this records the preference for when a spinner /
+lock-countdown lands). When the CLI auto-starts the agent, the agent-side keys
+populate its launch flags (changes apply on the next agent spawn);
+`ui.reduced_motion` is read by `vault-tui` directly. Wipe the on-disk item cache
+(and drop a running agent's keys) with `vault purge`.
 
 With `sync.interval_secs` set, the agent re-pulls `/sync` on that cadence while
 unlocked — keeping the in-memory vault and offline cache fresh without a manual

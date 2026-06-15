@@ -178,7 +178,7 @@ async fn run(socket: &Path) -> anyhow::Result<()> {
 
 /// Query the agent and build the initial (or refreshed) [`App`].
 async fn load_app(socket: &Path) -> App {
-    match client::request(socket, &Request::Status).await {
+    let mut app = match client::request(socket, &Request::Status).await {
         Err(e) => App::message("No agent", e.to_string(), None),
         Ok(Response::Status(s)) if s.unlocked => {
             match client::request(socket, &Request::List).await {
@@ -193,7 +193,14 @@ async fn load_app(socket: &Path) -> App {
         Ok(Response::Status(s)) => locked_screen(socket, s).await,
         Ok(Response::Error(err)) => App::message("Error", err.to_string(), None),
         Ok(other) => App::message("Error", format!("unexpected response: {other:?}"), None),
-    }
+    };
+    // Reserved accessibility preference (`ui.reduced_motion`): record it on the
+    // App so a future animated element can honor it. No visible effect yet.
+    app.reduced_motion = vault_config::load()
+        .ok()
+        .and_then(|c| c.reduced_motion())
+        .unwrap_or(false);
+    app
 }
 
 /// Build the locked screen: an interactive unlock prompt when an account is
