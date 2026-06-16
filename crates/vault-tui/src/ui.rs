@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use vault_ipc::proto::Field;
 use vault_theme::steelbore;
 
-use crate::app::{App, Focus, FormKind, InputMode, Screen};
+use crate::app::{App, Focus, FormKind, InputMode, Screen, scroll_offset};
 
 /// Mask shown for a secret field that has not been revealed.
 const MASK: &str = "••••••••";
@@ -406,8 +406,11 @@ fn render_form(frame: &mut Frame, app: &App, area: Rect) {
         FormKind::Add => " Add ".to_owned(),
         FormKind::Edit { name, .. } => format!(" Edit '{name}' "),
     };
-    let mut lines = vec![Line::from("")];
-    for row in form.rows() {
+    let bg = Style::default().bg(hex(steelbore::VOID_NAVY));
+    let rows = form.rows();
+    let focused_row = rows.iter().position(|r| r.focused).unwrap_or(0);
+    let mut lines = Vec::with_capacity(rows.len());
+    for row in &rows {
         let (value_txt, value_color) = if row.is_type {
             (format!("\u{25b8} {} \u{25c2}", row.value), amber)
         } else if row.secret && !row.focused && !row.value.is_empty() {
@@ -429,19 +432,34 @@ fn render_form(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(value_txt, Style::default().fg(value_color)),
         ]));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " Enter save · Tab next · Space type · Ctrl+G gen · Esc cancel",
-        Style::default().fg(steel).add_modifier(Modifier::ITALIC),
-    )));
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(amber))
         .title(title)
-        .style(Style::default().bg(hex(steelbore::VOID_NAVY)));
+        .style(bg);
     let overlay = centered(area, 70, 70);
     frame.render_widget(ratatui::widgets::Clear, overlay);
-    frame.render_widget(Paragraph::new(lines).block(block), overlay);
+    let inner = block.inner(overlay);
+    frame.render_widget(block, overlay);
+
+    // Split the inner area into a scrollable rows body + a fixed footer, so the
+    // keybind hint stays put when the field list is taller than the overlay.
+    let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    let (body, footer_area) = (parts[0], parts[1]);
+    let body_height = body.height as usize;
+    let offset = u16::try_from(scroll_offset(focused_row, body_height)).unwrap_or(u16::MAX);
+    frame.render_widget(Paragraph::new(lines).style(bg).scroll((offset, 0)), body);
+
+    let overflow = if rows.len() > body_height { " ↕" } else { "" };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(" Enter save · Tab next · Space type · Ctrl+G gen · Esc cancel{overflow}"),
+            Style::default().fg(steel).add_modifier(Modifier::ITALIC),
+        )))
+        .style(bg),
+        footer_area,
+    );
 }
 
 /// Small centered delete-confirm overlay.

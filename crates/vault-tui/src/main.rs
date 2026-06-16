@@ -489,15 +489,22 @@ async fn submit_form(state: &mut App, socket: &Path) {
     let identity = (cipher_type == 4).then(|| IdentityWrite {
         title: id_fields.title,
         first_name: id_fields.first_name,
+        middle_name: id_fields.middle_name,
         last_name: id_fields.last_name,
+        username: id_fields.username,
+        company: id_fields.company,
         email: id_fields.email,
         phone: id_fields.phone,
         address1: id_fields.address1,
+        address2: id_fields.address2,
+        address3: id_fields.address3,
         city: id_fields.city,
         state: id_fields.state,
         postal_code: id_fields.postal_code,
         country: id_fields.country,
-        ..IdentityWrite::default()
+        ssn: id_fields.ssn.map(String::into_bytes),
+        passport_number: id_fields.passport_number.map(String::into_bytes),
+        license_number: id_fields.license_number.map(String::into_bytes),
     });
     let req = match kind {
         FormKind::Add => Request::Add {

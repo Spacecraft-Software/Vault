@@ -10,6 +10,14 @@ range may break in any release.
 
 ### Added
 
+- **TUI form scrolling + full identity editing.** The add/edit form overlay now
+  **scrolls** (a viewport that keeps the focused row visible; the keybind footer
+  stays fixed, with a `↕` cue when there's more). This retires the curated
+  10-field identity limit: the TUI identity form now edits the **full 18-field
+  set**, including the SSN/passport/license secrets (masked while unfocused, like
+  the card number/CVV; redacted in any `Debug`). Pure `vault-tui` — the
+  `IdentityWrite` backend already carried all the fields.
+
 - **`card-cardholder` field selector.** `vault get <card> --field card-cardholder`
   now returns the cardholder name, and the TUI detail pane shows a `Holder` line
   — which also lets the TUI card **edit** form prefill the cardholder (it
