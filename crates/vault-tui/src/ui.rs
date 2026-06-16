@@ -316,8 +316,19 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
             lines
         },
     );
+    // Scroll to keep the focused field visible (the identity detail can be
+    // taller than the pane). The body is [Name, Type, <fields…>, Folder, Id,
+    // "", hint], so the cursor field's line is `2 + detail_field`. Only the
+    // detail-focused path scrolls; every other state keeps offset 0.
+    let focused_line = if app.detail_focused() {
+        2 + app.detail_field
+    } else {
+        0
+    };
+    let offset = scroll_offset(focused_line, (area.height.saturating_sub(2)) as usize);
     let para = Paragraph::new(lines)
         .block(pane_block("Detail", app.detail_focused()))
+        .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0))
         .wrap(Wrap { trim: true });
     frame.render_widget(para, area);
 }
