@@ -47,6 +47,9 @@ sibling of the `vault` binary, then `$PATH` (override with
 `$VAULT_AGENT_BIN`; opt out per-call with `--no-auto-spawn`). A spawned
 agent logs to `agent.log` beside the socket.
 
+The security-critical `EncString` parser has a cargo-fuzz harness under `fuzz/`
+(a standalone workspace, run on nightly) — see [`docs/fuzzing.md`](docs/fuzzing.md).
+
 ## Getting started
 
 ```sh

@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+name = "vault-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+# Standalone workspace: cargo-fuzz needs nightly + a sanitizer runtime, so this
+# crate is deliberately kept out of the main workspace (whose `members` list is
+# explicit and whose root `Cargo.toml` also `exclude`s `fuzz`). That way the
+# repo's CI gates — fmt / clippy -D warnings / test / deny / headless builds —
+# never try to build the nightly-only fuzz target.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vault-core = { path = "../crates/vault-core" }
+
+[[bin]]
+name = "enc_string_parse"
+path = "fuzz_targets/enc_string_parse.rs"
+test = false
+doc = false
+bench = false
