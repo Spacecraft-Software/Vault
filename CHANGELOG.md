@@ -10,6 +10,11 @@ range may break in any release.
 
 ### Added
 
+- **`RELEASING.md` + v0.1 status reconcile.** A maintainer checklist for cutting
+  the `v0.1.0` tag (operational gates → mechanical version bump / CHANGELOG date
+  / signed tag), and PRD §11–§12 annotated with each criterion's status. Docs
+  only — no version bump or tag yet (those wait on the operational gates).
+
 - **Scrolling detail pane.** The detail pane now scrolls to keep the focused
   field visible — the granular identity view is ~18 fields and could overflow a
   shorter terminal. Reuses the form's `scroll_offset`; only the detail-focused

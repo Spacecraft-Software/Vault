@@ -12,7 +12,7 @@
 | Posture        | Personal / Hobby (Standard §5)                            |
 | Standard       | The Spacecraft Software Standard v1.12                    |
 | Document state | Draft v0.1                                                |
-| Last updated   | 2026-06-01                                                |
+| Last updated   | 2026-06-16                                                |
 
 ## 1. Summary
 
@@ -251,24 +251,29 @@ vault/
 
 Vault is "v0.1 done" when:
 
-1. A user can install (`cargo install vault`), `register`, `login`, `sync`, and reach `vault get` end-to-end against both bitwarden.com and a Vaultwarden test container.
-2. The TUI sustains daily-driver use for the maintainer for two consecutive weeks without a blocker.
-3. `cargo audit`, `cargo deny`, `cargo fmt --check`, `clippy -D warnings`, and the integration suite pass on every PR.
-4. Fuzz harness for the EncString parser has run ≥ 24 h with no findings.
-5. README, NOTICE, CONTRIBUTING, CREDITS, and CHANGELOG are present and accurate; §13.2 attribution block appears in `--version`, `--help` footer, README, and TUI About screen.
+1. A user can install (`cargo install vault`), `register`, `login`, `sync`, and reach `vault get` end-to-end against both bitwarden.com and a Vaultwarden test container. — **✅ capability complete** (CLI flow + `docs/m2-vaultwarden.md`); the final live confirmation against both servers is a maintainer step.
+2. The TUI sustains daily-driver use for the maintainer for two consecutive weeks without a blocker. — **⏳ operational** (maintainer attestation pending).
+3. `cargo audit`, `cargo deny`, `cargo fmt --check`, `clippy -D warnings`, and the integration suite pass on every PR. — **✅ done** (CI enforces all five on every PR).
+4. Fuzz harness for the EncString parser has run ≥ 24 h with no findings. — **⏳ harness built** (`fuzz/`, `docs/fuzzing.md`); the ≥ 24 h soak is pending.
+5. README, NOTICE, CONTRIBUTING, CREDITS, and CHANGELOG are present and accurate; §13.2 attribution block appears in `--version`, `--help` footer, README, and TUI About screen. — **✅ done**.
+
+**Status (2026-06-16): code complete.** Remaining for the `v0.1.0` tag are the
+operational gates above — the two-week daily-driver (2), the ≥ 24 h fuzz soak
+(4), and a live PQC handshake test (§12 M7) — after which the tag is cut per
+[`RELEASING.md`](RELEASING.md).
 
 ## 12. Milestones
 
-| Phase | Deliverable                                                                                          | Gate                                                                |
-| ----- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| M0    | Workspace skeleton, posture files, CI (fmt/clippy/audit/deny), signed commits verified               | Empty `vault --version` returns Standard §13.2 attribution block    |
-| M1    | `vault-core` + `vault-store`: parse Bitwarden export JSON, decrypt offline                           | Round-trip an exported vault locally                                |
-| M2    | `vault-api`: login + sync against Vaultwarden in a test container                                    | `vault sync` populates encrypted cache                              |
-| M3    | `vault-agent` + IPC + `vault unlock` / `lock` / `get` / `list`                                       | `rbw` parity for read paths                                         |
-| M4    | CLI write paths (`add` / `edit` / `remove` / `generate`) with `--json` on every command              | Scripts drive Vault end-to-end                                      |
-| M5    | `vault-tui` MVP: list / detail / search / copy / generate                                            | Daily-driver usable in a terminal                                   |
-| M6    | Vim layer, theme loader, accessibility toggles                                                       | §8 / §9.1 / §11 boxes ticked                                        |
-| M7    | PQC transport feature flag, hardening pass, EncString fuzz harness                                   | `v0.1` tag                                                          |
+| Phase | Deliverable                                                                                          | Gate                                                                | Status |
+| ----- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ------ |
+| M0    | Workspace skeleton, posture files, CI (fmt/clippy/audit/deny), signed commits verified               | Empty `vault --version` returns Standard §13.2 attribution block    | ✅ |
+| M1    | `vault-core` + `vault-store`: parse Bitwarden export JSON, decrypt offline                           | Round-trip an exported vault locally                                | ✅ |
+| M2    | `vault-api`: login + sync against Vaultwarden in a test container                                    | `vault sync` populates encrypted cache                              | ✅ |
+| M3    | `vault-agent` + IPC + `vault unlock` / `lock` / `get` / `list`                                       | `rbw` parity for read paths                                         | ✅ |
+| M4    | CLI write paths (`add` / `edit` / `remove` / `generate`) with `--json` on every command              | Scripts drive Vault end-to-end                                      | ✅ |
+| M5    | `vault-tui` MVP: list / detail / search / copy / generate                                            | Daily-driver usable in a terminal                                   | ✅ |
+| M6    | Vim layer, theme loader, accessibility toggles                                                       | §8 / §9.1 / §11 boxes ticked                                        | ◑ vim + accessibility toggles done; runtime theme loader not implemented (out of scope for v0.1 — the palette ships as `vault-theme` tokens) |
+| M7    | PQC transport feature flag, hardening pass, EncString fuzz harness                                   | `v0.1` tag                                                          | ◑ PQC flag ✅ / hardening (core dumps + ptrace + mlock) ✅ / fuzz harness ✅; `v0.1` tag pending the operational gates in §11 |
 
 ## 13. Risks and open questions
 
