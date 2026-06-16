@@ -42,6 +42,9 @@ uuid = { workspace = true }
 url = { workspace = true }
 thiserror = { workspace = true }
 arboard = { workspace = true, optional = true }
+# Process hardening: disable core dumps + ptrace at startup (safe rustix-backed
+# API, keeps the crate's #![forbid(unsafe_code)]). See `harden.rs`.
+secmem-proc = "0.3"
 vault-core = { path = "../vault-core" }
 vault-ipc = { path = "../vault-ipc" }
 vault-store = { path = "../vault-store" }

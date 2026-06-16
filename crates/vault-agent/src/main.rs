@@ -21,6 +21,7 @@ use vault_ipc::default_socket_path;
 
 #[cfg(feature = "clipboard")]
 mod clipboard;
+mod harden;
 mod server;
 mod session;
 mod state;
@@ -97,6 +98,9 @@ enum ClipboardBackendArg {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // Disable core dumps + ptrace before any key material can enter memory
+    // (in particular before `try_resume` reloads a key from the keyring).
+    harden::harden_process();
     let path = pick_socket(args.socket)?;
     #[cfg(feature = "clipboard")]
     let agent = {

@@ -54,6 +54,10 @@ An optional **post-quantum transport** (`--features pqc`) prefers the hybrid
 X25519MLKEM768 key exchange on the HTTPS client, off by default — see
 [`docs/pqc.md`](docs/pqc.md).
 
+The agent hardens itself at startup: it **disables core dumps and ptrace** (so
+the in-memory user key can't leak to a core file or a debugger), on top of the
+`0600` socket and zeroized key buffers.
+
 ## Getting started
 
 ```sh

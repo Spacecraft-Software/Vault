@@ -10,6 +10,14 @@ range may break in any release.
 
 ### Added
 
+- **Agent anti-leak hardening (core dumps + ptrace).** On startup the agent now
+  disables core dumps and marks itself non-dumpable (which also blocks same-user
+  ptrace), so the in-memory user key / refresh token can't leak to a core file
+  or a debugger. Done via the `secmem-proc` crate (audited `rustix` syscalls,
+  keeps the agent's `#![forbid(unsafe_code)]`); best-effort — a sandbox that
+  restricts `setrlimit` logs a warning and the agent keeps running. PRD §12 M7
+  hardening groundwork. (`mlock`/no-swap remains a tracked follow-up.)
+
 - **Post-quantum transport (`pqc` feature, off by default).** A GPL-clean hybrid
   **X25519MLKEM768** key-exchange group is added to the rustls client config, so
   a TLS 1.3 handshake negotiates a post-quantum-secure secret when the server
