@@ -9,6 +9,8 @@
 pub mod client;
 pub mod error;
 pub mod identity;
+#[cfg(feature = "pqc")]
+pub mod pqc;
 pub mod sync;
 pub mod urls;
 

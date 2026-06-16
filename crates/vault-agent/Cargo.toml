@@ -27,6 +27,9 @@ workspace = true
 # returns a clean "not compiled in" error.
 default = ["clipboard"]
 clipboard = ["dep:arboard"]
+# Post-quantum transport (off by default): prefer X25519MLKEM768 on the HTTPS
+# client. Passes through to vault-api; see `docs/pqc.md`.
+pqc = ["vault-api/pqc"]
 
 [dependencies]
 anyhow = { workspace = true }

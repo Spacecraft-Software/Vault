@@ -16,6 +16,12 @@ readme.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Off-by-default post-quantum transport. Adds a GPL-clean X25519MLKEM768 hybrid
+# key-exchange group (ring X25519 + RustCrypto ML-KEM-768) to the rustls client
+# config. See `docs/pqc.md`.
+pqc = ["dep:rustls", "dep:ml-kem", "dep:kem", "dep:rand_core", "dep:webpki-roots"]
+
 [dependencies]
 thiserror = { workspace = true }
 serde = { workspace = true }
@@ -27,6 +33,16 @@ zeroize = { workspace = true }
 time = { workspace = true }
 base64 = { workspace = true }
 vault-core = { path = "../vault-core" }
+
+# PQC transport (feature = "pqc"). Pinned to the versions reqwest already pulls
+# so rustls unifies to one crate instance (required for `use_preconfigured_tls`).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+ml-kem = { version = "0.2", optional = true }
+# `kem` provides the Encapsulate/Decapsulate traits ml-kem's keys implement;
+# pinned to the exact pre-release ml-kem 0.2 depends on.
+kem = { version = "=0.3.0-pre.0", optional = true }
+rand_core = { version = "0.6", features = ["getrandom"], optional = true }
+webpki-roots = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
