@@ -10,6 +10,16 @@ range may break in any release.
 
 ### Added
 
+- **`mlock` the user keys (no swap exposure).** The agent's unwrapped user keys
+  (`user_enc`/`user_mac`) are now wrapped in a `SealedKey` newtype that boxes the
+  bytes for a stable address and `mlock`s their page(s) so they can't be paged to
+  a swap file, completing the agent memory-hygiene hardening (core dumps + ptrace
+  already covered). Surgical (only the key pages, never the whole process → no
+  `RLIMIT_MEMLOCK`/OOM risk) via the safe `region` crate, keeping
+  `#![forbid(unsafe_code)]`; best-effort (a refused lock logs nothing and the key
+  is still zeroized). `SealedKey` derefs to `[u8; 32]`, so the encrypt/decrypt
+  call sites are unchanged; it zeroizes while still locked, then unlocks, on drop.
+
 - **Agent anti-leak hardening (core dumps + ptrace).** On startup the agent now
   disables core dumps and marks itself non-dumpable (which also blocks same-user
   ptrace), so the in-memory user key / refresh token can't leak to a core file

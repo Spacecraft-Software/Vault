@@ -55,8 +55,9 @@ X25519MLKEM768 key exchange on the HTTPS client, off by default — see
 [`docs/pqc.md`](docs/pqc.md).
 
 The agent hardens itself at startup: it **disables core dumps and ptrace** (so
-the in-memory user key can't leak to a core file or a debugger), on top of the
-`0600` socket and zeroized key buffers.
+the in-memory user key can't leak to a core file or a debugger) and **`mlock`s
+the user-key pages** so they're never swapped to disk — on top of the `0600`
+socket and zeroized key buffers.
 
 ## Getting started
 

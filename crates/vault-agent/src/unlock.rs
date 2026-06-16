@@ -13,6 +13,7 @@ use vault_core::kdf::{KdfParams, derive_master_key, stretch_master_key};
 use vault_ipc::proto::{ApiKeyCreds, Error as IpcError, TwoFactorCode};
 use vault_store::VaultCache;
 
+use crate::sealed::SealedKey;
 use crate::state::{Vault, account_dir_name};
 
 /// Unlock the agent: try an online login, and if the network is unreachable
@@ -110,8 +111,8 @@ async fn online_unlock(
     let vault = Vault {
         server: server.to_owned(),
         email: email_lower,
-        user_enc,
-        user_mac,
+        user_enc: SealedKey::new(*user_enc),
+        user_mac: SealedKey::new(*user_mac),
         ciphers,
         folders,
         client: Some(client),
@@ -227,7 +228,7 @@ fn unlock_from_cache(
         .ok_or_else(|| IpcError::Internal("cached account has no protected user key".to_owned()))?;
     let (user_enc, user_mac) = recover_user_key(cache, email, password, protected)
         .map_err(|e| e.into_ipc(|| IpcError::BadPassword))?;
-    vault_from_user_key(cache, server, email, user_enc, user_mac)
+    vault_from_user_key(cache, server, email, &user_enc, &user_mac)
 }
 
 /// The unwrapped user key: the symmetric encryption and MAC halves, each
@@ -285,15 +286,15 @@ pub fn vault_from_user_key(
     cache: &VaultCache,
     server: &str,
     email: &str,
-    user_enc: Zeroizing<[u8; 32]>,
-    user_mac: Zeroizing<[u8; 32]>,
+    user_enc: &[u8; 32],
+    user_mac: &[u8; 32],
 ) -> Result<Vault, IpcError> {
     let payload = cache
-        .load_payload(&user_enc, &user_mac)
+        .load_payload(user_enc, user_mac)
         .map_err(|e| IpcError::Internal(format!("decrypt cached vault: {e}")))?;
     let sync: SyncResponse = serde_json::from_slice(&payload)
         .map_err(|e| IpcError::Internal(format!("parse cached vault: {e}")))?;
-    let (ciphers, folders) = ciphers_and_folders(&sync, &user_enc, &user_mac);
+    let (ciphers, folders) = ciphers_and_folders(&sync, user_enc, user_mac);
     let kdf = cache
         .kdf
         .ok_or_else(|| IpcError::Internal("cached account has no KDF params".to_owned()))?;
@@ -301,14 +302,14 @@ pub fn vault_from_user_key(
     // PIN session can lazily go online. A decode failure just leaves it absent.
     let refresh_token = cache.refresh_token.as_deref().and_then(|enc| {
         let parsed = vault_core::EncString::parse(enc).ok()?;
-        let bytes = parsed.decrypt(&user_enc, &user_mac).ok()?;
+        let bytes = parsed.decrypt(user_enc, user_mac).ok()?;
         String::from_utf8(bytes).ok().map(Zeroizing::new)
     });
     Ok(Vault {
         server: server.to_owned(),
         email: email.trim().to_lowercase(),
-        user_enc,
-        user_mac,
+        user_enc: SealedKey::new(*user_enc),
+        user_mac: SealedKey::new(*user_mac),
         ciphers,
         folders,
         client: None,
@@ -376,7 +377,7 @@ pub fn pin_attempt(
     match recover_user_key(cache, email, pin, &protected) {
         Ok((user_enc, user_mac)) => {
             cache.pin_failures = 0;
-            vault_from_user_key(cache, server, email, user_enc, user_mac)
+            vault_from_user_key(cache, server, email, &user_enc, &user_mac)
         }
         Err(KeyRecover::Internal(s)) => Err(IpcError::Internal(s)),
         Err(KeyRecover::WrongSecret) => {
