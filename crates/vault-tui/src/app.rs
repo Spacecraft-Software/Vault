@@ -470,6 +470,14 @@ const F_CITY: usize = 17;
 const F_STATE: usize = 18;
 const F_POSTAL: usize = 19;
 const F_COUNTRY: usize = 20;
+const F_MIDDLE: usize = 21;
+const F_IDUSER: usize = 22;
+const F_COMPANY: usize = 23;
+const F_SSN: usize = 24;
+const F_PASSPORT: usize = 25;
+const F_LICENSE: usize = 26;
+const F_ADDR2: usize = 27;
+const F_ADDR3: usize = 28;
 
 /// Which mutation the form drives.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -579,21 +587,33 @@ pub struct FormSubmit {
     pub identity: IdentityFields,
 }
 
-/// The curated identity fields the TUI form edits (all non-secret).
-#[derive(Clone, Debug, Default)]
+/// The identity fields the TUI form edits (the full set). `ssn`,
+/// `passport_number`, and `license_number` are sensitive — masked in the form
+/// and redacted in `Debug`.
+#[derive(Clone, Default)]
 pub struct IdentityFields {
     /// Title (`Mr`, `Ms`, …).
     pub title: Option<String>,
     /// First name.
     pub first_name: Option<String>,
+    /// Middle name.
+    pub middle_name: Option<String>,
     /// Last name.
     pub last_name: Option<String>,
+    /// Identity username.
+    pub username: Option<String>,
+    /// Company.
+    pub company: Option<String>,
     /// Email.
     pub email: Option<String>,
     /// Phone.
     pub phone: Option<String>,
     /// Address line 1.
     pub address1: Option<String>,
+    /// Address line 2.
+    pub address2: Option<String>,
+    /// Address line 3.
+    pub address3: Option<String>,
     /// City.
     pub city: Option<String>,
     /// State / province.
@@ -602,26 +622,66 @@ pub struct IdentityFields {
     pub postal_code: Option<String>,
     /// Country.
     pub country: Option<String>,
+    /// SSN / national id (sensitive).
+    pub ssn: Option<String>,
+    /// Passport number (sensitive).
+    pub passport_number: Option<String>,
+    /// License number (sensitive).
+    pub license_number: Option<String>,
 }
 
 impl IdentityFields {
-    /// Whether any curated identity field is set (drives the edit "no changes"
-    /// gate without listing each field there).
+    /// Whether any identity field is set (drives the edit "no changes" gate
+    /// without listing each field there).
     fn any_set(&self) -> bool {
         [
             &self.title,
             &self.first_name,
+            &self.middle_name,
             &self.last_name,
+            &self.username,
+            &self.company,
             &self.email,
             &self.phone,
             &self.address1,
+            &self.address2,
+            &self.address3,
             &self.city,
             &self.state,
             &self.postal_code,
             &self.country,
+            &self.ssn,
+            &self.passport_number,
+            &self.license_number,
         ]
         .iter()
         .any(|o| o.is_some())
+    }
+}
+
+impl fmt::Debug for IdentityFields {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let redact = |o: &Option<String>| o.as_ref().map(|_| "<redacted>");
+        f.debug_struct("IdentityFields")
+            .field("title", &self.title)
+            .field("first_name", &self.first_name)
+            .field("middle_name", &self.middle_name)
+            .field("last_name", &self.last_name)
+            .field("username", &self.username)
+            .field("company", &self.company)
+            .field("email", &self.email)
+            .field("phone", &self.phone)
+            .field("address1", &self.address1)
+            .field("address2", &self.address2)
+            .field("address3", &self.address3)
+            .field("city", &self.city)
+            .field("state", &self.state)
+            .field("postal_code", &self.postal_code)
+            .field("country", &self.country)
+            .field("ssn", &redact(&self.ssn))
+            .field("passport_number", &redact(&self.passport_number))
+            .field("license_number", &redact(&self.license_number))
+            .finish()
     }
 }
 
@@ -656,15 +716,20 @@ impl FormState {
         [
             "Name", "User", "Pass", "URI", "Folder", "Notes", // shared / login
             "Holder", "Brand", "Number", "Expiry", "CVV", // card
-            "Title", "First", "Last", "Email", "Phone", "Address", "City", "State", "Postal",
-            "Country", // identity (curated)
+            "Title", "First", "Last", "Email", "Phone", "Addr1", "City", "State", "Postal",
+            "Country", // identity
+            "Middle", "IdUser", "Company", "SSN", "Passport", "License", "Addr2",
+            "Addr3", // identity (long-tail + secrets)
         ]
         .into_iter()
         .map(|label| FormField {
             label,
             value: TextInput::default(),
             initial: String::new(),
-            secret: matches!(label, "Pass" | "Number" | "CVV"),
+            secret: matches!(
+                label,
+                "Pass" | "Number" | "CVV" | "SSN" | "Passport" | "License"
+            ),
         })
         .collect()
     }
@@ -750,12 +815,12 @@ impl FormState {
                 F_FOLDER,
                 F_NOTES,
             ],
-            // Identity exposes a curated subset (the long-tail fields + the
-            // SSN/passport/license secrets are CLI-only — they'd overflow the
-            // non-scrolling overlay).
+            // Identity exposes its full field set (the form scrolls). SSN /
+            // passport / license are secret rows (masked while unfocused).
             4 => vec![
-                F_NAME, F_TITLE, F_FIRST, F_LAST, F_EMAIL, F_PHONE, F_ADDRESS, F_CITY, F_STATE,
-                F_POSTAL, F_COUNTRY, F_FOLDER, F_NOTES,
+                F_NAME, F_TITLE, F_FIRST, F_MIDDLE, F_LAST, F_IDUSER, F_COMPANY, F_EMAIL, F_PHONE,
+                F_ADDRESS, F_ADDR2, F_ADDR3, F_CITY, F_STATE, F_POSTAL, F_COUNTRY, F_SSN,
+                F_PASSPORT, F_LICENSE, F_FOLDER, F_NOTES,
             ],
             // Secure notes (and anything else) edit only the metadata fields
             // every cipher type carries.
@@ -892,14 +957,22 @@ impl FormState {
         let identity = IdentityFields {
             title: take(F_TITLE),
             first_name: take(F_FIRST),
+            middle_name: take(F_MIDDLE),
             last_name: take(F_LAST),
+            username: take(F_IDUSER),
+            company: take(F_COMPANY),
             email: take(F_EMAIL),
             phone: take(F_PHONE),
             address1: take(F_ADDRESS),
+            address2: take(F_ADDR2),
+            address3: take(F_ADDR3),
             city: take(F_CITY),
             state: take(F_STATE),
             postal_code: take(F_POSTAL),
             country: take(F_COUNTRY),
+            ssn: take(F_SSN),
+            passport_number: take(F_PASSPORT),
+            license_number: take(F_LICENSE),
         };
         match self.kind {
             FormKind::Add => {
@@ -967,6 +1040,15 @@ fn parse_expiry(raw: &str) -> Result<(String, String), ()> {
         y.to_owned()
     };
     Ok((month.to_string(), year))
+}
+
+/// Vertical scroll offset (in rows) that keeps the `focused` row visible in a
+/// viewport `height` rows tall: 0 until focus passes the bottom, then just
+/// enough to pin it to the last visible line. Pure, so the renderer stays
+/// stateless. `height == 0` falls back to no scroll.
+#[must_use]
+pub const fn scroll_offset(focused: usize, height: usize) -> usize {
+    focused.saturating_sub(height.saturating_sub(1))
 }
 
 /// Top-level TUI state.
@@ -2581,6 +2663,19 @@ mod tests {
         assert!(parse_expiry("ab/2030").is_err(), "non-numeric month");
     }
 
+    #[test]
+    fn scroll_offset_keeps_focus_visible() {
+        // Within the viewport: no scroll.
+        assert_eq!(scroll_offset(0, 10), 0);
+        assert_eq!(scroll_offset(9, 10), 0, "last visible row, still no scroll");
+        // Past the bottom: scroll just enough to pin focus to the last line.
+        assert_eq!(scroll_offset(10, 10), 1);
+        assert_eq!(scroll_offset(21, 10), 12);
+        // Degenerate viewport heights don't panic.
+        assert_eq!(scroll_offset(5, 0), 5);
+        assert_eq!(scroll_offset(5, 1), 5);
+    }
+
     /// A type-4 list entry for the identity form tests.
     fn identity_entry() -> ListEntry {
         ListEntry {
@@ -2593,7 +2688,7 @@ mod tests {
     }
 
     #[test]
-    fn add_identity_form_carries_curated_fields() {
+    fn add_identity_form_carries_full_field_set_and_redacts_secrets() {
         let mut app = App::browsing(status(), vec![entry("a", None)]);
         app.open_add_form();
         app.form_toggle_type(); // login → secure note
@@ -2605,8 +2700,9 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "Type", "Name", "Title", "First", "Last", "Email", "Phone", "Address", "City",
-                "State", "Postal", "Country", "Folder", "Notes"
+                "Type", "Name", "Title", "First", "Middle", "Last", "IdUser", "Company", "Email",
+                "Phone", "Addr1", "Addr2", "Addr3", "City", "State", "Postal", "Country", "SSN",
+                "Passport", "License", "Folder", "Notes"
             ]
         );
         let type_into = |app: &mut App, s: &str| {
@@ -2614,23 +2710,34 @@ mod tests {
                 app.form_push(c);
             }
         };
-        app.form_focus_next(); // → Name
+        // Fill a spread of rows by walking to each (Type row is index 0).
+        app.form_focus_next(); // 1 Name
         type_into(&mut app, "Jane Doe");
-        app.form_focus_next(); // → Title (blank)
-        app.form_focus_next(); // → First
+        for _ in 1..3 {
+            app.form_focus_next(); // → 3 First
+        }
         type_into(&mut app, "Jane");
-        app.form_focus_next(); // → Last
-        type_into(&mut app, "Doe");
-        app.form_focus_next(); // → Email
+        for _ in 3..8 {
+            app.form_focus_next(); // → 8 Email
+        }
         type_into(&mut app, "jane@example.org");
+        for _ in 8..17 {
+            app.form_focus_next(); // → 17 SSN (a secret row)
+        }
+        type_into(&mut app, "123-45-6789");
 
         let data = app.form_submit_data().expect("valid identity add");
         assert_eq!(data.cipher_type, 4);
         assert_eq!(data.name.as_deref(), Some("Jane Doe"));
         assert_eq!(data.identity.first_name.as_deref(), Some("Jane"));
-        assert_eq!(data.identity.last_name.as_deref(), Some("Doe"));
         assert_eq!(data.identity.email.as_deref(), Some("jane@example.org"));
+        assert_eq!(data.identity.ssn.as_deref(), Some("123-45-6789"));
         assert_eq!(data.identity.title, None, "blank field rides as unset");
+
+        // The SSN must never appear in a Debug rendering.
+        let rendered = format!("{data:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("123-45"), "ssn leaked: {rendered}");
     }
 
     #[test]
@@ -2660,9 +2767,9 @@ mod tests {
         assert_eq!(value_of("Phone"), "+1 555 0100");
         assert_eq!(value_of("First"), "", "composite name not prefilled");
 
-        // Edit rows: Name Title First Last Email Phone Address City State ...
-        // Walk to City (index 7) and type a value.
-        for _ in 0..7 {
+        // Edit rows (no Type row): Name Title First Middle Last IdUser Company
+        // Email Phone Addr1 Addr2 Addr3 City … — City is index 12.
+        for _ in 0..12 {
             app.form_focus_next();
         }
         for c in "Amber".chars() {
