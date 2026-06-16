@@ -551,6 +551,38 @@ pub enum Field {
     IdentityPhone,
     /// `Identity` address lines + city/state/postal/country.
     IdentityAddress,
+    /// `Identity.Title`.
+    IdentityTitle,
+    /// `Identity.FirstName`.
+    IdentityFirstName,
+    /// `Identity.MiddleName`.
+    IdentityMiddleName,
+    /// `Identity.LastName`.
+    IdentityLastName,
+    /// `Identity.Username`.
+    IdentityUsername,
+    /// `Identity.Company`.
+    IdentityCompany,
+    /// `Identity.SSN` (sensitive).
+    IdentitySsn,
+    /// `Identity.PassportNumber` (sensitive).
+    IdentityPassport,
+    /// `Identity.LicenseNumber` (sensitive).
+    IdentityLicense,
+    /// `Identity.Address1`.
+    IdentityAddress1,
+    /// `Identity.Address2`.
+    IdentityAddress2,
+    /// `Identity.Address3`.
+    IdentityAddress3,
+    /// `Identity.City`.
+    IdentityCity,
+    /// `Identity.State`.
+    IdentityState,
+    /// `Identity.PostalCode`.
+    IdentityPostal,
+    /// `Identity.Country`.
+    IdentityCountry,
 }
 
 /// Re-export the full cipher payload from `vault-core` when needed.

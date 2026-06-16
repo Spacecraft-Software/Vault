@@ -727,6 +727,7 @@ impl AgentState {
     /// reliable path when several items share a name. When `id` is `None`, it
     /// falls back to a case-insensitive match on `query` and returns the first
     /// hit (the long-standing CLI behavior). `query` is also the error label.
+    #[allow(clippy::too_many_lines)] // flat per-field dispatch (one arm per Field) reads best in one match
     pub fn get_item(&self, id: Option<&str>, query: &str, field: Field) -> Result<Item, IpcError> {
         let v = self.vault.as_ref().ok_or(IpcError::Locked)?;
         let query_lower = query.to_lowercase();
@@ -783,7 +784,23 @@ impl AgentState {
             Field::IdentityName
             | Field::IdentityEmail
             | Field::IdentityPhone
-            | Field::IdentityAddress => DecryptOptions {
+            | Field::IdentityAddress
+            | Field::IdentityTitle
+            | Field::IdentityFirstName
+            | Field::IdentityMiddleName
+            | Field::IdentityLastName
+            | Field::IdentityUsername
+            | Field::IdentityCompany
+            | Field::IdentitySsn
+            | Field::IdentityPassport
+            | Field::IdentityLicense
+            | Field::IdentityAddress1
+            | Field::IdentityAddress2
+            | Field::IdentityAddress3
+            | Field::IdentityCity
+            | Field::IdentityState
+            | Field::IdentityPostal
+            | Field::IdentityCountry => DecryptOptions {
                 identity: true,
                 ..DecryptOptions::default()
             },
@@ -814,6 +831,30 @@ impl AgentState {
             Field::IdentityEmail => plain.identity.as_ref().and_then(|i| i.email.clone()),
             Field::IdentityPhone => plain.identity.as_ref().and_then(|i| i.phone.clone()),
             Field::IdentityAddress => plain.identity.as_ref().and_then(identity_address),
+            Field::IdentityTitle => plain.identity.as_ref().and_then(|i| i.title.clone()),
+            Field::IdentityFirstName => plain.identity.as_ref().and_then(|i| i.first_name.clone()),
+            Field::IdentityMiddleName => {
+                plain.identity.as_ref().and_then(|i| i.middle_name.clone())
+            }
+            Field::IdentityLastName => plain.identity.as_ref().and_then(|i| i.last_name.clone()),
+            Field::IdentityUsername => plain.identity.as_ref().and_then(|i| i.username.clone()),
+            Field::IdentityCompany => plain.identity.as_ref().and_then(|i| i.company.clone()),
+            Field::IdentitySsn => plain.identity.as_ref().and_then(|i| i.ssn.clone()),
+            Field::IdentityPassport => plain
+                .identity
+                .as_ref()
+                .and_then(|i| i.passport_number.clone()),
+            Field::IdentityLicense => plain
+                .identity
+                .as_ref()
+                .and_then(|i| i.license_number.clone()),
+            Field::IdentityAddress1 => plain.identity.as_ref().and_then(|i| i.address1.clone()),
+            Field::IdentityAddress2 => plain.identity.as_ref().and_then(|i| i.address2.clone()),
+            Field::IdentityAddress3 => plain.identity.as_ref().and_then(|i| i.address3.clone()),
+            Field::IdentityCity => plain.identity.as_ref().and_then(|i| i.city.clone()),
+            Field::IdentityState => plain.identity.as_ref().and_then(|i| i.state.clone()),
+            Field::IdentityPostal => plain.identity.as_ref().and_then(|i| i.postal_code.clone()),
+            Field::IdentityCountry => plain.identity.as_ref().and_then(|i| i.country.clone()),
         };
         let value = value.ok_or_else(|| IpcError::NoSuchField {
             item: name.clone(),

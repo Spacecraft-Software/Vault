@@ -100,7 +100,10 @@ Card (type 3) and identity (type 4) ciphers are readable from the CLI via
 
 ```sh
 vault get visa --field card-number     # also: card-cardholder, card-brand, card-expiry, card-code
-vault get me   --field identity-email  # also: identity-name, identity-phone, identity-address
+vault get me   --field identity-email  # composed: identity-name, identity-address; plus
+                                        # granular identity-{title,first-name,middle-name,
+                                        # last-name,username,company,ssn,passport,license,
+                                        # address1,address2,address3,city,state,postal,country}
 ```
 
 In the TUI, selecting a card or identity shows its fields in the detail pane:

@@ -410,10 +410,24 @@ pub const fn detail_fields(cipher_type: u8) -> &'static [DetailField] {
         df("CVV", Field::CardCode, true),
     ];
     const IDENTITY: &[DetailField] = &[
-        df("Person", Field::IdentityName, false),
+        df("Title", Field::IdentityTitle, false),
+        df("First", Field::IdentityFirstName, false),
+        df("Middle", Field::IdentityMiddleName, false),
+        df("Last", Field::IdentityLastName, false),
+        df("IdUser", Field::IdentityUsername, false),
+        df("Company", Field::IdentityCompany, false),
         df("Email", Field::IdentityEmail, false),
         df("Phone", Field::IdentityPhone, false),
-        df("Address", Field::IdentityAddress, false),
+        df("Addr1", Field::IdentityAddress1, false),
+        df("Addr2", Field::IdentityAddress2, false),
+        df("Addr3", Field::IdentityAddress3, false),
+        df("City", Field::IdentityCity, false),
+        df("State", Field::IdentityState, false),
+        df("Postal", Field::IdentityPostal, false),
+        df("Country", Field::IdentityCountry, false),
+        df("SSN", Field::IdentitySsn, true),
+        df("Passport", Field::IdentityPassport, true),
+        df("License", Field::IdentityLicense, true),
     ];
     match cipher_type {
         3 => CARD,
@@ -2201,7 +2215,18 @@ mod tests {
             .expect("card has a CVV field");
         assert_eq!(cvv.field, Field::CardCode);
         assert!(cvv.masked, "CVV is masked until revealed");
-        assert_eq!(detail_fields(4).len(), 4);
+        // Identity exposes its full granular set; the three sensitive fields are
+        // masked.
+        let id = detail_fields(4);
+        assert_eq!(id.len(), 18);
+        for label in ["SSN", "Passport", "License"] {
+            let f = id.iter().find(|f| f.label == label).expect("field present");
+            assert!(f.masked, "{label} must be masked");
+        }
+        assert_eq!(
+            id.iter().find(|f| f.label == "SSN").map(|f| f.field),
+            Some(Field::IdentitySsn)
+        );
     }
 
     #[test]

@@ -794,11 +794,25 @@ async fn ensure_detail(state: &mut App, socket: &Path) {
             ("Brand", Field::CardBrand),
             ("Exp", Field::CardExpiry),
         ],
+        // The non-sensitive identity fields (granular, matching the detail
+        // pane's field cursor). SSN/passport/license reveal on demand, so they
+        // aren't fetched here.
         4 => &[
-            ("Person", Field::IdentityName),
+            ("Title", Field::IdentityTitle),
+            ("First", Field::IdentityFirstName),
+            ("Middle", Field::IdentityMiddleName),
+            ("Last", Field::IdentityLastName),
+            ("IdUser", Field::IdentityUsername),
+            ("Company", Field::IdentityCompany),
             ("Email", Field::IdentityEmail),
             ("Phone", Field::IdentityPhone),
-            ("Address", Field::IdentityAddress),
+            ("Addr1", Field::IdentityAddress1),
+            ("Addr2", Field::IdentityAddress2),
+            ("Addr3", Field::IdentityAddress3),
+            ("City", Field::IdentityCity),
+            ("State", Field::IdentityState),
+            ("Postal", Field::IdentityPostal),
+            ("Country", Field::IdentityCountry),
         ],
         _ => {
             state.detail = None;
