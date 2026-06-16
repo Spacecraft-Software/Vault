@@ -10,6 +10,13 @@ range may break in any release.
 
 ### Added
 
+- **REUSE compliance (Standard §4.3) + CI gate.** Added `LICENSES/GPL-3.0-or-later.txt`
+  and a `REUSE.toml` (a `path="**"` annotation supplying copyright + license in
+  bulk, mirroring `construct/`), so every file carries license + copyright info
+  and `reuse lint` passes (77/77 files, GPL-3.0-or-later only). A new `REUSE lint`
+  CI job enforces it. Satisfies the §5.2 posture requirement for a `LICENSES/`
+  directory.
+
 - **`justfile` dev gates.** Recipes mirroring CI exactly — `just fmt` / `clippy`
   (fresh-isolated `-D warnings`, the only form that matches the runner) / `test`
   / `headless` / `version-gate` / `deny` / `audit`, with `just ci` running the

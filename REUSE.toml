@@ -1,0 +1,14 @@
+version = 1
+
+# All of Vault's committed files are GPL-3.0-or-later (software-class, Standard
+# §4.1.1). `override` precedence so example SPDX tags embedded in docs/prose
+# (e.g. CLAUDE.md / PRD.md describing the header convention) aren't parsed as
+# real license info, and supplies the copyright in bulk so no per-file
+# `SPDX-FileCopyrightText` is needed. Vault vendors no third-party-derived files
+# in-tree (the rbw/ + cruxpass/ references are gitignored), so this one
+# annotation covers the whole repository.
+[[annotations]]
+path = "**"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Mohamed Hammad <Mohamed.Hammad@SpacecraftSoftware.org>"
+SPDX-License-Identifier = "GPL-3.0-or-later"
