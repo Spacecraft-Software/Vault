@@ -682,9 +682,8 @@ impl FormState {
 
     /// An edit form for `entry`, prefilled with the metadata the list already
     /// carries (name / username / folder). For a card, `detail` (the pane's
-    /// on-select fetch) prefills `Brand`/`Expiry`. Secrets stay blank — blank
-    /// means "leave unchanged" on submit (so does the un-prefilled cardholder,
-    /// which has no fetch selector yet).
+    /// on-select fetch) prefills `Holder`/`Brand`/`Expiry`. Secrets stay blank —
+    /// blank means "leave unchanged" on submit.
     #[must_use]
     pub fn new_edit(entry: &ListEntry, detail: Option<&DetailView>) -> Self {
         let mut fields = Self::blank_fields();
@@ -705,6 +704,7 @@ impl FormState {
                 // pane's `Person`/`Address` are composites that can't be split
                 // back, so those rows start blank = leave-unchanged.
                 match (entry.cipher_type, label.as_str()) {
+                    (3, "Holder") => prefill(F_CARDHOLDER, value),
                     (3, "Brand") => prefill(F_BRAND, value),
                     (3, "Exp") => prefill(F_EXPIRY, value),
                     (4, "Email") => prefill(F_EMAIL, value),
@@ -2526,6 +2526,7 @@ mod tests {
         app.detail = Some(DetailView {
             id: "id-visa".to_owned(),
             lines: vec![
+                ("Holder".to_owned(), "A. Cardholder".to_owned()),
                 ("Brand".to_owned(), "Visa".to_owned()),
                 ("Exp".to_owned(), "04/2030".to_owned()),
             ],
@@ -2540,6 +2541,7 @@ mod tests {
                 .map(|r| r.value.to_owned())
                 .expect("row exists")
         };
+        assert_eq!(value_of("Holder"), "A. Cardholder");
         assert_eq!(value_of("Brand"), "Visa");
         assert_eq!(value_of("Expiry"), "04/2030");
         assert_eq!(value_of("Number"), "", "secrets are never prefilled");

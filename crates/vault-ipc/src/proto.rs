@@ -533,6 +533,8 @@ pub enum Field {
     Notes,
     /// First `Login.Uris[].Uri`.
     Uri,
+    /// `Card.CardholderName`.
+    CardCardholder,
     /// `Card.Number`.
     CardNumber,
     /// `Card.Brand`.

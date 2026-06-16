@@ -10,6 +10,12 @@ range may break in any release.
 
 ### Added
 
+- **`card-cardholder` field selector.** `vault get <card> --field card-cardholder`
+  now returns the cardholder name, and the TUI detail pane shows a `Holder` line
+  — which also lets the TUI card **edit** form prefill the cardholder (it
+  previously started blank, as there was no read selector). Closes the
+  card edit-prefill gap from the card-write / TUI-card slices.
+
 - **`mlock` the user keys (no swap exposure).** The agent's unwrapped user keys
   (`user_enc`/`user_mac`) are now wrapped in a `SealedKey` newtype that boxes the
   bytes for a stable address and `mlock`s their page(s) so they can't be paged to

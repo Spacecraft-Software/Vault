@@ -762,7 +762,11 @@ async fn ensure_detail(state: &mut App, socket: &Path) {
         return; // already cached for this item
     }
     let specs: &[(&str, Field)] = match sel.cipher_type {
-        3 => &[("Brand", Field::CardBrand), ("Exp", Field::CardExpiry)],
+        3 => &[
+            ("Holder", Field::CardCardholder),
+            ("Brand", Field::CardBrand),
+            ("Exp", Field::CardExpiry),
+        ],
         4 => &[
             ("Person", Field::IdentityName),
             ("Email", Field::IdentityEmail),
