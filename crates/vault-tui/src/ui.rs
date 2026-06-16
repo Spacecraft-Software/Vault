@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use vault_ipc::proto::Field;
 use vault_theme::steelbore;
 
-use crate::app::{App, Focus, FormKind, InputMode, Screen, scroll_offset};
+use crate::app::{App, Focus, FormKind, InputMode, Screen, detail_fields, scroll_offset};
 
 /// Mask shown for a secret field that has not been revealed.
 const MASK: &str = "••••••••";
@@ -258,25 +258,49 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
                     masked(&mut lines, "Pass", Field::Password);
                     "Space reveal · c/u/o copy"
                 }
-                3 => {
-                    if let Some(d) = extra {
-                        for (label, value) in &d.lines {
-                            lines.push(field_line(label, value, info));
+                // Card / identity: per-field-navigable. The detail pane's cursor
+                // (`app.detail_field`) selects one for reveal/copy.
+                3 | 4 => {
+                    for (i, fd) in detail_fields(e.cipher_type).iter().enumerate() {
+                        let revealed = fd.masked && app.is_revealed(&e.id, fd.field);
+                        let value = if fd.masked {
+                            if revealed {
+                                app.revealed.as_ref().map_or(MASK, |r| r.value()).to_owned()
+                            } else {
+                                MASK.to_owned()
+                            }
+                        } else {
+                            extra
+                                .and_then(|d| {
+                                    d.lines
+                                        .iter()
+                                        .find(|(l, _)| l == fd.label)
+                                        .map(|(_, v)| v.clone())
+                                })
+                                .unwrap_or_else(|| "—".to_owned())
+                        };
+                        let selected = app.detail_focused() && i == app.detail_field;
+                        if selected {
+                            // Cursor row: marker + amber value.
+                            lines.push(Line::from(vec![
+                                Span::styled(
+                                    format!("\u{25b8}{:<6}", fd.label),
+                                    Style::default().fg(amber).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(value, Style::default().fg(amber)),
+                            ]));
+                        } else {
+                            let color = if fd.masked && !revealed { steel } else { info };
+                            lines.push(field_line(fd.label, &value, color));
                         }
                     }
-                    masked(&mut lines, "Number", Field::CardNumber);
-                    lines.push(field_line("CVV", MASK, steel));
                     lines.push(field_line("Folder", &folder, info));
-                    "Space reveal number · c copy number"
-                }
-                4 => {
-                    if let Some(d) = extra {
-                        for (label, value) in &d.lines {
-                            lines.push(field_line(label, value, info));
-                        }
+                    lines.push(field_line("Id", &e.id, info));
+                    if app.detail_focused() {
+                        "Space reveal · c copy · j/k field"
+                    } else {
+                        "Tab to detail for per-field reveal/copy"
                     }
-                    lines.push(field_line("Folder", &folder, info));
-                    "c copy email"
                 }
                 _ => {
                     lines.push(field_line("Folder", &folder, info));
@@ -293,7 +317,7 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
         },
     );
     let para = Paragraph::new(lines)
-        .block(pane_block("Detail", false))
+        .block(pane_block("Detail", app.detail_focused()))
         .wrap(Wrap { trim: true });
     frame.render_widget(para, area);
 }

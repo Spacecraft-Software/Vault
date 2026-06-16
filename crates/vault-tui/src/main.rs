@@ -377,13 +377,18 @@ async fn handle_normal_key(state: &mut App, key: KeyEvent, socket: &Path) {
         }
         KeyCode::Char('r') => *state = load_app(socket).await,
         KeyCode::Char(' ') => toggle_reveal(state, socket).await,
-        // `c` copies the primary field for the selected item's type: login
-        // password / card number / identity email.
+        // `c` copies a field: the cursor-selected one when the detail pane is
+        // focused, else the primary field for the item's type (login password /
+        // card number / identity email).
         KeyCode::Char('c') => {
-            if let Some((field, label)) = state
-                .selected_entry()
-                .and_then(|e| app::primary_copy_field(e.cipher_type))
-            {
+            let target = if state.detail_focused() {
+                state.selected_detail_field().map(|d| (d.field, d.label))
+            } else {
+                state
+                    .selected_entry()
+                    .and_then(|e| app::primary_copy_field(e.cipher_type))
+            };
+            if let Some((field, label)) = target {
                 copy_field(state, socket, field, label).await;
             }
         }
@@ -708,34 +713,46 @@ async fn copy_generated(state: &mut App, socket: &Path) {
     }
 }
 
-/// Toggle reveal of the selected item's password in the detail pane. The first
-/// press fetches the plaintext from the agent (id-targeted, so duplicate names
-/// can't mislead it); the second re-masks. No-op unless the item list is
-/// focused and a row is selected.
+/// Toggle reveal of a masked secret in the detail pane. With the detail pane
+/// focused this is the cursor-selected masked field (card number / CVV / login
+/// password); with the item list focused it's the item's primary secret. The
+/// first press fetches the plaintext (id-targeted, so duplicate names can't
+/// mislead it); the second re-masks.
 async fn toggle_reveal(state: &mut App, socket: &Path) {
-    if !state.items_focused() {
-        return;
-    }
-    let Some(sel) = state.selected_entry() else {
+    // Resolve (id, name, field): the cursor field when the detail pane is
+    // focused (masked fields only), else the item's primary secret.
+    let (id, name, field) = if state.detail_focused() {
+        let Some(sel) = state.selected_entry() else {
+            return;
+        };
+        let Some(df) = state.selected_detail_field().filter(|d| d.masked) else {
+            return;
+        };
+        (sel.id, sel.name, df.field)
+    } else if state.items_focused() {
+        let Some(sel) = state.selected_entry() else {
+            return;
+        };
+        let Some(field) = app::primary_secret_field(sel.cipher_type) else {
+            return;
+        };
+        (sel.id, sel.name, field)
+    } else {
         return;
     };
-    // The masked secret depends on the cipher type: login password / card
-    // number. Items without one (identity, secure note) can't be revealed.
-    let Some(field) = app::primary_secret_field(sel.cipher_type) else {
-        return;
-    };
-    if state.is_revealed(&sel.id, field) {
+
+    if state.is_revealed(&id, field) {
         state.hide_revealed();
         return;
     }
     let req = Request::Get {
-        id: Some(sel.id.clone()),
-        name: sel.name.clone(),
+        id: Some(id.clone()),
+        name: name.clone(),
         field: Some(field),
     };
     match client::request(socket, &req).await {
         Ok(Response::Item(item)) => {
-            state.reveal(RevealedSecret::new(sel.id, field, item.value.clone()));
+            state.reveal(RevealedSecret::new(id, field, item.value.clone()));
         }
         Ok(Response::Error(e)) => state.set_toast(format!("reveal failed: {e}")),
         Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
@@ -761,7 +778,10 @@ async fn fetch_field(socket: &Path, id: &str, name: &str, field: Field) -> Optio
 /// run once per loop iteration before drawing. Sensitive fields (card number /
 /// CVV) are never fetched here; they reveal on demand like passwords.
 async fn ensure_detail(state: &mut App, socket: &Path) {
-    let Some(sel) = state.selected_entry().filter(|_| state.items_focused()) else {
+    let Some(sel) = state
+        .selected_entry()
+        .filter(|_| state.items_focused() || state.detail_focused())
+    else {
         state.detail = None;
         return;
     };
@@ -801,7 +821,7 @@ async fn ensure_detail(state: &mut App, socket: &Path) {
 /// terminal instead. No-op unless the item list is focused and a row is
 /// selected.
 async fn copy_field(state: &mut App, socket: &Path, field: Field, label: &str) {
-    if !state.items_focused() {
+    if !state.items_focused() && !state.detail_focused() {
         return;
     }
     let Some(sel) = state.selected_entry() else {
