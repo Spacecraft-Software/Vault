@@ -10,6 +10,14 @@ range may break in any release.
 
 ### Added
 
+- **`EncString` parser fuzz harness.** A cargo-fuzz / libFuzzer target
+  (`fuzz/fuzz_targets/enc_string_parse.rs`) for the security-critical Bitwarden
+  "type 2" parser — feeds arbitrary input to `EncString::parse` and asserts the
+  parse → serialize → parse round-trip is stable. Lives in a standalone `fuzz/`
+  workspace (nightly + sanitizer only), so the CI gates are untouched; run with
+  `cargo +nightly fuzz run enc_string_parse` (see `docs/fuzzing.md`). Groundwork
+  toward the PRD §11.4 / M7 `v0.1` gate (the ≥ 24 h soak is a maintainer step).
+
 - **TUI identity create/edit (curated).** The `vault-tui` add/edit form (`a`/`e`)
   now composes identity (type 4) items — the **Type** row cycles `login → secure
   note → card → identity`. To fit the non-scrolling overlay it edits a curated
