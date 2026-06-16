@@ -10,6 +10,14 @@ range may break in any release.
 
 ### Added
 
+- **TUI per-field reveal/copy in the detail pane.** The detail pane is now
+  focusable (`Tab` cycles folders → items → detail): with it focused, `j`/`k`
+  move a field cursor and `Space`/`c` reveal/copy the **selected** field — so the
+  **card CVV** (and any non-primary field) can finally be revealed and copied,
+  not just the item's primary field. Masked fields (card number/CVV) still fetch
+  only on reveal. Item-list `Space`/`c` keep hitting the primary field. Cards and
+  identities get the field cursor; logins keep their `c`/`u`/`o`/`t` keys.
+
 - **TUI form scrolling + full identity editing.** The add/edit form overlay now
   **scrolls** (a viewport that keeps the focused row visible; the keybind footer
   stays fixed, with a `↕` cue when there's more). This retires the curated

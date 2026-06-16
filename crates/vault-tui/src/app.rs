@@ -226,6 +226,8 @@ pub enum Focus {
     Folders,
     /// Center item list.
     Items,
+    /// Right detail pane (per-field navigation: reveal/copy the selected field).
+    Detail,
 }
 
 /// What the whole screen is showing: the browser, or a centered banner (locked
@@ -372,6 +374,51 @@ pub const fn primary_copy_field(cipher_type: u8) -> Option<(Field, &'static str)
         3 => Some((Field::CardNumber, "card number")),
         4 => Some((Field::IdentityEmail, "email")),
         _ => None,
+    }
+}
+
+/// One navigable field in the detail pane: its label, the agent selector to
+/// reveal/copy it, and whether it renders masked until revealed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DetailField {
+    /// Label shown in the detail pane.
+    pub label: &'static str,
+    /// Agent field selector for reveal/copy.
+    pub field: Field,
+    /// Hidden behind `MASK` until revealed (secrets).
+    pub masked: bool,
+}
+
+const fn df(label: &'static str, field: Field, masked: bool) -> DetailField {
+    DetailField {
+        label,
+        field,
+        masked,
+    }
+}
+
+/// The per-field-navigable fields the detail pane exposes for a cipher type, in
+/// display order. Cards and identities only — logins already have dedicated
+/// `c`/`u`/`o`/`t` copy keys and `Space` reveal; notes/anything else expose none.
+#[must_use]
+pub const fn detail_fields(cipher_type: u8) -> &'static [DetailField] {
+    const CARD: &[DetailField] = &[
+        df("Holder", Field::CardCardholder, false),
+        df("Brand", Field::CardBrand, false),
+        df("Number", Field::CardNumber, true),
+        df("Exp", Field::CardExpiry, false),
+        df("CVV", Field::CardCode, true),
+    ];
+    const IDENTITY: &[DetailField] = &[
+        df("Person", Field::IdentityName, false),
+        df("Email", Field::IdentityEmail, false),
+        df("Phone", Field::IdentityPhone, false),
+        df("Address", Field::IdentityAddress, false),
+    ];
+    match cipher_type {
+        3 => CARD,
+        4 => IDENTITY,
+        _ => &[],
     }
 }
 
@@ -1094,6 +1141,10 @@ pub struct App {
     /// Cached non-sensitive fields for the selected card/identity, `Some` while
     /// such an item is selected (populated on select; `None` for logins/notes).
     pub detail: Option<DetailView>,
+    /// Cursor into [`detail_fields`] for the selected item, used while the
+    /// detail pane is focused (per-field reveal/copy). Reset when the selection
+    /// changes or the detail pane is (re-)focused.
+    pub detail_field: usize,
     /// When a pending OSC52 fallback copy should be cleared from the terminal
     /// clipboard. The TUI owns this timer (the agent can't — it has no
     /// terminal); the run loop races it against input.
@@ -1138,6 +1189,7 @@ impl App {
             confirm_delete: None,
             revealed: None,
             detail: None,
+            detail_field: 0,
             osc52_clear_at: None,
             toast: None,
             unlock: None,
@@ -1175,6 +1227,7 @@ impl App {
             confirm_delete: None,
             revealed: None,
             detail: None,
+            detail_field: 0,
             osc52_clear_at: None,
             toast: None,
             unlock: None,
@@ -1258,12 +1311,20 @@ impl App {
                 if self.folder_sel + 1 < self.folders.len() {
                     self.folder_sel += 1;
                     self.item_sel = 0;
+                    self.detail_field = 0;
                 }
             }
             Focus::Items => {
                 let len = self.filtered().len();
                 if len > 0 && self.item_sel + 1 < len {
                     self.item_sel += 1;
+                    self.detail_field = 0;
+                }
+            }
+            Focus::Detail => {
+                let n = self.detail_field_count();
+                if n > 0 && self.detail_field + 1 < n {
+                    self.detail_field += 1;
                 }
             }
         }
@@ -1277,9 +1338,17 @@ impl App {
                 if self.folder_sel > 0 {
                     self.folder_sel -= 1;
                     self.item_sel = 0;
+                    self.detail_field = 0;
                 }
             }
-            Focus::Items => self.item_sel = self.item_sel.saturating_sub(1),
+            Focus::Items => {
+                let prev = self.item_sel;
+                self.item_sel = self.item_sel.saturating_sub(1);
+                if self.item_sel != prev {
+                    self.detail_field = 0;
+                }
+            }
+            Focus::Detail => self.detail_field = self.detail_field.saturating_sub(1),
         }
     }
 
@@ -1290,8 +1359,13 @@ impl App {
             Focus::Folders => {
                 self.folder_sel = 0;
                 self.item_sel = 0;
+                self.detail_field = 0;
             }
-            Focus::Items => self.item_sel = 0,
+            Focus::Items => {
+                self.item_sel = 0;
+                self.detail_field = 0;
+            }
+            Focus::Detail => self.detail_field = 0,
         }
     }
 
@@ -1302,8 +1376,13 @@ impl App {
             Focus::Folders => {
                 self.folder_sel = self.folders.len().saturating_sub(1);
                 self.item_sel = 0;
+                self.detail_field = 0;
             }
-            Focus::Items => self.item_sel = self.filtered().len().saturating_sub(1),
+            Focus::Items => {
+                self.item_sel = self.filtered().len().saturating_sub(1);
+                self.detail_field = 0;
+            }
+            Focus::Detail => self.detail_field = self.detail_field_count().saturating_sub(1),
         }
     }
 
@@ -1339,13 +1418,18 @@ impl App {
         self.pending_g = false;
     }
 
-    /// Toggle focus between the folder pane and the item list.
+    /// Cycle focus folders → items → detail → folders.
     pub fn focus_next(&mut self) {
         self.revealed = None;
         self.focus = match self.focus {
             Focus::Folders => Focus::Items,
-            Focus::Items => Focus::Folders,
+            Focus::Items => Focus::Detail,
+            Focus::Detail => Focus::Folders,
         };
+        // Start at the first field each time the detail pane takes focus.
+        if matches!(self.focus, Focus::Detail) {
+            self.detail_field = 0;
+        }
     }
 
     /// Whether the item list currently has focus — the gate for copy / reveal
@@ -1353,6 +1437,25 @@ impl App {
     #[must_use]
     pub const fn items_focused(&self) -> bool {
         matches!(self.focus, Focus::Items)
+    }
+
+    /// Whether the detail pane currently has focus (per-field reveal/copy).
+    #[must_use]
+    pub const fn detail_focused(&self) -> bool {
+        matches!(self.focus, Focus::Detail)
+    }
+
+    /// Number of per-field-navigable fields for the selected item (0 if none).
+    fn detail_field_count(&self) -> usize {
+        self.selected_entry()
+            .map_or(0, |e| detail_fields(e.cipher_type).len())
+    }
+
+    /// The detail field the cursor currently points at, if any.
+    #[must_use]
+    pub fn selected_detail_field(&self) -> Option<DetailField> {
+        let e = self.selected_entry()?;
+        detail_fields(e.cipher_type).get(self.detail_field).copied()
     }
 
     /// Whether `field` of the item with `entry_id` is currently revealed.
@@ -2075,13 +2178,58 @@ mod tests {
     }
 
     #[test]
-    fn focus_next_cycles_folders_and_items() {
+    fn focus_next_cycles_folders_items_detail() {
         let mut app = App::browsing(status(), vec![entry("a", None)]);
         assert_eq!(app.focus, Focus::Items);
+        app.focus_next();
+        assert_eq!(app.focus, Focus::Detail);
         app.focus_next();
         assert_eq!(app.focus, Focus::Folders);
         app.focus_next();
         assert_eq!(app.focus, Focus::Items);
+    }
+
+    #[test]
+    fn detail_fields_cover_card_and_identity() {
+        assert!(detail_fields(1).is_empty(), "login uses its own copy keys");
+        assert!(detail_fields(2).is_empty(), "note has no per-field nav");
+        let card: Vec<&str> = detail_fields(3).iter().map(|f| f.label).collect();
+        assert_eq!(card, ["Holder", "Brand", "Number", "Exp", "CVV"]);
+        let cvv = detail_fields(3)
+            .iter()
+            .find(|f| f.label == "CVV")
+            .expect("card has a CVV field");
+        assert_eq!(cvv.field, Field::CardCode);
+        assert!(cvv.masked, "CVV is masked until revealed");
+        assert_eq!(detail_fields(4).len(), 4);
+    }
+
+    #[test]
+    fn detail_cursor_navigates_and_clamps() {
+        let mut app = App::browsing(status(), vec![card_entry()]);
+        app.focus = Focus::Detail;
+        assert_eq!(app.selected_detail_field().map(|f| f.label), Some("Holder"));
+        for _ in 0..10 {
+            app.move_down(); // clamps at the last card field
+        }
+        assert_eq!(app.detail_field, 4);
+        assert_eq!(app.selected_detail_field().map(|f| f.label), Some("CVV"));
+        for _ in 0..10 {
+            app.move_up();
+        }
+        assert_eq!(app.detail_field, 0);
+    }
+
+    #[test]
+    fn detail_field_resets_when_item_selection_changes() {
+        let mut app = App::browsing(status(), vec![card_entry(), entry("b", None)]);
+        app.focus = Focus::Detail;
+        app.move_down();
+        assert_eq!(app.detail_field, 1);
+        // Moving the item selection re-zeroes the field cursor.
+        app.focus = Focus::Items;
+        app.move_down();
+        assert_eq!(app.detail_field, 0);
     }
 
     #[test]

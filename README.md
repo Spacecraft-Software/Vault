@@ -104,11 +104,13 @@ vault get me   --field identity-email  # also: identity-name, identity-phone, id
 ```
 
 In the TUI, selecting a card or identity shows its fields in the detail pane:
-card brand/expiry with the number masked (`Space` reveals it, re-masked when you
-navigate away) and the CVV masked; identity name/email/phone/address. `c` copies
-the primary field — a card's number, an identity's email (and a login's
-password). The number/CVV are fetched only on reveal, so no card secret enters
-the TUI until you ask.
+card holder/brand/expiry with the number and CVV masked; identity
+person/email/phone/address. With the item list focused, `Space` reveals the
+primary secret and `c` copies the primary field (card number / identity email /
+login password). **`Tab` into the detail pane** to navigate fields with `j`/`k`
+and reveal (`Space`) or copy (`c`) the **selected** field — including the card
+CVV. Masked values (number, CVV) are fetched only on reveal, so no card secret
+enters the TUI until you ask.
 
 Create a card with `vault add … --type card` — the non-secret fields are flags;
 the number and CVV are prompted on the terminal (never argv, so they don't leak
