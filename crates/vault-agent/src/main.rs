@@ -22,6 +22,7 @@ use vault_ipc::default_socket_path;
 #[cfg(feature = "clipboard")]
 mod clipboard;
 mod harden;
+mod sealed;
 mod server;
 mod session;
 mod state;
@@ -190,7 +191,7 @@ fn try_resume(agent: &mut AgentState) {
     };
     let user_enc = zeroize::Zeroizing::new(blob.user_enc);
     let user_mac = zeroize::Zeroizing::new(blob.user_mac);
-    match unlock::vault_from_user_key(&cache, &blob.server, &blob.email, user_enc, user_mac) {
+    match unlock::vault_from_user_key(&cache, &blob.server, &blob.email, &user_enc, &user_mac) {
         Ok(vault) => {
             agent.vault = Some(vault);
             agent.touch();

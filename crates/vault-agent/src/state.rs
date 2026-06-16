@@ -20,16 +20,18 @@ use vault_core::cipher::{
 };
 use vault_ipc::proto::{Error as IpcError, Field, Item, ListEntry, Removed, Saved, Status};
 
+use crate::sealed::SealedKey;
+
 /// In-memory keys + ciphers held while the agent is unlocked.
 pub struct Vault {
     /// Server origin the unlocked session is bound to.
     pub server: String,
     /// Account email the agent is unlocked for (lower-cased).
     pub email: String,
-    /// User symmetric encryption key.
-    pub user_enc: Zeroizing<[u8; 32]>,
-    /// User symmetric MAC key.
-    pub user_mac: Zeroizing<[u8; 32]>,
+    /// User symmetric encryption key (mlocked + zeroized; see [`SealedKey`]).
+    pub user_enc: SealedKey,
+    /// User symmetric MAC key (mlocked + zeroized; see [`SealedKey`]).
+    pub user_mac: SealedKey,
     /// Most recent `/sync` ciphers, encrypted at rest in memory until
     /// `decrypt_*` opens a specific field.
     pub ciphers: Vec<Cipher>,
@@ -1222,8 +1224,8 @@ mod tests {
         let enc = [11u8; 32];
         let mac = [12u8; 32];
         let mut v = stub_vault();
-        v.user_enc = Zeroizing::new(enc);
-        v.user_mac = Zeroizing::new(mac);
+        v.user_enc = SealedKey::new(enc);
+        v.user_mac = SealedKey::new(mac);
         v.ciphers.push(login_with_password(
             "id-first",
             "dup",
@@ -1387,8 +1389,8 @@ mod tests {
         let enc = [7u8; 32];
         let mac = [9u8; 32];
         let mut v = stub_vault();
-        v.user_enc = Zeroizing::new(enc);
-        v.user_mac = Zeroizing::new(mac);
+        v.user_enc = SealedKey::new(enc);
+        v.user_mac = SealedKey::new(mac);
         v.ciphers.push(make_cipher(
             "00000000-0000-0000-0000-000000000001",
             "github",
@@ -1423,8 +1425,8 @@ mod tests {
         let enc = [7u8; 32];
         let mac = [9u8; 32];
         let mut v = stub_vault();
-        v.user_enc = Zeroizing::new(enc);
-        v.user_mac = Zeroizing::new(mac);
+        v.user_enc = SealedKey::new(enc);
+        v.user_mac = SealedKey::new(mac);
         let e = |s: &str| vault_core::EncString::encrypt(&enc, &mac, s.as_bytes()).serialize();
         v.ciphers.push(Cipher {
             id: "totp-1".into(),
@@ -1459,8 +1461,8 @@ mod tests {
         let enc = [7u8; 32];
         let mac = [9u8; 32];
         let mut v = stub_vault();
-        v.user_enc = Zeroizing::new(enc);
-        v.user_mac = Zeroizing::new(mac);
+        v.user_enc = SealedKey::new(enc);
+        v.user_mac = SealedKey::new(mac);
         let e =
             |s: &str| Some(vault_core::EncString::encrypt(&enc, &mac, s.as_bytes()).serialize());
         v.ciphers.push(Cipher {
@@ -1499,8 +1501,8 @@ mod tests {
         let enc = [3u8; 32];
         let mac = [4u8; 32];
         let mut v = stub_vault();
-        v.user_enc = Zeroizing::new(enc);
-        v.user_mac = Zeroizing::new(mac);
+        v.user_enc = SealedKey::new(enc);
+        v.user_mac = SealedKey::new(mac);
         v.ciphers.push(make_cipher(
             "00000000-0000-0000-0000-0000000000aa",
             "duplicate",
@@ -1795,8 +1797,8 @@ mod tests {
         Vault {
             server: "https://vault.example.org".into(),
             email: "alice@example.org".into(),
-            user_enc: Zeroizing::new([0u8; 32]),
-            user_mac: Zeroizing::new([0u8; 32]),
+            user_enc: SealedKey::new([0u8; 32]),
+            user_mac: SealedKey::new([0u8; 32]),
             ciphers: Vec::new(),
             folders: std::collections::HashMap::new(),
             client: Some(client),
