@@ -10,6 +10,11 @@ range may break in any release.
 
 ### Added
 
+- **Scrolling detail pane.** The detail pane now scrolls to keep the focused
+  field visible — the granular identity view is ~18 fields and could overflow a
+  shorter terminal. Reuses the form's `scroll_offset`; only the detail-focused
+  view scrolls (browsing is unchanged).
+
 - **Granular identity field selectors.** 16 new `--field` selectors expose every
   identity field individually — `identity-{title,first-name,middle-name,
   last-name,username,company,ssn,passport,license,address1,address2,address3,
