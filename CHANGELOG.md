@@ -10,6 +10,12 @@ range may break in any release.
 
 ### Added
 
+- **`justfile` dev gates.** Recipes mirroring CI exactly — `just fmt` / `clippy`
+  (fresh-isolated `-D warnings`, the only form that matches the runner) / `test`
+  / `headless` / `version-gate` / `deny` / `audit`, with `just ci` running the
+  full set, plus `just fuzz [secs]` and `just pqc`. Encodes the commands from
+  `.github/workflows/ci.yml` so they can't drift and are one keystroke.
+
 - **`RELEASING.md` + v0.1 status reconcile.** A maintainer checklist for cutting
   the `v0.1.0` tag (operational gates → mechanical version bump / CHANGELOG date
   / signed tag), and PRD §11–§12 annotated with each criterion's status. Docs

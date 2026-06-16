@@ -34,6 +34,10 @@ cargo build --release
 ./target/release/vault --version
 ```
 
+The CI gates are mirrored in a `justfile`: `just ci` runs fmt / clippy
+(CI-exact, fresh-isolated) / test / headless / version-gate / deny / audit
+before pushing; `just --list` shows the rest (`just fuzz`, `just pqc`, …).
+
 Headless install (no TUI dependencies; the agent additionally drops the
 clipboard's X11/Wayland tree):
 
