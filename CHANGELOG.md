@@ -10,6 +10,15 @@ range may break in any release.
 
 ### Added
 
+- **Granular identity field selectors.** 16 new `--field` selectors expose every
+  identity field individually — `identity-{title,first-name,middle-name,
+  last-name,username,company,ssn,passport,license,address1,address2,address3,
+  city,state,postal,country}` — alongside the existing composed `identity-name`
+  / `identity-address`. `vault get … --field identity-ssn` now works, and the
+  TUI identity detail pane shows the full granular set so per-field reveal/copy
+  reaches every field (SSN/passport/license masked, revealed on demand like the
+  card CVV). Same proto → agent → CLI → TUI shape as the `card-*` selectors.
+
 - **TUI per-field reveal/copy in the detail pane.** The detail pane is now
   focusable (`Tab` cycles folders → items → detail): with it focused, `j`/`k`
   move a field cursor and `Space`/`c` reveal/copy the **selected** field — so the
