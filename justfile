@@ -53,6 +53,10 @@ deny:
 audit:
     cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0002
 
+# REUSE/SPDX licensing lint (CI: REUSE job). Needs reuse (`uvx reuse lint` or `pipx install reuse`).
+reuse:
+    reuse lint
+
 # EncString fuzz harness (nightly; docs/fuzzing.md). Smoke by default; the v0.1 gate is `just fuzz 86400`.
 fuzz seconds="30":
     cd fuzz && cargo +nightly fuzz run enc_string_parse -- -max_total_time={{seconds}}
@@ -63,4 +67,4 @@ pqc:
     cargo test -p vault-api --features pqc
 
 # Everything the CI runner checks, in order. Run before pushing.
-ci: fmt clippy test headless version-gate deny audit
+ci: fmt clippy test headless version-gate deny audit reuse

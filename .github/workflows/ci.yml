@@ -119,3 +119,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # REUSE (§4.3): every file has license + copyright info (via REUSE.toml) and
+  # the license texts live in LICENSES/. Python tool, independent of the pinned
+  # Rust toolchain.
+  reuse:
+    name: REUSE lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: pip install reuse
+      - run: reuse lint
