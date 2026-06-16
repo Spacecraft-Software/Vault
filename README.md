@@ -50,6 +50,10 @@ agent logs to `agent.log` beside the socket.
 The security-critical `EncString` parser has a cargo-fuzz harness under `fuzz/`
 (a standalone workspace, run on nightly) — see [`docs/fuzzing.md`](docs/fuzzing.md).
 
+An optional **post-quantum transport** (`--features pqc`) prefers the hybrid
+X25519MLKEM768 key exchange on the HTTPS client, off by default — see
+[`docs/pqc.md`](docs/pqc.md).
+
 ## Getting started
 
 ```sh

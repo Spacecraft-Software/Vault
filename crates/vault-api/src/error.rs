@@ -39,6 +39,12 @@ pub enum Error {
     /// vault-core surfaced an error (KDF, hashing, etc.) during the API flow.
     #[error("crypto: {0}")]
     Crypto(#[from] vault_core::Error),
+
+    /// The post-quantum transport (feature `pqc`) could not build its rustls
+    /// client config. Not expected in practice (safe defaults are always valid).
+    #[cfg(feature = "pqc")]
+    #[error("pqc tls config: {0}")]
+    PqcTls(String),
 }
 
 /// Convenience `Result` alias used throughout `vault-api`.

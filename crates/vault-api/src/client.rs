@@ -61,10 +61,16 @@ impl BitwardenClient {
     /// Returns [`Error::Transport`] if the underlying `reqwest` client fails to build.
     pub fn new(urls: BaseUrls, device_id: Uuid, device_name: impl Into<String>) -> Result<Self> {
         let user_agent = format!("vault/{} (Spacecraft-Software)", env!("CARGO_PKG_VERSION"));
-        let http = Client::builder()
+        let builder = Client::builder()
             .user_agent(&user_agent)
-            .https_only(urls.api.scheme() == "https")
-            .build()?;
+            .https_only(urls.api.scheme() == "https");
+        // With the `pqc` feature, prefer the X25519MLKEM768 hybrid key exchange
+        // on the TLS layer (falls back to classical when the server lacks it).
+        #[cfg(feature = "pqc")]
+        let builder = builder.use_preconfigured_tls(
+            crate::pqc::client_config().map_err(|e| Error::PqcTls(e.to_string()))?,
+        );
+        let http = builder.build()?;
         Ok(Self {
             http,
             urls,

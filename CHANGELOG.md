@@ -10,6 +10,16 @@ range may break in any release.
 
 ### Added
 
+- **Post-quantum transport (`pqc` feature, off by default).** A GPL-clean hybrid
+  **X25519MLKEM768** key-exchange group is added to the rustls client config, so
+  a TLS 1.3 handshake negotiates a post-quantum-secure secret when the server
+  offers it (silent classical fallback otherwise). The classical half reuses
+  ring's X25519; the PQ half is RustCrypto `ml-kem` (Apache-2.0/MIT) — *not*
+  aws-lc-rs, whose OpenSSL-licensed AWS-LC is GPL-incompatible. Build with
+  `cargo build -p vault-agent --features pqc`; see `docs/pqc.md`. Satisfies the
+  PRD §12 M7 "PQC transport feature flag" item (`vault-api/src/pqc.rs`, client
+  role only). Tests cover the ML-KEM client kx round-trip + the hybrid layout.
+
 - **`EncString` parser fuzz harness.** A cargo-fuzz / libFuzzer target
   (`fuzz/fuzz_targets/enc_string_parse.rs`) for the security-critical Bitwarden
   "type 2" parser — feeds arbitrary input to `EncString::parse` and asserts the
