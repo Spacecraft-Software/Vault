@@ -49,9 +49,9 @@ version-gate:
 deny:
     cargo deny check
 
-# Vulnerability advisories (CI: cargo-audit job). Needs `cargo install cargo-audit`.
+# Vulnerability advisories; --ignore mirrors CI's audit job (.github/workflows/ci.yml). Needs cargo-audit.
 audit:
-    cargo audit
+    cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0002
 
 # EncString fuzz harness (nightly; docs/fuzzing.md). Smoke by default; the v0.1 gate is `just fuzz 86400`.
 fuzz seconds="30":
