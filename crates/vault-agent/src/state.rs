@@ -772,12 +772,14 @@ impl AgentState {
                 primary_uri: true,
                 ..DecryptOptions::default()
             },
-            Field::CardNumber | Field::CardBrand | Field::CardExpiry | Field::CardCode => {
-                DecryptOptions {
-                    card: true,
-                    ..DecryptOptions::default()
-                }
-            }
+            Field::CardCardholder
+            | Field::CardNumber
+            | Field::CardBrand
+            | Field::CardExpiry
+            | Field::CardCode => DecryptOptions {
+                card: true,
+                ..DecryptOptions::default()
+            },
             Field::IdentityName
             | Field::IdentityEmail
             | Field::IdentityPhone
@@ -803,6 +805,7 @@ impl AgentState {
             },
             Field::Notes => plain.notes.clone(),
             Field::Uri => plain.primary_uri.clone(),
+            Field::CardCardholder => plain.card.as_ref().and_then(|c| c.cardholder_name.clone()),
             Field::CardNumber => plain.card.as_ref().and_then(|c| c.number.clone()),
             Field::CardBrand => plain.card.as_ref().and_then(|c| c.brand.clone()),
             Field::CardCode => plain.card.as_ref().and_then(|c| c.code.clone()),

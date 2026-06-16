@@ -99,7 +99,7 @@ Card (type 3) and identity (type 4) ciphers are readable from the CLI via
 `--field`:
 
 ```sh
-vault get visa --field card-number     # also: card-brand, card-expiry, card-code
+vault get visa --field card-number     # also: card-cardholder, card-brand, card-expiry, card-code
 vault get me   --field identity-email  # also: identity-name, identity-phone, identity-address
 ```
 
