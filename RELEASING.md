@@ -12,10 +12,11 @@ do the mechanical cut below.
 
 ## 1. Operational gates (run before tagging `v0.1.0`)
 
-- [ ] **EncString fuzz soak** — ≥ 24 h with no findings (PRD §11.4):
+- [x] **EncString fuzz soak** — ≥ 24 h with no findings (PRD §11.4):
       `cargo +nightly fuzz run enc_string_parse -- -max_total_time=86400`
       (see `docs/fuzzing.md`). Any reproducer under `fuzz/artifacts/` blocks the
-      tag until fixed.
+      tag until fixed. **Done 2026-06-18:** 8.87 B executions over 86,401 s, 0
+      findings, exit 0 — full run logged in `docs/fuzzing-report.md`.
 - [ ] **Live PQC handshake** — build with PQC and confirm an X25519MLKEM768
       handshake against a PQC-enabled endpoint:
       `cargo build -p vault-agent --features pqc` (see `docs/pqc.md`).

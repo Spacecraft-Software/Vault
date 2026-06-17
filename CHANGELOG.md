@@ -10,6 +10,13 @@ range may break in any release.
 
 ### Added
 
+- **EncString fuzz soak passed (PRD §11.4 / RELEASING.md gate #1).** A ≥ 24 h
+  libFuzzer soak of the `EncString` type-2 parser completed with **0 findings**:
+  8,874,210,317 executions over 86,401 s (~102.7 k exec/s), coverage flat at 312
+  blocks, exit 0, `fuzz/artifacts/` empty. The verbatim run is captured in
+  `docs/fuzzing-report.md`. First of the v0.1 operational gates cleared; the tag
+  still waits on the live PQC handshake and the daily-driver attestation.
+
 - **REUSE compliance (Standard §4.3) + CI gate.** Added `LICENSES/GPL-3.0-or-later.txt`
   and a `REUSE.toml` (a `path="**"` annotation supplying copyright + license in
   bulk, mirroring `construct/`), so every file carries license + copyright info
