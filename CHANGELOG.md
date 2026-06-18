@@ -10,6 +10,16 @@ range may break in any release.
 
 ### Added
 
+- **Live PQC handshake gate met (RELEASING.md gate #2).** Added
+  `live_handshake_negotiates_x25519mlkem768`, an `#[ignore]`d interop test that
+  drives a real TLS 1.3 handshake with the `pqc` client config against
+  Cloudflare's PQC host (`pq.cloudflareresearch.com`) and asserts the
+  *negotiated* group is X25519MLKEM768 — confirming the hand-rolled hybrid wire
+  layout interoperates with an independent server, not just our own halves. Run
+  with `cargo test -p vault-api --features pqc -- --ignored live_handshake`
+  (`docs/pqc.md`). Second of the v0.1 operational gates cleared; only the §11.2
+  two-week daily-driver attestation remains.
+
 - **EncString fuzz soak passed (PRD §11.4 / RELEASING.md gate #1).** A ≥ 24 h
   libFuzzer soak of the `EncString` type-2 parser completed with **0 findings**:
   8,874,210,317 executions over 86,401 s (~102.7 k exec/s), coverage flat at 312

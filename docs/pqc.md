@@ -17,6 +17,20 @@ When enabled, the client offers X25519MLKEM768 first and the classical groups
 don't yet — the handshake silently falls back to a classical group, so enabling
 the feature is safe. PQC is TLS 1.3 only.
 
+## Live handshake test
+
+The unit tests in `crates/vault-api/src/pqc.rs` exercise only our half of the
+exchange (KEM round-trip, share/secret layout, config ordering). The
+`live_handshake_negotiates_x25519mlkem768` test is the interop gate: it drives a
+real TLS 1.3 handshake with [`client_config`] against Cloudflare's PQC research
+host (`pq.cloudflareresearch.com`) and asserts the *negotiated* key-exchange
+group is X25519MLKEM768 — proving the wire construction interoperates with an
+independent server. It is `#[ignore]`d (needs network); run it with:
+
+```sh
+cargo test -p vault-api --features pqc -- --ignored live_handshake
+```
+
 ## Why we hand-roll it (and don't use aws-lc-rs)
 
 rustls only ships X25519MLKEM768 through its **aws-lc-rs** provider. aws-lc-rs
@@ -53,9 +67,10 @@ concatenates the two secrets (PQ first). This mirrors rustls's own
 
 ## Status (PRD §12 M7)
 
-This satisfies the M7 "PQC transport feature flag" item. Still pending for the
-`v0.1` tag: making PQC a tested live handshake against a PQC-enabled server, the
-≥ 24 h EncString fuzz soak (`docs/fuzzing.md`), the broader hardening pass, and
-the §11.2 two-week daily-driver attestation.
+This satisfies the M7 "PQC transport feature flag" item, and the live handshake
+gate is now met (see above — `live_handshake_negotiates_x25519mlkem768` confirms
+X25519MLKEM768 against Cloudflare). The ≥ 24 h EncString fuzz soak is also done
+(`docs/fuzzing-report.md`). Still pending for the `v0.1` tag: the §11.2 two-week
+daily-driver attestation.
 
 [`ml-kem`]: https://crates.io/crates/ml-kem
