@@ -238,4 +238,43 @@ mod tests {
             .expect("at least one kx group");
         assert_eq!(first.name(), NamedGroup::X25519MLKEM768);
     }
+
+    /// Live gate (PRD §11.4 / `RELEASING.md`): drive a real TLS 1.3 handshake
+    /// with the [`client_config`] against a PQC-enabled server and confirm the
+    /// hybrid group is actually *negotiated*, not merely offered. Cloudflare's
+    /// research host supports X25519MLKEM768; the unit tests above only exercise
+    /// our half of the exchange, so this is the one check that the wire layout
+    /// interoperates with an independent server implementation.
+    ///
+    /// `#[ignore]`d — needs network. Run with:
+    /// `cargo test -p vault-api --features pqc -- --ignored live_handshake`.
+    #[test]
+    #[ignore = "live network: handshakes with pq.cloudflareresearch.com:443"]
+    fn live_handshake_negotiates_x25519mlkem768() {
+        use rustls::pki_types::ServerName;
+        use std::net::TcpStream;
+
+        const HOST: &str = "pq.cloudflareresearch.com";
+
+        let config = Arc::new(client_config().expect("config builds"));
+        let server_name = ServerName::try_from(HOST).expect("valid server name");
+        let mut conn =
+            rustls::ClientConnection::new(config, server_name).expect("client connection");
+        let mut sock = TcpStream::connect((HOST, 443)).expect("tcp connect");
+
+        // Drive ClientHello → ServerHello…Finished → client Finished to
+        // completion; no application data needed to fix the negotiated group.
+        conn.complete_io(&mut sock)
+            .expect("tls handshake completes");
+
+        let group = conn
+            .negotiated_key_exchange_group()
+            .expect("a key-exchange group was negotiated");
+        assert_eq!(
+            group.name(),
+            NamedGroup::X25519MLKEM768,
+            "server negotiated {:?}, not the hybrid PQC group",
+            group.name(),
+        );
+    }
 }

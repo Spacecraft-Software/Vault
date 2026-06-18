@@ -17,9 +17,12 @@ do the mechanical cut below.
       (see `docs/fuzzing.md`). Any reproducer under `fuzz/artifacts/` blocks the
       tag until fixed. **Done 2026-06-18:** 8.87 B executions over 86,401 s, 0
       findings, exit 0 — full run logged in `docs/fuzzing-report.md`.
-- [ ] **Live PQC handshake** — build with PQC and confirm an X25519MLKEM768
+- [x] **Live PQC handshake** — build with PQC and confirm an X25519MLKEM768
       handshake against a PQC-enabled endpoint:
       `cargo build -p vault-agent --features pqc` (see `docs/pqc.md`).
+      **Done 2026-06-18:** `live_handshake_negotiates_x25519mlkem768`
+      (`cargo test -p vault-api --features pqc -- --ignored live_handshake`)
+      negotiated X25519MLKEM768 against `pq.cloudflareresearch.com`.
 - [ ] **End-to-end** (PRD §11.1) — `register` / `login` / `sync` / `get` against
       both bitwarden.com and a Vaultwarden container (`docs/m2-vaultwarden.md`).
 - [ ] **Daily-driver** (PRD §11.2) — two consecutive weeks of maintainer use with
