@@ -79,3 +79,46 @@ fn base_urls_rejects_garbage() {
         .then_some(())
         .expect("garbage URL must be rejected");
 }
+
+#[test]
+fn infer_from_routes_bitwarden_com_to_us_split() {
+    let u = BaseUrls::infer_from("https://bitwarden.com").unwrap();
+    assert_eq!(u.api.as_str(), "https://api.bitwarden.com/");
+    assert_eq!(u.identity.as_str(), "https://identity.bitwarden.com/");
+}
+
+#[test]
+fn infer_from_routes_bitwarden_eu_to_eu_split() {
+    let u = BaseUrls::infer_from("https://bitwarden.eu").unwrap();
+    assert_eq!(u.api.as_str(), "https://api.bitwarden.eu/");
+    assert_eq!(u.identity.as_str(), "https://identity.bitwarden.eu/");
+}
+
+#[test]
+fn infer_from_routes_cloud_subdomain_to_split() {
+    // The web-vault host (a subdomain of the apex) routes to the same cloud.
+    let u = BaseUrls::infer_from("https://vault.bitwarden.com").unwrap();
+    assert_eq!(u.api.as_str(), "https://api.bitwarden.com/");
+    assert_eq!(u.identity.as_str(), "https://identity.bitwarden.com/");
+}
+
+#[test]
+fn infer_from_routes_self_hosted_to_single_origin() {
+    let u = BaseUrls::infer_from("https://vault.example.org").unwrap();
+    assert_eq!(u.api.as_str(), "https://vault.example.org/api/");
+    assert_eq!(u.identity.as_str(), "https://vault.example.org/identity/");
+}
+
+#[test]
+fn infer_from_does_not_match_lookalike_host() {
+    // A host that merely *contains* the apex is not a cloud server.
+    let u = BaseUrls::infer_from("https://bitwarden.com.evil.example").unwrap();
+    assert_eq!(u.api.as_str(), "https://bitwarden.com.evil.example/api/");
+}
+
+#[test]
+fn infer_from_rejects_garbage() {
+    matches!(BaseUrls::infer_from("not a url"), Err(Error::BaseUrl(_)))
+        .then_some(())
+        .expect("garbage URL must be rejected");
+}
