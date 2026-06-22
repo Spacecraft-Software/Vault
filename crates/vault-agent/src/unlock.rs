@@ -468,10 +468,20 @@ pub fn ciphers_and_folders(
     let mut folders = HashMap::new();
     for f in &sync.folders {
         let Some(obj) = f.as_object() else { continue };
-        let Some(id) = obj.get("Id").and_then(|v| v.as_str()) else {
+        // Accept both casings: real servers send camelCase (`id`/`name`); older
+        // fixtures and any PascalCase deployment send `Id`/`Name`.
+        let Some(id) = obj
+            .get("id")
+            .or_else(|| obj.get("Id"))
+            .and_then(|v| v.as_str())
+        else {
             continue;
         };
-        let Some(name_enc) = obj.get("Name").and_then(|v| v.as_str()) else {
+        let Some(name_enc) = obj
+            .get("name")
+            .or_else(|| obj.get("Name"))
+            .and_then(|v| v.as_str())
+        else {
             continue;
         };
         if let Ok(enc) = vault_core::EncString::parse(name_enc)
@@ -487,6 +497,11 @@ pub fn ciphers_and_folders(
 fn api_err(e: vault_api::Error) -> IpcError {
     match e {
         vault_api::Error::ServerStatus { status, message } if status == 400 => {
+            // Surface the raw server body to agent.log: a flat "bad password"
+            // otherwise hides actionable 400s (new-device verification, captcha,
+            // region mismatch). The body is the auth *response* — it carries no
+            // secret (the password hash lives in the request).
+            eprintln!("vault-agent: login 400 body: {message}");
             if message.contains("invalid_grant") || message.to_lowercase().contains("username") {
                 IpcError::BadPassword
             } else {
@@ -563,20 +578,20 @@ mod tests {
         let sync = SyncResponse {
             profile: serde_json::Value::Null,
             folders: vec![serde_json::json!({
-                "Id": "fid-1",
-                "Name": enc_str(&enc, &mac, "Work"),
+                "id": "fid-1",
+                "name": enc_str(&enc, &mac, "Work"),
             })],
             collections: vec![],
             ciphers: vec![
                 serde_json::json!({
-                    "Id": "c1",
-                    "Type": 1,
-                    "Name": enc_str(&enc, &mac, "github.com"),
+                    "id": "c1",
+                    "type": 1,
+                    "name": enc_str(&enc, &mac, "github.com"),
                 }),
                 serde_json::json!({
-                    "Id": "c2",
-                    "Type": 2,
-                    "Name": enc_str(&enc, &mac, "note"),
+                    "id": "c2",
+                    "type": 2,
+                    "name": enc_str(&enc, &mac, "note"),
                 }),
             ],
             domains: serde_json::Value::Null,
@@ -623,9 +638,9 @@ mod tests {
             folders: vec![],
             collections: vec![],
             ciphers: vec![serde_json::json!({
-                "Id": "c1",
-                "Type": 1,
-                "Name": enc_str(&user_enc, &user_mac, "github.com"),
+                "id": "c1",
+                "type": 1,
+                "name": enc_str(&user_enc, &user_mac, "github.com"),
             })],
             domains: serde_json::Value::Null,
             sends: vec![],
@@ -682,9 +697,9 @@ mod tests {
             folders: vec![],
             collections: vec![],
             ciphers: vec![serde_json::json!({
-                "Id": "c1",
-                "Type": 1,
-                "Name": enc_str(user_enc, user_mac, "github.com"),
+                "id": "c1",
+                "type": 1,
+                "name": enc_str(user_enc, user_mac, "github.com"),
             })],
             domains: serde_json::Value::Null,
             sends: vec![],
@@ -770,10 +785,10 @@ mod tests {
         let mac = [4u8; 32];
         let sync = SyncResponse {
             profile: serde_json::Value::Null,
-            // Missing Name, and an undecryptable Name — both dropped silently.
+            // Missing name, and an undecryptable name — both dropped silently.
             folders: vec![
-                serde_json::json!({ "Id": "fid-missing-name" }),
-                serde_json::json!({ "Id": "fid-bad", "Name": "not-an-encstring" }),
+                serde_json::json!({ "id": "fid-missing-name" }),
+                serde_json::json!({ "id": "fid-bad", "name": "not-an-encstring" }),
             ],
             collections: vec![],
             ciphers: vec![],

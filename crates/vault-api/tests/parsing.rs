@@ -45,13 +45,16 @@ fn token_response_minimal_decodes() {
 
 #[test]
 fn sync_response_counts() {
+    // camelCase — the shape Bitwarden's hosted API and Vaultwarden actually
+    // return. A PascalCase body would parse to empty vecs (every field is
+    // `#[serde(default)]`), which silently synced a full vault as zero items.
     let json = r#"{
-        "Profile": {},
-        "Folders": [{"Id":"f1"}, {"Id":"f2"}],
-        "Collections": [],
-        "Ciphers": [{"Id":"c1"}, {"Id":"c2"}, {"Id":"c3"}],
-        "Domains": {},
-        "Sends": []
+        "profile": {},
+        "folders": [{"id":"f1"}, {"id":"f2"}],
+        "collections": [],
+        "ciphers": [{"id":"c1"}, {"id":"c2"}, {"id":"c3"}],
+        "domains": {},
+        "sends": []
     }"#;
     let s: SyncResponse = serde_json::from_str(json).unwrap();
     assert_eq!(s.cipher_count(), 3);

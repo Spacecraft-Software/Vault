@@ -91,6 +91,9 @@ async fn login_sync_cache_round_trip() {
         .and(path("/identity/connect/token"))
         .and(body_string_contains("grant_type=password"))
         .and(body_string_contains(urlencoded(&expected_hash)))
+        // Bitwarden's server requires this header on the post-auth path; matchers
+        // are AND'd, so login only succeeds if the client actually sends it.
+        .and(header("Bitwarden-Client-Version", vault_api::CLIENT_VERSION))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token": "test-access-token",
             "expires_in": 3600,
@@ -103,18 +106,19 @@ async fn login_sync_cache_round_trip() {
         .await;
 
     // --- /api/sync ------------------------------------------------------
+    // camelCase, matching what Bitwarden's hosted API and Vaultwarden return.
     let sync_body = json!({
-        "Profile": { "Id": "user-id-1", "Email": EMAIL },
-        "Folders": [
-            { "Id": "folder-1", "Name": "2.iv==|ct==|mac==" }
+        "profile": { "id": "user-id-1", "email": EMAIL },
+        "folders": [
+            { "id": "folder-1", "name": "2.iv==|ct==|mac==" }
         ],
-        "Collections": [],
-        "Ciphers": [
-            { "Id": "cipher-1", "Type": 1, "Name": "2.iv==|ct==|mac==" },
-            { "Id": "cipher-2", "Type": 1, "Name": "2.iv==|ct==|mac==" }
+        "collections": [],
+        "ciphers": [
+            { "id": "cipher-1", "type": 1, "name": "2.iv==|ct==|mac==" },
+            { "id": "cipher-2", "type": 1, "name": "2.iv==|ct==|mac==" }
         ],
-        "Domains": {},
-        "Sends": []
+        "domains": {},
+        "sends": []
     });
     Mock::given(method("GET"))
         .and(path("/api/sync"))
@@ -159,8 +163,8 @@ async fn login_sync_cache_round_trip() {
     assert!(reloaded.last_sync.is_some());
     let pt = reloaded.load_payload(&enc_key, &mac_key).unwrap();
     let pt_json: serde_json::Value = serde_json::from_slice(&pt).unwrap();
-    assert_eq!(pt_json["Ciphers"].as_array().unwrap().len(), 2);
-    assert_eq!(pt_json["Folders"].as_array().unwrap().len(), 1);
+    assert_eq!(pt_json["ciphers"].as_array().unwrap().len(), 2);
+    assert_eq!(pt_json["folders"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -271,7 +275,7 @@ async fn create_and_update_cipher_send_authorized_requests() {
         .and(path("/api/ciphers"))
         .and(header("Authorization", "Bearer write-test-token"))
         .and(body_string_contains("\"name\":\"2."))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "Id": new_id })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id":new_id })))
         .mount(&server)
         .await;
 
@@ -280,7 +284,7 @@ async fn create_and_update_cipher_send_authorized_requests() {
         .and(path(format!("/api/ciphers/{cipher_id}")))
         .and(header("Authorization", "Bearer write-test-token"))
         .and(body_string_contains("\"name\":\"2."))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "Id": cipher_id })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id":cipher_id })))
         .mount(&server)
         .await;
 
@@ -337,7 +341,7 @@ async fn create_secure_note_carries_securenote_marker() {
     Mock::given(method("POST"))
         .and(path("/api/ciphers"))
         .and(body_string_contains("\"secureNote\""))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "Id": "note-id-1" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id":"note-id-1" })))
         .mount(&server)
         .await;
 

@@ -423,6 +423,7 @@ impl AgentState {
     pub fn list_entries(&self) -> Result<Vec<ListEntry>, IpcError> {
         let v = self.vault.as_ref().ok_or(IpcError::Locked)?;
         let mut out = Vec::with_capacity(v.ciphers.len());
+        let mut skipped = 0usize;
         for c in &v.ciphers {
             // For ListEntry we want name + username (login items). Username
             // is cheap; decrypt it eagerly even though the wire shape allows
@@ -432,9 +433,13 @@ impl AgentState {
             } else {
                 DecryptOptions::default()
             };
-            let plain = c
-                .decrypt(&v.user_enc, &v.user_mac, opts)
-                .map_err(|e| IpcError::Decrypt(e.to_string()))?;
+            // An item whose key Vault can't unwrap (e.g. an organization cipher,
+            // wrapped under an org key we don't hold) must not sink the whole
+            // list — skip it and tally for a one-line note afterwards.
+            let Ok(plain) = c.decrypt(&v.user_enc, &v.user_mac, opts) else {
+                skipped += 1;
+                continue;
+            };
             let Some(name) = plain.name.clone() else {
                 continue; // skip unnamed items in the list view
             };
@@ -449,6 +454,11 @@ impl AgentState {
                 username: plain.username.clone(),
                 folder,
             });
+        }
+        if skipped > 0 {
+            eprintln!(
+                "vault-agent: list: skipped {skipped} undecryptable cipher(s) (likely organization items)"
+            );
         }
         out.sort_by_key(|e| e.name.to_lowercase());
         Ok(out)
@@ -472,9 +482,10 @@ impl AgentState {
         let sel_lower = selector.to_lowercase();
         let mut matches: Vec<(usize, String)> = Vec::new();
         for (idx, c) in v.ciphers.iter().enumerate() {
-            let name = c
-                .decrypt_name(&v.user_enc, &v.user_mac)
-                .map_err(|e| IpcError::Decrypt(e.to_string()))?;
+            // Skip items we can't decrypt rather than failing the whole lookup.
+            let Ok(name) = c.decrypt_name(&v.user_enc, &v.user_mac) else {
+                continue;
+            };
             if let Some(n) = name
                 && n.to_lowercase() == sel_lower
             {
@@ -733,9 +744,12 @@ impl AgentState {
         let query_lower = query.to_lowercase();
         let mut matched: Option<(&Cipher, String)> = None;
         for c in &v.ciphers {
-            let name = c
-                .decrypt_name(&v.user_enc, &v.user_mac)
-                .map_err(|e| IpcError::Decrypt(e.to_string()))?;
+            // Skip items we can't decrypt (e.g. organization ciphers, whose keys
+            // are wrapped under an org key Vault doesn't hold) — they can never
+            // be the target, and one must not abort the whole search.
+            let Ok(name) = c.decrypt_name(&v.user_enc, &v.user_mac) else {
+                continue;
+            };
             let hit = id.map_or_else(
                 || {
                     name.as_deref()
@@ -1299,6 +1313,44 @@ mod tests {
         let item = s.get_item(None, "dup", Field::Password).unwrap();
         assert_eq!(item.id, "id-first");
         assert_eq!(item.value, "first-secret");
+    }
+
+    #[test]
+    fn search_skips_undecryptable_ciphers() {
+        let enc = [7u8; 32];
+        let mac = [9u8; 32];
+        let mut v = stub_vault();
+        v.user_enc = SealedKey::new(enc);
+        v.user_mac = SealedKey::new(mac);
+        // An organization-like cipher whose per-item key is wrapped under a key
+        // Vault doesn't hold — decrypt_name fails. It precedes the real target,
+        // so neither get_item nor list_entries may abort on it.
+        let wrong = [0xAAu8; 32];
+        let mut material = [0u8; 64];
+        material[..32].copy_from_slice(&[0xBBu8; 32]);
+        material[32..].copy_from_slice(&[0xCCu8; 32]);
+        v.ciphers.push(Cipher {
+            id: "org-1".into(),
+            cipher_type: 1,
+            key: Some(vault_core::EncString::encrypt(&wrong, &wrong, &material).serialize()),
+            name: Some(
+                vault_core::EncString::encrypt(&[0xBBu8; 32], &[0xCCu8; 32], b"org").serialize(),
+            ),
+            ..Cipher::default()
+        });
+        v.ciphers.push(login_with_password(
+            "real-1", "github", "hunter2", &enc, &mac,
+        ));
+        let mut s = AgentState::new(900);
+        s.vault = Some(v);
+
+        // The undecryptable cipher must not abort the reveal of a good item.
+        let item = s.get_item(None, "github", Field::Password).unwrap();
+        assert_eq!(item.value, "hunter2");
+        // …nor the list, which simply omits it.
+        let list = s.list_entries().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "github");
     }
 
     #[cfg(feature = "clipboard")]

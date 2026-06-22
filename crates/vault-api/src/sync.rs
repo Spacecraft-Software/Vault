@@ -11,8 +11,13 @@
 use serde::{Deserialize, Serialize};
 
 /// `GET /sync` response.
+///
+/// Bitwarden's hosted API and Vaultwarden both serialize this (and the nested
+/// cipher objects) in **camelCase** (`ciphers`, `folderId`, `revisionDate`, …).
+/// An earlier `PascalCase` assumption parsed every field to its `#[serde(default)]`
+/// empty value, so a fully-populated vault silently synced as zero items.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "camelCase")]
 pub struct SyncResponse {
     /// User profile metadata (id, email, KDF, etc.).
     #[serde(default)]
