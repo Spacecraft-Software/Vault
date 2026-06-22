@@ -33,6 +33,15 @@ range may break in any release.
 
 ### Fixed
 
+- **TUI `Space` reveals the password from every pane.** `Space` revealed a
+  login's password from the item list, but did nothing while the **detail** pane
+  was focused (logins have no per-field detail rows, so there was nothing to
+  reveal) and was inert in the **folder** pane. Reveal target resolution now
+  lives in a testable `App::reveal_target`: the detail pane reveals the
+  cursor-selected masked field for cards/identities and falls back to the item's
+  primary secret for logins/notes, and the list and folder panes both reveal the
+  selected item's primary secret — so `Space` works from all three panes.
+
 - **Login against current Bitwarden / Vaultwarden servers.** Once the master
   password was accepted, the server rejected the token request with
   `400 version_header_missing` — *"No client version header found, required to
@@ -66,6 +75,19 @@ range may break in any release.
   both casings, and the test fixtures were corrected to the real shape.
 
 ### Added
+
+- **Organization / Collection items now decrypt (org-key support).** Vault
+  previously skipped every organization-owned cipher — the bulk of a vault that
+  uses Collections — because it held no key for them. At unlock the agent now
+  unwraps each organization's symmetric key from `/sync`
+  (`profile.organizations[].key`, an RSA-OAEP-SHA1 envelope opened with the
+  account key recovered from `profile.privateKey`) and routes each cipher's
+  decryption by `organization_id` (org key vs user key). Works online and from
+  the offline cache. New dependency `rsa` (RSA decryption — `ring` has none);
+  see the justified `RUSTSEC-2023-0071` ignore in `deny.toml` / CI. Items whose
+  org key can't be unwrapped are still skipped, and **editing** org items is
+  refused for now (the write path would re-encrypt under the wrong key) —
+  reads/copy work.
 
 - **`vault sync` progress spinner.** On a TTY, `vault sync` now animates a
   spinner while the agent pulls and decrypts `/sync`, then prints `✓ synced N

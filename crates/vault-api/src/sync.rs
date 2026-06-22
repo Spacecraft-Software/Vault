@@ -50,4 +50,34 @@ impl SyncResponse {
     pub const fn folder_count(&self) -> usize {
         self.folders.len()
     }
+
+    /// The account's RSA private-key envelope (`profile.privateKey`), if present
+    /// — a type-2 `EncString` wrapping the PKCS#8 DER key under the user key. Used
+    /// to unwrap organization keys.
+    #[must_use]
+    pub fn private_key(&self) -> Option<&str> {
+        self.profile
+            .get("privateKey")
+            .and_then(serde_json::Value::as_str)
+    }
+
+    /// `(organization_id, wrapped_org_key)` for each organization the account
+    /// belongs to that ships a key (`profile.organizations[]`). Each key is a
+    /// type-4 (RSA-OAEP-SHA1) `EncString`; memberships without a key are skipped.
+    #[must_use]
+    pub fn organization_keys(&self) -> Vec<(String, String)> {
+        self.profile
+            .get("organizations")
+            .and_then(serde_json::Value::as_array)
+            .map(|orgs| {
+                orgs.iter()
+                    .filter_map(|o| {
+                        let id = o.get("id")?.as_str()?.to_owned();
+                        let key = o.get("key")?.as_str()?.to_owned();
+                        Some((id, key))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }

@@ -51,7 +51,7 @@ deny:
 
 # Vulnerability advisories; --ignore mirrors CI's audit job (.github/workflows/ci.yml). Needs cargo-audit.
 audit:
-    cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0002
+    cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2023-0071
 
 # REUSE/SPDX licensing lint (CI: REUSE job). Needs reuse (`uvx reuse lint` or `pipx install reuse`).
 reuse:

@@ -1472,6 +1472,36 @@ impl App {
         detail_fields(e.cipher_type).get(self.detail_field).copied()
     }
 
+    /// The `(id, name, field)` that `Space` should reveal given the current
+    /// focus and selection, or `None` when nothing is revealable.
+    ///
+    /// Cards and identities reveal the cursor-selected **masked** detail field
+    /// when the detail pane is focused. Logins and secure notes have no per-field
+    /// detail rows, so in the detail pane they fall back to the type's primary
+    /// secret — without this, `Space` did nothing on a login while the detail
+    /// pane was focused. The item list and the folder pane both reveal the
+    /// selected item's primary secret, so `Space` works from any of the three
+    /// panes.
+    #[must_use]
+    pub fn reveal_target(&self) -> Option<(String, String, Field)> {
+        let sel = self.selected_entry()?;
+        let field = if self.detail_focused() {
+            self.selected_detail_field()
+                .filter(|d| d.masked)
+                .map(|d| d.field)
+                .or_else(|| {
+                    detail_fields(sel.cipher_type)
+                        .is_empty()
+                        .then(|| primary_secret_field(sel.cipher_type))
+                        .flatten()
+                })?
+        } else {
+            // Item list or folder pane: the selected item's primary secret.
+            primary_secret_field(sel.cipher_type)?
+        };
+        Some((sel.id, sel.name, field))
+    }
+
     /// Whether `field` of the item with `entry_id` is currently revealed.
     #[must_use]
     pub fn is_revealed(&self, entry_id: &str, field: Field) -> bool {
@@ -2310,6 +2340,51 @@ mod tests {
         ));
         app.focus_next();
         assert!(app.revealed.is_none(), "switching panes must re-mask");
+    }
+
+    #[test]
+    fn reveal_target_reveals_login_password_in_detail_pane() {
+        let mut app = App::browsing(status(), vec![entry("site", None)]); // login
+        // Item list → the login's primary secret.
+        assert!(app.items_focused());
+        assert_eq!(
+            app.reveal_target().map(|(_, _, f)| f),
+            Some(Field::Password)
+        );
+        // Detail pane on a login (no per-field rows): Space must still reveal the
+        // password — the bug this fixes was `Space` doing nothing here.
+        app.focus = Focus::Detail;
+        assert_eq!(
+            app.reveal_target().map(|(_, _, f)| f),
+            Some(Field::Password)
+        );
+        // Folder pane (left) also reveals the selected item's primary secret.
+        app.focus = Focus::Folders;
+        assert_eq!(
+            app.reveal_target().map(|(_, _, f)| f),
+            Some(Field::Password)
+        );
+    }
+
+    #[test]
+    fn reveal_target_uses_cursor_masked_field_for_cards() {
+        let card = ListEntry {
+            id: "id-card".into(),
+            name: "card".into(),
+            cipher_type: 3,
+            username: None,
+            folder: None,
+        };
+        let mut app = App::browsing(status(), vec![card]);
+        app.focus = Focus::Detail;
+        // Card detail rows: [Holder, Brand, Number(masked), Exp, CVV(masked)].
+        app.detail_field = 0; // Holder — not masked → nothing to reveal.
+        assert!(app.reveal_target().is_none());
+        app.detail_field = 2; // Number — masked → the card number.
+        assert_eq!(
+            app.reveal_target().map(|(_, _, f)| f),
+            Some(Field::CardNumber)
+        );
     }
 
     #[test]

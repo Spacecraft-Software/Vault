@@ -101,6 +101,7 @@ async fn online_unlock(
 
     let sync = client.sync().await.map_err(api_err)?;
     let (ciphers, folders) = ciphers_and_folders(&sync, &user_enc, &user_mac);
+    let org_keys = build_org_keys(&sync, &user_enc, &user_mac);
 
     // Capture the refresh token before the client is moved into the vault, so
     // it can be persisted (encrypted) and reused after a cache/PIN unlock.
@@ -115,6 +116,7 @@ async fn online_unlock(
         user_mac: SealedKey::new(*user_mac),
         ciphers,
         folders,
+        org_keys,
         client: Some(client),
         protected_user_key: encrypted_user_key.to_owned(),
         kdf: params,
@@ -295,6 +297,9 @@ pub fn vault_from_user_key(
     let sync: SyncResponse = serde_json::from_slice(&payload)
         .map_err(|e| IpcError::Internal(format!("parse cached vault: {e}")))?;
     let (ciphers, folders) = ciphers_and_folders(&sync, user_enc, user_mac);
+    // The cached payload is the full `/sync` (profile included), so org keys
+    // rebuild offline too — organization items decrypt on a cache/PIN unlock.
+    let org_keys = build_org_keys(&sync, user_enc, user_mac);
     let kdf = cache
         .kdf
         .ok_or_else(|| IpcError::Internal("cached account has no KDF params".to_owned()))?;
@@ -312,6 +317,7 @@ pub fn vault_from_user_key(
         user_mac: SealedKey::new(*user_mac),
         ciphers,
         folders,
+        org_keys,
         client: None,
         protected_user_key: cache.protected_user_key.clone().unwrap_or_default(),
         kdf,
@@ -492,6 +498,55 @@ pub fn ciphers_and_folders(
         }
     }
     (ciphers, folders)
+}
+
+/// Unwrap each organization's symmetric `(enc, mac)` key from the sync `profile`
+/// using the account RSA key (`profile.privateKey`). Best-effort: a missing or
+/// unusable private key yields an empty map, and any single org key that won't
+/// unwrap is omitted — its ciphers then stay undecryptable and are skipped, as
+/// before. Org ciphers decrypt under these keys via [`Vault::base_keys`].
+pub fn build_org_keys(
+    sync: &vault_api::SyncResponse,
+    user_enc: &[u8; 32],
+    user_mac: &[u8; 32],
+) -> HashMap<String, ([u8; 32], [u8; 32])> {
+    let mut keys = HashMap::new();
+    let entries = sync.organization_keys();
+    if entries.is_empty() {
+        return keys;
+    }
+    let Some(private_key_enc) = sync.private_key() else {
+        eprintln!(
+            "vault-agent: {} organization(s) but no account private key in sync; org items will be skipped",
+            entries.len()
+        );
+        return keys;
+    };
+    let account = match vault_core::AccountKey::from_protected(private_key_enc, user_enc, user_mac)
+    {
+        Ok(account) => account,
+        Err(e) => {
+            eprintln!(
+                "vault-agent: could not recover account private key ({e}); org items will be skipped"
+            );
+            return keys;
+        }
+    };
+    let mut failed = 0usize;
+    for (id, wrapped) in entries {
+        match account.decrypt_org_key(&wrapped) {
+            Ok(key) => {
+                keys.insert(id, key);
+            }
+            Err(_) => failed += 1,
+        }
+    }
+    if failed > 0 {
+        eprintln!(
+            "vault-agent: {failed} organization key(s) could not be unwrapped; those items will be skipped"
+        );
+    }
+    keys
 }
 
 fn api_err(e: vault_api::Error) -> IpcError {

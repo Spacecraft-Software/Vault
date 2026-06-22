@@ -14,6 +14,12 @@ ignore = [
     # by ratatui (TUI). The author archived it with no successor we can swap to
     # without dropping ratatui. Revisit when ratatui's tree drops `paste`.
     "RUSTSEC-2024-0436",
+    # rsa 0.9 — RUSTSEC-2023-0071 (Marvin timing sidechannel, no upstream fix).
+    # `rsa` only RSA-OAEP-unwraps organization keys, once and locally, at unlock.
+    # The Marvin attack needs a network-observable decryption oracle timing many
+    # adaptively-chosen ciphertexts; Vault never exposes one. Mirrors the
+    # cargo-audit ignore in CI. Revisit if `rsa` ships a constant-time fix.
+    "RUSTSEC-2023-0071",
 ]
 
 [licenses]

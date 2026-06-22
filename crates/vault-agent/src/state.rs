@@ -37,6 +37,12 @@ pub struct Vault {
     pub ciphers: Vec<Cipher>,
     /// Folder id → decrypted folder name.
     pub folders: std::collections::HashMap<String, String>,
+    /// Organization id → that org's symmetric `(enc, mac)` key, unwrapped from
+    /// `profile.organizations[]` via the account RSA key at unlock. Organization
+    /// ciphers (`organization_id` set) decrypt under their org key, not the user
+    /// key; an org absent here (key couldn't be unwrapped) leaves its ciphers
+    /// undecryptable and they are skipped, as before.
+    pub org_keys: std::collections::HashMap<String, ([u8; 32], [u8; 32])>,
     /// Authenticated REST client for `Sync`/`Remove`/`Edit`/`Add`, holding the
     /// access token. `Some` for an online unlock; `None` for a session unlocked
     /// from the local cache (offline) — server ops then return `Error::Offline`.
@@ -59,6 +65,20 @@ pub struct Vault {
 }
 
 impl Vault {
+    /// The `(enc, mac)` key a given cipher's fields are encrypted under: its
+    /// organization's key when the cipher is org-owned and we hold that key,
+    /// otherwise the user key. The returned pair is what's handed to
+    /// [`Cipher::decrypt`] / [`Cipher::decrypt_name`] — which then resolve any
+    /// per-cipher key on top of it.
+    fn base_keys(&self, cipher: &Cipher) -> (&[u8; 32], &[u8; 32]) {
+        if let Some(oid) = cipher.organization_id.as_deref()
+            && let Some((enc, mac)) = self.org_keys.get(oid)
+        {
+            return (enc, mac);
+        }
+        (&self.user_enc, &self.user_mac)
+    }
+
     /// Encrypt the `/sync` response under the user key and write the account's
     /// cache (payload + protected user key + KDF + device id) to disk
     /// atomically, so a later `unlock` can reconstruct this vault offline.
@@ -433,10 +453,11 @@ impl AgentState {
             } else {
                 DecryptOptions::default()
             };
-            // An item whose key Vault can't unwrap (e.g. an organization cipher,
-            // wrapped under an org key we don't hold) must not sink the whole
-            // list — skip it and tally for a one-line note afterwards.
-            let Ok(plain) = c.decrypt(&v.user_enc, &v.user_mac, opts) else {
+            // Organization ciphers decrypt under their org key; personal ones
+            // under the user key. An item we still can't decrypt (org key we
+            // don't hold) must not sink the whole list — skip it and tally.
+            let (base_enc, base_mac) = v.base_keys(c);
+            let Ok(plain) = c.decrypt(base_enc, base_mac, opts) else {
                 skipped += 1;
                 continue;
             };
@@ -483,7 +504,8 @@ impl AgentState {
         let mut matches: Vec<(usize, String)> = Vec::new();
         for (idx, c) in v.ciphers.iter().enumerate() {
             // Skip items we can't decrypt rather than failing the whole lookup.
-            let Ok(name) = c.decrypt_name(&v.user_enc, &v.user_mac) else {
+            let (base_enc, base_mac) = v.base_keys(c);
+            let Ok(name) = c.decrypt_name(base_enc, base_mac) else {
                 continue;
             };
             if let Some(n) = name
@@ -510,8 +532,9 @@ impl AgentState {
         let idx = self.resolve_cipher(selector)?;
         let v = self.vault.as_mut().ok_or(IpcError::Locked)?;
         let id = v.ciphers[idx].id.clone();
+        let (base_enc, base_mac) = v.base_keys(&v.ciphers[idx]);
         let name = v.ciphers[idx]
-            .decrypt_name(&v.user_enc, &v.user_mac)
+            .decrypt_name(base_enc, base_mac)
             .map_err(|e| IpcError::Decrypt(e.to_string()))?
             .unwrap_or_else(|| "<unnamed>".to_owned());
         v.ensure_online().await?;
@@ -633,6 +656,15 @@ impl AgentState {
         let v = self.vault.as_mut().ok_or(IpcError::Locked)?;
 
         let mut cipher = v.ciphers[idx].clone();
+        // Organization items are encrypted under the org key (and a per-cipher
+        // key wrapped under it); the edit path re-encrypts changed fields under
+        // the *user* key, which would corrupt them. Refuse until org-aware write
+        // support exists — reads/copy of org items already work.
+        if cipher.organization_id.is_some() {
+            return Err(IpcError::Internal(
+                "editing organization items is not supported yet".to_owned(),
+            ));
+        }
         if card_present && cipher.cipher_type != 3 {
             return Err(IpcError::Internal(
                 "card fields can only be edited on a card item".to_owned(),
@@ -721,6 +753,7 @@ impl AgentState {
             .map_err(|e| IpcError::Network(e.to_string()))?;
         let (ciphers, folders) =
             crate::unlock::ciphers_and_folders(&sync, &v.user_enc, &v.user_mac);
+        v.org_keys = crate::unlock::build_org_keys(&sync, &v.user_enc, &v.user_mac);
         v.ciphers = ciphers;
         v.folders = folders;
         v.last_sync = crate::unlock::now_iso();
@@ -744,10 +777,11 @@ impl AgentState {
         let query_lower = query.to_lowercase();
         let mut matched: Option<(&Cipher, String)> = None;
         for c in &v.ciphers {
-            // Skip items we can't decrypt (e.g. organization ciphers, whose keys
-            // are wrapped under an org key Vault doesn't hold) — they can never
-            // be the target, and one must not abort the whole search.
-            let Ok(name) = c.decrypt_name(&v.user_enc, &v.user_mac) else {
+            // Decrypt under the cipher's base key (org or user). Skip items we
+            // still can't open (org key we don't hold) — they can't be the
+            // target, and one must not abort the whole search.
+            let (base_enc, base_mac) = v.base_keys(c);
+            let Ok(name) = c.decrypt_name(base_enc, base_mac) else {
                 continue;
             };
             let hit = id.map_or_else(
@@ -819,8 +853,9 @@ impl AgentState {
                 ..DecryptOptions::default()
             },
         };
+        let (base_enc, base_mac) = v.base_keys(cipher);
         let plain = cipher
-            .decrypt(&v.user_enc, &v.user_mac, opts)
+            .decrypt(base_enc, base_mac, opts)
             .map_err(|e| IpcError::Decrypt(e.to_string()))?;
         let value = match field {
             Field::Password => plain.password.clone(),
@@ -1351,6 +1386,60 @@ mod tests {
         let list = s.list_entries().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "github");
+    }
+
+    #[test]
+    fn org_cipher_decrypts_under_org_key() {
+        let user_enc = [7u8; 32];
+        let user_mac = [9u8; 32];
+        let org_enc = [21u8; 32];
+        let org_mac = [22u8; 32];
+        let mut v = stub_vault();
+        v.user_enc = SealedKey::new(user_enc);
+        v.user_mac = SealedKey::new(user_mac);
+        v.org_keys.insert("org-1".to_owned(), (org_enc, org_mac));
+        let e = |ke: &[u8; 32], km: &[u8; 32], s: &str| {
+            vault_core::EncString::encrypt(ke, km, s.as_bytes()).serialize()
+        };
+        // An org cipher: name + password under the ORG key, not the user key.
+        v.ciphers.push(Cipher {
+            id: "org-c1".into(),
+            cipher_type: 1,
+            organization_id: Some("org-1".into()),
+            name: Some(e(&org_enc, &org_mac, "shared-login")),
+            login: Some(Login {
+                password: Some(e(&org_enc, &org_mac, "org-secret")),
+                ..Login::default()
+            }),
+            ..Cipher::default()
+        });
+        // A second org cipher whose org key we don't hold → skipped, not an error.
+        v.ciphers.push(Cipher {
+            id: "org-c2".into(),
+            cipher_type: 1,
+            organization_id: Some("org-unknown".into()),
+            name: Some(e(&[1u8; 32], &[2u8; 32], "invisible")),
+            ..Cipher::default()
+        });
+        let mut s = AgentState::new(900);
+        s.vault = Some(v);
+
+        let item = s
+            .get_item(Some("org-c1"), "shared-login", Field::Password)
+            .unwrap();
+        assert_eq!(item.value, "org-secret", "decrypted under the org key");
+        let list = s.list_entries().unwrap();
+        assert_eq!(list.len(), 1, "the unknown-org cipher is skipped");
+        assert_eq!(list[0].name, "shared-login");
+
+        // Editing an org item is refused (write path would corrupt it).
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("rt");
+        let err = rt
+            .block_on(s.edit_cipher("org-c1", CipherWrite::default()))
+            .unwrap_err();
+        assert!(matches!(err, IpcError::Internal(_)), "got {err:?}");
     }
 
     #[cfg(feature = "clipboard")]
@@ -1897,6 +1986,7 @@ mod tests {
             user_mac: SealedKey::new([0u8; 32]),
             ciphers: Vec::new(),
             folders: std::collections::HashMap::new(),
+            org_keys: std::collections::HashMap::new(),
             client: Some(client),
             protected_user_key: String::new(),
             kdf: vault_core::kdf::KdfParams {

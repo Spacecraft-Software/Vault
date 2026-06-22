@@ -719,25 +719,11 @@ async fn copy_generated(state: &mut App, socket: &Path) {
 /// first press fetches the plaintext (id-targeted, so duplicate names can't
 /// mislead it); the second re-masks.
 async fn toggle_reveal(state: &mut App, socket: &Path) {
-    // Resolve (id, name, field): the cursor field when the detail pane is
-    // focused (masked fields only), else the item's primary secret.
-    let (id, name, field) = if state.detail_focused() {
-        let Some(sel) = state.selected_entry() else {
-            return;
-        };
-        let Some(df) = state.selected_detail_field().filter(|d| d.masked) else {
-            return;
-        };
-        (sel.id, sel.name, df.field)
-    } else if state.items_focused() {
-        let Some(sel) = state.selected_entry() else {
-            return;
-        };
-        let Some(field) = app::primary_secret_field(sel.cipher_type) else {
-            return;
-        };
-        (sel.id, sel.name, field)
-    } else {
+    // Resolve (id, name, field): the cursor-selected masked detail field when
+    // the detail pane is focused (cards/identities), else the item's primary
+    // secret — including logins/notes in the detail pane, which have no per-field
+    // detail rows. See `App::reveal_target`.
+    let Some((id, name, field)) = state.reveal_target() else {
         return;
     };
 
