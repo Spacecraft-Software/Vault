@@ -23,6 +23,14 @@ range may break in any release.
   whole stream — and non-secret prompts (the register server picker, account
   email, the ephemeral authenticator code) still echo by design.
 
+- **Bumped `quinn-proto` 0.11.14 → 0.11.15 (RUSTSEC-2026-0185).** A remote
+  memory-exhaustion (DoS) advisory in `quinn-proto`'s out-of-order stream
+  reassembly, published 2026-06-22. `quinn-proto` is a phantom `Cargo.lock`
+  entry — an unenabled QUIC/HTTP3 path of `reqwest`; Vault speaks HTTP/2 only,
+  so it never enters the build graph and the flaw is unreachable — but
+  `cargo audit` scans the lockfile literally, so the patched release is pulled
+  in to keep the supply-chain gate green.
+
 ### Added
 
 - **EncString fuzz soak passed (PRD §11.4 / RELEASING.md gate #1).** A ≥ 24 h
