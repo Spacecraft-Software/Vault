@@ -83,6 +83,11 @@ dirs = "5"
 linux-keyutils = "0.2"
 time = { version = "0.3", features = ["serde", "serde-well-known"] }
 fs2 = "0.4"
+# Terminal control — disable echo while reading secrets at an interactive
+# prompt (master password, PIN, card number/CVV, identity SSN/passport/license).
+# Pure-Rust syscalls, so the CLI keeps `forbid(unsafe_code)`; already in the tree
+# transitively via `secmem-proc`. MIT / Apache-2.0; GPL-3.0-or-later compatible.
+rustix = { version = "1", features = ["termios"] }
 
 # TUI — ratatui + crossterm (MIT; GPL-3.0-or-later compatible). No cursive
 # (license-tree hygiene per PRD §7.2).
