@@ -8,6 +8,29 @@ range may break in any release.
 
 ## [Unreleased]
 
+### Security
+
+- **Interactive secret prompts no longer echo to the terminal.** `vault login`
+  / `vault unlock` printed the **master password in clear text** as it was
+  typed (visible on screen and in scrollback); the PIN, the `add`/`edit` login
+  password, and the card number/CVV and identity SSN/passport/license prompts
+  had the same flaw. The CLI now disables terminal `ECHO` for the duration of
+  every interactive secret read (a `NoEcho` RAII guard over `rustix::termios`,
+  restored on drop — including on error/panic; no new dependency, no `unsafe`).
+  Interactive entry now also **submits on Enter** (the master-password path
+  previously read until EOF, so a typed password sat until `Ctrl-D`). Piped /
+  redirected input is unchanged — `pass show | vault login` still reads the
+  whole stream — and non-secret prompts (the register server picker, account
+  email, the ephemeral authenticator code) still echo by design.
+
+- **Bumped `quinn-proto` 0.11.14 → 0.11.15 (RUSTSEC-2026-0185).** A remote
+  memory-exhaustion (DoS) advisory in `quinn-proto`'s out-of-order stream
+  reassembly, published 2026-06-22. `quinn-proto` is a phantom `Cargo.lock`
+  entry — an unenabled QUIC/HTTP3 path of `reqwest`; Vault speaks HTTP/2 only,
+  so it never enters the build graph and the flaw is unreachable — but
+  `cargo audit` scans the lockfile literally, so the patched release is pulled
+  in to keep the supply-chain gate green.
+
 ### Added
 
 - **EncString fuzz soak passed (PRD §11.4 / RELEASING.md gate #1).** A ≥ 24 h

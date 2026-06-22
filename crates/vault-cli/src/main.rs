@@ -16,6 +16,7 @@ use vault_config as config;
 
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
@@ -632,15 +633,15 @@ impl IdentityArgs {
             company: self.company,
             ssn: self
                 .ssn
-                .then(|| read_tty_line("SSN / national id: ").map(String::into_bytes))
+                .then(|| read_tty_secret("SSN / national id: ").map(String::into_bytes))
                 .flatten(),
             passport_number: self
                 .passport
-                .then(|| read_tty_line("Passport number: ").map(String::into_bytes))
+                .then(|| read_tty_secret("Passport number: ").map(String::into_bytes))
                 .flatten(),
             license_number: self
                 .license
-                .then(|| read_tty_line("License number: ").map(String::into_bytes))
+                .then(|| read_tty_secret("License number: ").map(String::into_bytes))
                 .flatten(),
             email: self.email,
             phone: self.phone,
@@ -1060,10 +1061,69 @@ async fn password_unlock(
     }
 }
 
+/// RAII guard that disables terminal ECHO on `fd` for its lifetime, restoring
+/// the prior attributes on drop — including on early return or panic.
+///
+/// [`new`](NoEcho::new) returns `None` when `fd` is not a terminal or its
+/// attributes can't be read; callers then fall back to a plain (echoing) read,
+/// which is the only safe degradation and is harmless for piped input (nothing
+/// is displayed there anyway). Built on `rustix::termios`, so no `unsafe` is
+/// introduced and the crate keeps `#![forbid(unsafe_code)]`.
+struct NoEcho<Fd: AsFd> {
+    fd: Fd,
+    original: rustix::termios::Termios,
+}
+
+impl<Fd: AsFd> NoEcho<Fd> {
+    fn new(fd: Fd) -> Option<Self> {
+        use rustix::termios::{LocalModes, OptionalActions, tcgetattr, tcsetattr};
+
+        let original = tcgetattr(&fd).ok()?;
+        let mut modified = original.clone();
+        // Clear ECHO only; ICANON stays on so the read is still line-buffered
+        // (Enter submits, Backspace edits) — we just stop the typed characters
+        // from being printed back to the screen.
+        modified.local_modes.remove(LocalModes::ECHO);
+        // `Flush` (TCSAFLUSH): apply now and discard any already-typed input,
+        // so a character typed (and echoed) before the guard took effect can't
+        // leak into the secret.
+        tcsetattr(&fd, OptionalActions::Flush, &modified).ok()?;
+        Some(Self { fd, original })
+    }
+}
+
+impl<Fd: AsFd> Drop for NoEcho<Fd> {
+    fn drop(&mut self) {
+        let _ = rustix::termios::tcsetattr(
+            &self.fd,
+            rustix::termios::OptionalActions::Now,
+            &self.original,
+        );
+    }
+}
+
 /// Prompt on the controlling terminal (`/dev/tty`) and read one line, so it
 /// works even when stdin was piped/consumed (the password path). `None` if the
 /// terminal can't be opened or the line is empty (treated as "abort").
+///
+/// Echoing variant — for non-secret prompts (menu choices, server URL, account
+/// email). For secrets entered on the terminal (card number/CVV, identity
+/// SSN/passport/license) use [`read_tty_secret`], which suppresses echo.
 fn read_tty_line(prompt: &str) -> Option<String> {
+    read_tty(prompt, false)
+}
+
+/// Like [`read_tty_line`], but disables terminal echo while reading — for
+/// secrets entered on `/dev/tty` so they never appear on screen or in
+/// scrollback.
+fn read_tty_secret(prompt: &str) -> Option<String> {
+    read_tty(prompt, true)
+}
+
+/// Shared `/dev/tty` line reader. When `secret` is set, echo is suppressed for
+/// the read (a [`NoEcho`] guard) and a newline is emitted afterward, since the
+/// user's un-echoed Enter otherwise leaves the cursor on the prompt line.
+fn read_tty(prompt: &str, secret: bool) -> Option<String> {
     let tty = OpenOptions::new()
         .read(true)
         .write(true)
@@ -1074,8 +1134,15 @@ fn read_tty_line(prompt: &str) -> Option<String> {
         let _ = write!(w, "{prompt}");
         let _ = w.flush();
     }
+    let no_echo = secret.then(|| NoEcho::new(tty.as_fd())).flatten();
     let mut line = String::new();
-    BufReader::new(tty).read_line(&mut line).ok()?;
+    let read = BufReader::new(&tty).read_line(&mut line).ok();
+    if no_echo.is_some() {
+        let mut w = &tty;
+        let _ = writeln!(w);
+    }
+    drop(no_echo); // restore echo before returning
+    read?;
     let trimmed = line.trim_end_matches(['\n', '\r']).to_owned();
     line.zeroize();
     if trimmed.is_empty() {
@@ -1525,10 +1592,10 @@ async fn cmd_add(ep: Endpoint<'_>, args: AddArgs) -> Result<(), u8> {
         Some(CardWrite {
             cardholder: args.cardholder,
             brand: args.brand,
-            number: read_tty_line("Card number: ").map(String::into_bytes),
+            number: read_tty_secret("Card number: ").map(String::into_bytes),
             exp_month,
             exp_year,
-            code: read_tty_line("CVV (leave empty for none): ").map(String::into_bytes),
+            code: read_tty_secret("CVV (leave empty for none): ").map(String::into_bytes),
         })
     } else {
         None
@@ -1634,13 +1701,13 @@ async fn cmd_edit(ep: Endpoint<'_>, args: EditArgs) -> Result<(), u8> {
             brand: args.brand,
             number: args
                 .number
-                .then(|| read_tty_line("New card number: ").map(String::into_bytes))
+                .then(|| read_tty_secret("New card number: ").map(String::into_bytes))
                 .flatten(),
             exp_month,
             exp_year,
             code: args
                 .code
-                .then(|| read_tty_line("New CVV: ").map(String::into_bytes))
+                .then(|| read_tty_secret("New CVV: ").map(String::into_bytes))
                 .flatten(),
         })
     } else {
@@ -1715,21 +1782,31 @@ fn generate_pw(len: usize) -> Result<Zeroizing<String>, u8> {
     })
 }
 
-/// Read an optional secret from stdin. Returns `None` for empty input (after a
-/// single trailing newline). Prompts on a TTY; never echoes via argv.
-fn read_secret(prompt: &str) -> Result<Option<Vec<u8>>, u8> {
+/// Read a secret from stdin, returning `None` for empty input (after stripping
+/// one trailing newline). On an interactive terminal: print `prompt` to stderr,
+/// suppress echo for the duration (a [`NoEcho`] guard), read a single line
+/// (Enter submits), then emit a newline. When stdin is piped/redirected the
+/// whole stream is read (no prompt, no echo concern) so piped secrets — e.g.
+/// `pass show | vault login` — keep working.
+fn read_stdin_secret(prompt: &str) -> io::Result<Option<Vec<u8>>> {
     let stdin = io::stdin();
+    let mut buf = String::new();
     if stdin.is_terminal() {
         let mut stderr = io::stderr();
         let _ = write!(stderr, "{prompt}");
         let _ = stderr.flush();
+        let no_echo = NoEcho::new(stdin.as_fd());
+        let read = stdin.lock().read_line(&mut buf);
+        if no_echo.is_some() {
+            let _ = writeln!(io::stderr());
+        }
+        drop(no_echo); // restore echo before propagating any read error
+        read?;
+    } else {
+        stdin.lock().read_to_string(&mut buf)?;
     }
-    let mut buf = String::new();
-    let read_res = stdin.lock().read_to_string(&mut buf);
-    if let Err(e) = read_res {
-        eprintln!("vault: failed to read input: {e}");
-        return Err(2);
-    }
+    // Strip exactly one trailing newline (terminals send one); preserve any
+    // deliberate trailing whitespace beyond that.
     if buf.ends_with('\n') {
         buf.pop();
         if buf.ends_with('\r') {
@@ -1743,6 +1820,15 @@ fn read_secret(prompt: &str) -> Result<Option<Vec<u8>>, u8> {
     let bytes = buf.as_bytes().to_vec();
     buf.zeroize();
     Ok(Some(bytes))
+}
+
+/// Read an optional secret from stdin. Returns `None` for empty input. Echo is
+/// suppressed on an interactive terminal; never echoes via argv.
+fn read_secret(prompt: &str) -> Result<Option<Vec<u8>>, u8> {
+    read_stdin_secret(prompt).map_err(|e| {
+        eprintln!("vault: failed to read input: {e}");
+        2u8
+    })
 }
 
 async fn cmd_get(ep: Endpoint<'_>, name: String, field: Field, json: bool) -> Result<(), u8> {
@@ -1894,38 +1980,23 @@ fn resolve_register_email(cli: Option<String>) -> Result<String, u8> {
     Err(2)
 }
 
-/// Read the master password. Prompts on a TTY with no echo guarantee yet
-/// (M3 ships without `rpassword` to keep the dep tree slim — interactive
-/// users should redirect from a tool like `pass` or `gpg --decrypt`).
+/// Read the master password. On an interactive terminal the input is **not**
+/// echoed (a [`NoEcho`] guard) and a single line is read (Enter submits). When
+/// stdin is piped/redirected the entire stream is taken as the password, so
+/// `pass show | vault login` and the "stdin consumed, 2FA read from `/dev/tty`"
+/// flow keep working. Empty input is rejected.
 fn read_password() -> Result<Vec<u8>, u8> {
-    let stdin = io::stdin();
-    if stdin.is_terminal() {
-        let mut stderr = io::stderr();
-        let _ = write!(stderr, "Master password: ");
-        let _ = stderr.flush();
-    }
-    let mut buf = String::new();
-    let read_res = stdin.lock().read_to_string(&mut buf);
-    if let Err(e) = read_res {
-        eprintln!("vault: failed to read password: {e}");
-        return Err(2);
-    }
-    // Strip exactly one trailing newline (typical from terminals); preserve
-    // any deliberate trailing whitespace beyond that.
-    if buf.ends_with('\n') {
-        buf.pop();
-        if buf.ends_with('\r') {
-            buf.pop();
+    match read_stdin_secret("Master password: ") {
+        Ok(Some(bytes)) => Ok(bytes),
+        Ok(None) => {
+            eprintln!("vault: empty password");
+            Err(2)
+        }
+        Err(e) => {
+            eprintln!("vault: failed to read password: {e}");
+            Err(2)
         }
     }
-    if buf.is_empty() {
-        eprintln!("vault: empty password");
-        buf.zeroize();
-        return Err(2);
-    }
-    let bytes = buf.as_bytes().to_vec();
-    buf.zeroize();
-    Ok(bytes)
 }
 
 /// Print a `{ "<action>": true }` acknowledgement under `--json`; stay silent
