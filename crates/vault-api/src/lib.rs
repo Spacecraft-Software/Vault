@@ -14,7 +14,9 @@ pub mod pqc;
 pub mod sync;
 pub mod urls;
 
-pub use client::{BitwardenClient, CLIENT_ID, DEVICE_TYPE_CLI, TwoFactor};
+pub use client::{
+    BitwardenClient, CLIENT_ID, CLIENT_NAME, CLIENT_VERSION, DEVICE_TYPE_CLI, TwoFactor,
+};
 pub use error::{Error, Result};
 pub use identity::{PreloginResponse, TokenResponse};
 pub use sync::SyncResponse;

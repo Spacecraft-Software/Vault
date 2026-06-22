@@ -31,7 +31,46 @@ range may break in any release.
   `cargo audit` scans the lockfile literally, so the patched release is pulled
   in to keep the supply-chain gate green.
 
+### Fixed
+
+- **Login against current Bitwarden / Vaultwarden servers.** Once the master
+  password was accepted, the server rejected the token request with
+  `400 version_header_missing` — *"No client version header found, required to
+  prevent encryption errors"* — because `vault-api` sent no client-identification
+  headers. The client now sends the Bitwarden trio (`Bitwarden-Client-Name`,
+  `Bitwarden-Client-Version`, `Device-Type`) as `reqwest` default headers on
+  every request. The advertised version (`vault_api::CLIENT_VERSION`) is a recent
+  *Bitwarden* client version — not Vault's own — chosen to clear the server's
+  min-version gate while keeping it on the EncString type-2 / PBKDF2+Argon2 crypto
+  path Vault implements. Because the check sits on the **post-authentication**
+  path, a wrong password still fails first with `invalid_grant` ("bad password"),
+  which is why the missing header only surfaced once the password was correct.
+
+- **2FA challenge misreported as "bad password".** Bitwarden's hosted server
+  returns the `TwoFactorProviders` list with provider ids as JSON **strings**
+  (`["0","7"]`); `vault-api`'s parser expected integers, so the whole 2FA error
+  body failed to deserialize and fell through to a generic `invalid_grant` —
+  which the agent rendered as "bad password", even with a correct password and a
+  valid authenticator. The provider-id parse now accepts strings *or* integers
+  (and never fails the surrounding 2FA detection). The agent also logs the raw
+  server body on a login `400`, so an opaque "bad password" can't mask an
+  actionable response again.
+
+- **`vault sync` reported 0 items from a populated vault.** The `/sync` response
+  (and every nested cipher) is **camelCase** on current Bitwarden cloud and
+  Vaultwarden, but `SyncResponse` and the `vault-core` cipher types were
+  `PascalCase`; every field fell back to its `#[serde(default)]` empty value, so
+  a full vault parsed as zero ciphers. The API-service wire structs are now
+  camelCase (identity-service structs — `TokenResponse`, `TwoFactorErrorBody` —
+  stay PascalCase, matching that endpoint), folder-name extraction tolerates
+  both casings, and the test fixtures were corrected to the real shape.
+
 ### Added
+
+- **`vault sync` progress spinner.** On a TTY, `vault sync` now animates a
+  spinner while the agent pulls and decrypts `/sync`, then prints `✓ synced N
+  items`. Suppressed under `--json` and when stderr is not a terminal, so
+  scripts and machine consumers are unaffected.
 
 - **EncString fuzz soak passed (PRD §11.4 / RELEASING.md gate #1).** A ≥ 24 h
   libFuzzer soak of the `EncString` type-2 parser completed with **0 findings**:

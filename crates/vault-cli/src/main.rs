@@ -1350,9 +1350,48 @@ async fn cmd_ack(ep: Endpoint<'_>, req: Request, action: &str, json: bool) -> Re
     }
 }
 
+/// Run `fut` while animating a spinner on stderr, clearing the line when it
+/// resolves. No-ops to a plain await when stderr isn't a TTY (piped/redirected),
+/// so machine consumers never see escape codes. The work itself happens in the
+/// agent; this is purely a "something is happening" affordance.
+async fn with_spinner<F: std::future::Future>(label: &str, fut: F) -> F::Output {
+    // Braille spinner — matches the dot aesthetic used elsewhere in the UI.
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    if !io::stderr().is_terminal() {
+        return fut.await;
+    }
+    tokio::pin!(fut);
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(80));
+    let mut frame = 0usize;
+    loop {
+        tokio::select! {
+            output = &mut fut => {
+                // Carriage return + clear-to-end-of-line wipes the spinner.
+                let mut err = io::stderr();
+                let _ = write!(err, "\r\x1b[2K");
+                let _ = err.flush();
+                return output;
+            }
+            _ = ticker.tick() => {
+                let mut err = io::stderr();
+                let _ = write!(err, "\r{} {label}", FRAMES[frame]);
+                let _ = err.flush();
+                frame = (frame + 1) % FRAMES.len();
+            }
+        }
+    }
+}
+
 async fn cmd_sync(ep: Endpoint<'_>, json: bool) -> Result<(), u8> {
     let mut stream = connect(ep).await?;
-    let resp = exchange(&mut stream, &Request::Sync).await?;
+    let req = exchange(&mut stream, &Request::Sync);
+    // Animate while the agent pulls and decrypts `/sync`; `--json` stays quiet
+    // so structured output is never polluted by the spinner or summary line.
+    let resp = if json {
+        req.await?
+    } else {
+        with_spinner("Syncing…", req).await?
+    };
     match resp {
         // The agent answers a successful re-sync with a fresh Status snapshot.
         Response::Status(s) => {
@@ -1363,6 +1402,8 @@ async fn cmd_sync(ep: Endpoint<'_>, json: bool) -> Result<(), u8> {
                     "last_sync": s.last_sync,
                 });
                 println!("{v}");
+            } else if io::stderr().is_terminal() {
+                eprintln!("✓ synced {} items", s.items.unwrap_or(0));
             }
             Ok(())
         }

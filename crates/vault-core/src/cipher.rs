@@ -20,13 +20,13 @@ use crate::error::{Error, Result};
 /// `/sync` cipher object, kept generous with `serde(default)` so future
 /// server-side additions don't break the cache round-trip.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "camelCase")]
 pub struct Cipher {
     /// Server-assigned UUID.
     #[serde(default)]
     pub id: String,
     /// Cipher type (1 = login, 2 = secure note, 3 = card, 4 = identity).
-    #[serde(rename = "Type", default)]
+    #[serde(rename = "type", default)]
     pub cipher_type: u8,
     /// Folder this cipher belongs to, or `None` for unfiled.
     #[serde(default)]
@@ -34,6 +34,13 @@ pub struct Cipher {
     /// Organization this cipher belongs to, if any.
     #[serde(default)]
     pub organization_id: Option<String>,
+    /// Per-cipher symmetric key ("cipher key encryption"): an `EncString`
+    /// wrapping 64 bytes (enc(32)‖mac(32)) under the user key. When present —
+    /// the default for current Bitwarden vaults — every other field of this item
+    /// is encrypted under *this* key, not the user key directly. See
+    /// [`Cipher::decrypt`].
+    #[serde(default)]
+    pub key: Option<String>,
     /// Encrypted display name.
     #[serde(default)]
     pub name: Option<String>,
@@ -56,7 +63,7 @@ pub struct Cipher {
 
 /// Login-specific encrypted fields.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "camelCase")]
 pub struct Login {
     /// Encrypted username.
     #[serde(default)]
@@ -74,7 +81,7 @@ pub struct Login {
 
 /// One URI on a login cipher.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "camelCase")]
 pub struct LoginUri {
     /// Encrypted URI.
     #[serde(default)]
@@ -83,7 +90,7 @@ pub struct LoginUri {
 
 /// Card-specific encrypted fields (cipher type 3).
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "camelCase")]
 pub struct Card {
     /// Encrypted cardholder name.
     #[serde(default)]
@@ -107,7 +114,7 @@ pub struct Card {
 
 /// Identity-specific encrypted fields (cipher type 4).
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "camelCase")]
 pub struct Identity {
     /// Encrypted title (`Mr`, `Ms`, …).
     #[serde(default)]
@@ -167,7 +174,7 @@ pub struct Identity {
 
 /// User-defined `Fields[]` entry.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "camelCase")]
 pub struct CustomField {
     /// Encrypted field name.
     #[serde(default)]
@@ -176,7 +183,7 @@ pub struct CustomField {
     #[serde(default)]
     pub value: Option<String>,
     /// Field type (0 = text, 1 = hidden, 2 = boolean, 3 = linked).
-    #[serde(rename = "Type", default)]
+    #[serde(rename = "type", default)]
     pub field_type: u8,
 }
 
@@ -354,16 +361,53 @@ impl DecryptOptions {
     }
 }
 
+/// A per-cipher field key — the (enc, mac) pair recovered from a cipher's own
+/// `key` ("cipher key encryption"), each half zeroized on drop.
+type ItemKey = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
+
 impl Cipher {
-    /// Decrypt this cipher's name under `(enc_key, mac_key)`. Returns
-    /// `Ok(None)` for ciphers with no name field (rare; mostly secure notes
-    /// that never had one set).
+    /// Resolve the per-cipher field key for "cipher key encryption".
+    ///
+    /// When [`key`](Self::key) is present it is an `EncString` wrapping 64 bytes
+    /// of key material (enc(32)‖mac(32)) under the user key; every other field of
+    /// the cipher is then encrypted under *that* key. Returns `Ok(None)` for
+    /// older items with no per-cipher key (their fields use the user key
+    /// directly), so callers can fall back to `(enc_key, mac_key)`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::MacMismatch`] or [`Error::Unpad`] if the name field is
-    /// present but fails authentication or decryption under the given keys.
+    /// Returns [`Error::MacMismatch`] when the wrapped key fails authentication
+    /// under the user key — e.g. an organization item, whose key is wrapped
+    /// under an org key Vault does not hold — or [`Error::EncString`] if the
+    /// unwrapped key is not 64 bytes.
+    fn item_field_key(&self, enc_key: &[u8; 32], mac_key: &[u8; 32]) -> Result<Option<ItemKey>> {
+        let Some(raw_key) = self.key.as_deref() else {
+            return Ok(None);
+        };
+        let material = Zeroizing::new(EncString::parse(raw_key)?.decrypt(enc_key, mac_key)?);
+        if material.len() != 64 {
+            return Err(Error::EncString("cipher key must unwrap to 64 bytes"));
+        }
+        let mut item_enc = Zeroizing::new([0u8; 32]);
+        let mut item_mac = Zeroizing::new([0u8; 32]);
+        item_enc.copy_from_slice(&material[..32]);
+        item_mac.copy_from_slice(&material[32..]);
+        Ok(Some((item_enc, item_mac)))
+    }
+
+    /// Decrypt this cipher's name. Returns `Ok(None)` for ciphers with no name
+    /// field (rare; mostly secure notes that never had one set).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MacMismatch`] or [`Error::Unpad`] if the name field (or
+    /// the per-cipher key) is present but fails authentication or decryption.
     pub fn decrypt_name(&self, enc_key: &[u8; 32], mac_key: &[u8; 32]) -> Result<Option<String>> {
+        let item_key = self.item_field_key(enc_key, mac_key)?;
+        let (enc_key, mac_key): (&[u8; 32], &[u8; 32]) = match &item_key {
+            Some((e, m)) => (&**e, &**m),
+            None => (enc_key, mac_key),
+        };
         decrypt_optional(self.name.as_deref(), enc_key, mac_key)
     }
 
@@ -379,6 +423,15 @@ impl Cipher {
         mac_key: &[u8; 32],
         opts: DecryptOptions,
     ) -> Result<PlainCipher> {
+        // Cipher-key encryption: when this item carries its own `key`, every
+        // field below is encrypted under that per-item key. Shadow the user key
+        // with it so the rest of this method needs no special-casing.
+        let item_key = self.item_field_key(enc_key, mac_key)?;
+        let (enc_key, mac_key): (&[u8; 32], &[u8; 32]) = match &item_key {
+            Some((e, m)) => (&**e, &**m),
+            None => (enc_key, mac_key),
+        };
+
         let name = decrypt_optional(self.name.as_deref(), enc_key, mac_key)?;
         let notes = if opts.notes {
             decrypt_optional(self.notes.as_deref(), enc_key, mac_key)?
@@ -521,6 +574,10 @@ impl Cipher {
             cipher_type: plain.cipher_type,
             folder_id: plain.folder_id.clone(),
             organization_id: None,
+            // Vault writes fields under the user key directly (no per-cipher
+            // key); the server accepts this. Round-tripping a server item's own
+            // `key` would require re-wrapping it, which write paths don't do.
+            key: None,
             name: plain.name.as_deref().map(&enc),
             notes: plain.notes.as_deref().map(&enc),
             login,
@@ -572,4 +629,93 @@ fn decrypt_optional(
     let pt = enc.decrypt(enc_key, mac_key)?;
     let txt = String::from_utf8(pt).map_err(|_| Error::EncString("field is not valid UTF-8"))?;
     Ok(Some(txt))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cipher, DecryptOptions, Login};
+    use crate::enc_string::EncString;
+
+    const USER_ENC: [u8; 32] = [1u8; 32];
+    const USER_MAC: [u8; 32] = [2u8; 32];
+    const ITEM_ENC: [u8; 32] = [3u8; 32];
+    const ITEM_MAC: [u8; 32] = [4u8; 32];
+
+    fn under(enc: &[u8; 32], mac: &[u8; 32], plain: &str) -> String {
+        EncString::encrypt(enc, mac, plain.as_bytes()).serialize()
+    }
+
+    /// "Cipher key encryption": the item's fields are encrypted under a per-item
+    /// key, and that key is an `EncString` (64 bytes) wrapped under the user key.
+    /// Regression guard — decrypting fields with the user key directly fails MAC.
+    #[test]
+    fn cipher_key_encryption_round_trips() {
+        // The 64-byte item key (enc‖mac) wrapped under the user key.
+        let mut material = [0u8; 64];
+        material[..32].copy_from_slice(&ITEM_ENC);
+        material[32..].copy_from_slice(&ITEM_MAC);
+        let wrapped = EncString::encrypt(&USER_ENC, &USER_MAC, &material).serialize();
+
+        let cipher = Cipher {
+            cipher_type: 1,
+            key: Some(wrapped),
+            // name + password encrypted under the ITEM key, not the user key.
+            name: Some(under(&ITEM_ENC, &ITEM_MAC, "github.com")),
+            login: Some(Login {
+                password: Some(under(&ITEM_ENC, &ITEM_MAC, "hunter2")),
+                ..Login::default()
+            }),
+            ..Cipher::default()
+        };
+
+        assert_eq!(
+            cipher
+                .decrypt_name(&USER_ENC, &USER_MAC)
+                .unwrap()
+                .as_deref(),
+            Some("github.com"),
+        );
+        let plain = cipher
+            .decrypt(&USER_ENC, &USER_MAC, DecryptOptions::all())
+            .unwrap();
+        assert_eq!(plain.password.as_deref(), Some("hunter2"));
+    }
+
+    /// Items without a per-cipher `key` (older vaults) still decrypt directly
+    /// under the user key.
+    #[test]
+    fn no_cipher_key_uses_user_key_directly() {
+        let cipher = Cipher {
+            cipher_type: 2,
+            key: None,
+            name: Some(under(&USER_ENC, &USER_MAC, "legacy note")),
+            ..Cipher::default()
+        };
+        assert_eq!(
+            cipher
+                .decrypt_name(&USER_ENC, &USER_MAC)
+                .unwrap()
+                .as_deref(),
+            Some("legacy note"),
+        );
+    }
+
+    /// A `key` that can't be unwrapped under the user key (e.g. an organization
+    /// item) surfaces as an error rather than silently mis-decrypting.
+    #[test]
+    fn unwrappable_cipher_key_errors() {
+        let wrong = [9u8; 32];
+        let mut material = [0u8; 64];
+        material[..32].copy_from_slice(&ITEM_ENC);
+        material[32..].copy_from_slice(&ITEM_MAC);
+        // Key wrapped under a DIFFERENT user key than we'll decrypt with.
+        let wrapped = EncString::encrypt(&wrong, &wrong, &material).serialize();
+        let cipher = Cipher {
+            cipher_type: 1,
+            key: Some(wrapped),
+            name: Some(under(&ITEM_ENC, &ITEM_MAC, "github.com")),
+            ..Cipher::default()
+        };
+        assert!(cipher.decrypt_name(&USER_ENC, &USER_MAC).is_err());
+    }
 }

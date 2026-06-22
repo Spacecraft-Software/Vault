@@ -9,6 +9,7 @@
 //! the master-password hash.
 
 use reqwest::Client;
+use reqwest::header::{HeaderMap, HeaderValue};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -24,6 +25,49 @@ use crate::urls::BaseUrls;
 pub const CLIENT_ID: &str = "cli";
 /// Bitwarden device-type for desktop / CLI clients.
 pub const DEVICE_TYPE_CLI: u32 = 14;
+
+/// `Bitwarden-Client-Name` header value (matches the official CLI).
+pub const CLIENT_NAME: &str = "cli";
+
+/// Bitwarden client/protocol version advertised in the `Bitwarden-Client-Version`
+/// header.
+///
+/// Bitwarden's hosted server (and recent Vaultwarden) reject any request that
+/// omits this header with `400 version_header_missing` — *"No client version
+/// header found, required to prevent encryption errors"*. That check lives on
+/// the **post-authentication** path that formats the encrypted key material, so
+/// it only fires once credentials are accepted (a wrong password still returns
+/// `invalid_grant` first).
+///
+/// The value is a recent *Bitwarden* client version, deliberately **not** Vault's
+/// own `CARGO_PKG_VERSION`: the server parses this string as a Bitwarden client
+/// version, so `0.0.1` would read as an ancient client and trip min-version
+/// gates. It is kept a step behind bleeding-edge on purpose, so the server stays
+/// on the `EncString` type-2 / PBKDF2+Argon2 crypto path that `vault-core`
+/// implements — the 2025 account-crypto-v2 work is server-feature-gated and is
+/// intentionally not advertised here. Bump only alongside verified support for
+/// any newer crypto format it would opt us into.
+pub const CLIENT_VERSION: &str = "2024.12.1";
+
+/// Default headers sent on **every** request: the Bitwarden client-identification
+/// trio that the server requires (see [`CLIENT_VERSION`]). Installed once as the
+/// `reqwest` client's default header set in [`BitwardenClient::new`]; per-request
+/// headers (`Authorization`, `Auth-Email`) are layered on top and never collide
+/// with these names.
+fn client_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "Bitwarden-Client-Name",
+        HeaderValue::from_static(CLIENT_NAME),
+    );
+    headers.insert(
+        "Bitwarden-Client-Version",
+        HeaderValue::from_static(CLIENT_VERSION),
+    );
+    // Reuse the one device-type source of truth; `u32 -> HeaderValue` is infallible.
+    headers.insert("Device-Type", HeaderValue::from(DEVICE_TYPE_CLI));
+    headers
+}
 
 /// A two-factor token to satisfy a 2FA challenge on the password grant.
 ///
@@ -63,6 +107,7 @@ impl BitwardenClient {
         let user_agent = format!("vault/{} (Spacecraft-Software)", env!("CARGO_PKG_VERSION"));
         let builder = Client::builder()
             .user_agent(&user_agent)
+            .default_headers(client_headers())
             .https_only(urls.api.scheme() == "https");
         // With the `pqc` feature, prefer the X25519MLKEM768 hybrid key exchange
         // on the TLS layer (falls back to classical when the server lacks it).
@@ -84,6 +129,11 @@ impl BitwardenClient {
 
     /// Construct from an existing `reqwest::Client` — primarily for tests
     /// that need to point a fresh client at a wiremock origin.
+    ///
+    /// Unlike [`new`](Self::new), this does **not** install the Bitwarden
+    /// client-identification headers ([`client_headers`]): default headers can
+    /// only be set when the `reqwest::Client` is built, so a caller that needs a
+    /// real server to accept the requests must bake them into `http` itself.
     pub fn new_with_http(
         http: Client,
         urls: BaseUrls,
@@ -566,4 +616,27 @@ fn base64_url_no_pad(b: &[u8]) -> String {
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
     B64URL.encode(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CLIENT_NAME, CLIENT_VERSION, DEVICE_TYPE_CLI, client_headers};
+
+    /// The Bitwarden client-identification trio must be present and correct, or
+    /// the server rejects authenticated requests with `version_header_missing`.
+    #[test]
+    fn client_headers_carry_bitwarden_identity() {
+        let headers = client_headers();
+
+        assert_eq!(
+            headers.get("Bitwarden-Client-Version").unwrap(),
+            CLIENT_VERSION,
+            "version header is the one the server actually requires",
+        );
+        assert_eq!(headers.get("Bitwarden-Client-Name").unwrap(), CLIENT_NAME);
+        assert_eq!(
+            headers.get("Device-Type").unwrap(),
+            DEVICE_TYPE_CLI.to_string().as_str(),
+        );
+    }
 }
