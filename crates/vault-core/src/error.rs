@@ -54,6 +54,10 @@ pub enum Error {
     /// A TOTP secret / `otpauth://` URI could not be parsed or used.
     #[error("totp: {0}")]
     Totp(&'static str),
+
+    /// RSA key parsing or OAEP decryption failed (organization-key unwrapping).
+    #[error("rsa: {0}")]
+    Rsa(&'static str),
 }
 
 impl From<argon2::Error> for Error {

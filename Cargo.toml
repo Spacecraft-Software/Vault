@@ -63,6 +63,12 @@ cipher = { version = "0.4", features = ["block-padding"] }
 hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
+# RSA-2048-OAEP-SHA1 — unwraps organization keys (Bitwarden type-4 EncStrings).
+# `ring` has no RSA decryption, so this is the one non-ring asymmetric path.
+# Carries RUSTSEC-2023-0071 (Marvin timing sidechannel, no upstream fix); see the
+# justified `cargo audit` ignore in `justfile` / CI. Not reachable as a network
+# oracle here — org keys are unwrapped once, locally, at unlock.
+rsa = "0.9"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac", "sha2"] }
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 hkdf = "0.12"
