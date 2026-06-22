@@ -104,7 +104,7 @@ impl Vault {
         if self.client.is_some() {
             return Ok(());
         }
-        let urls = vault_api::BaseUrls::self_hosted(&self.server)
+        let urls = vault_api::BaseUrls::infer_from(&self.server)
             .map_err(|e| IpcError::Internal(e.to_string()))?;
         let device =
             uuid::Uuid::parse_str(&self.device_id).unwrap_or_else(|_| uuid::Uuid::new_v4());

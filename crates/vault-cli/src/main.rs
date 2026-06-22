@@ -909,8 +909,8 @@ fn resolve_account(server: Option<String>, email: Option<String>) -> Result<Acco
 /// light `http(s)://` check is all the validation done here; a real server
 /// error surfaces on the first `login`.
 fn cmd_register(server: Option<String>, email: Option<String>, json: bool) -> Result<(), u8> {
-    let server = resolve_arg(server, "VAULT_SERVER", "--server")?;
-    let email = resolve_arg(email, "VAULT_EMAIL", "--email")?;
+    let server = resolve_register_server(server)?;
+    let email = resolve_register_email(email)?;
     if !(server.starts_with("https://") || server.starts_with("http://")) {
         eprintln!("vault: server must be an http(s):// origin, got '{server}'");
         return Err(2);
@@ -1831,16 +1831,66 @@ fn unexpected(other: &Response) -> Result<(), u8> {
     Err(9)
 }
 
-fn resolve_arg(cli: Option<String>, env_key: &str, flag: &str) -> Result<String, u8> {
-    if let Some(v) = cli {
+/// Explicit flag, else `$env_key` (ignoring an empty value). `None` if neither
+/// is set — the caller decides whether that's an error or a prompt.
+fn arg_or_env(cli: Option<String>, env_key: &str) -> Option<String> {
+    cli.or_else(|| std::env::var(env_key).ok().filter(|v| !v.is_empty()))
+}
+
+/// Resolve `register`'s server: `--server`, then `$VAULT_SERVER`, then — only on
+/// an interactive terminal — a server picker. Off a TTY with neither set, fail
+/// with the same message/exit code as before, so piped or scripted `register`
+/// still errors fast and never blocks waiting for input.
+fn resolve_register_server(cli: Option<String>) -> Result<String, u8> {
+    if let Some(v) = arg_or_env(cli, "VAULT_SERVER") {
         return Ok(v);
     }
-    if let Ok(v) = std::env::var(env_key)
-        && !v.is_empty()
-    {
+    if io::stdin().is_terminal() {
+        return prompt_server();
+    }
+    eprintln!("vault: missing --server (or $VAULT_SERVER)");
+    Err(2)
+}
+
+/// Interactive server picker (TTY only). Cloud choices map to their canonical
+/// origin; the self-hosted choice prompts for a URL that `cmd_register`'s
+/// existing `http(s)://` check then validates.
+fn prompt_server() -> Result<String, u8> {
+    eprintln!("Select a server:");
+    eprintln!("  1) Bitwarden cloud — US (bitwarden.com)");
+    eprintln!("  2) Bitwarden cloud — EU (bitwarden.eu)");
+    eprintln!("  3) Vaultwarden / other self-hosted (enter URL)");
+    let choice = read_tty_line("Choice [1-3]: ").ok_or_else(|| {
+        eprintln!("vault: no choice entered");
+        2u8
+    })?;
+    match choice.trim() {
+        "1" => Ok("https://bitwarden.com".to_owned()),
+        "2" => Ok("https://bitwarden.eu".to_owned()),
+        "3" => read_tty_line("Server URL: ").ok_or_else(|| {
+            eprintln!("vault: no server URL entered");
+            2u8
+        }),
+        other => {
+            eprintln!("vault: invalid choice '{other}' (expected 1, 2, or 3)");
+            Err(2)
+        }
+    }
+}
+
+/// Resolve `register`'s email: `--email`, then `$VAULT_EMAIL`, then — only on an
+/// interactive terminal — a prompt. Off a TTY, fail as before.
+fn resolve_register_email(cli: Option<String>) -> Result<String, u8> {
+    if let Some(v) = arg_or_env(cli, "VAULT_EMAIL") {
         return Ok(v);
     }
-    eprintln!("vault: missing {flag} (or ${env_key})");
+    if io::stdin().is_terminal() {
+        return read_tty_line("Account email: ").ok_or_else(|| {
+            eprintln!("vault: no email entered");
+            2u8
+        });
+    }
+    eprintln!("vault: missing --email (or $VAULT_EMAIL)");
     Err(2)
 }
 

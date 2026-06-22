@@ -54,7 +54,7 @@ async fn online_unlock(
     two_factor: Option<&TwoFactorCode>,
 ) -> Result<Vault, IpcError> {
     let email_lower = email.trim().to_lowercase();
-    let urls = BaseUrls::self_hosted(server).map_err(|e| IpcError::Internal(e.to_string()))?;
+    let urls = BaseUrls::infer_from(server).map_err(|e| IpcError::Internal(e.to_string()))?;
     // Prefer the account profile's stable device id; fall back to a fresh one
     // so an unregistered unlock still works (it just registers a new device).
     let device = device_id
