@@ -152,6 +152,12 @@ enum Cmd {
         /// (read-only, offline session — sync/edits need a master unlock).
         #[arg(long)]
         pin: bool,
+        /// Re-unlock by fingerprint (Linux): resume the keyring-held session
+        /// after a verified touch, instead of the master password. Requires the
+        /// agent's `agent.session_keyring` + `agent.fingerprint_unlock` and a
+        /// live keyring session.
+        #[arg(long, conflicts_with = "pin")]
+        fingerprint: bool,
         /// Authenticator (TOTP) code for a 2FA-enabled account (master unlock
         /// only), supplied up front instead of being prompted. Falls back to
         /// `$BW_TOTP`.
@@ -714,9 +720,10 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
             server,
             email,
             pin,
+            fingerprint,
             totp,
             json,
-        } => cmd_unlock(ep, server, email, pin, totp, json).await,
+        } => cmd_unlock(ep, server, email, pin, fingerprint, totp, json).await,
         Cmd::Pin { action } => cmd_pin(ep, action).await,
         Cmd::Apikey { action } => cmd_apikey(ep, action).await,
         Cmd::Lock { json } => cmd_ack(ep, Request::Lock, "locked", json).await,
@@ -973,10 +980,32 @@ async fn cmd_unlock(
     server: Option<String>,
     email: Option<String>,
     pin: bool,
+    fingerprint: bool,
     totp: Option<String>,
     json: bool,
 ) -> Result<(), u8> {
     let acct = resolve_account(server, email)?;
+    if fingerprint {
+        // The agent verifies the finger and resumes the keyring session; the CLI
+        // just nudges the user, since the request→reply IPC can't stream a prompt.
+        if std::io::stderr().is_terminal() {
+            eprintln!("Touch the fingerprint sensor…");
+        }
+        let req = Request::UnlockFingerprint {
+            server: acct.server,
+            email: acct.email,
+        };
+        let mut stream = connect(ep).await?;
+        let resp = exchange(&mut stream, &req).await?;
+        return match resp {
+            Response::Ok => {
+                print_ack("unlocked", json);
+                Ok(())
+            }
+            Response::Error(e) => report_error(&e),
+            other => unexpected(&other),
+        };
+    }
     if pin {
         let pin = read_secret("PIN: ")?.ok_or_else(|| {
             eprintln!("vault: empty PIN");
@@ -1944,6 +1973,8 @@ fn report_error(e: &IpcError) -> Result<(), u8> {
         IpcError::BadPin { .. } => 12,
         IpcError::PinLockedOut => 13,
         IpcError::PinNotSet => 14,
+        IpcError::FingerprintFailed => 15,
+        IpcError::FingerprintUnavailable(_) => 16,
         IpcError::Network(_)
         | IpcError::Internal(_)
         | IpcError::Decrypt(_)

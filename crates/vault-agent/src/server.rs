@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
-use vault_ipc::proto::{Request, Response};
+use vault_ipc::proto::{Error as IpcError, Request, Response};
 use vault_ipc::{read_frame, write_frame};
 
 use crate::state::AgentState;
@@ -120,6 +120,34 @@ async fn dispatch(req: Request, state: &Arc<Mutex<AgentState>>) -> Response {
                     Response::Ok
                 }
                 Err(e) => Response::Error(e),
+            }
+        }
+        Request::UnlockFingerprint {
+            server: _,
+            email: _,
+        } => {
+            // Verify the fingerprint *inside the agent* (a client can't bypass it
+            // over the socket), then resume the keyring-held session. Single
+            // account: the keyring blob carries its own server/email, so the
+            // request's account is advisory.
+            match crate::fingerprint::verify().await {
+                crate::fingerprint::Outcome::Match => {
+                    let mut s = state.lock().await;
+                    match s.resume_after_fingerprint() {
+                        Ok(()) => {
+                            s.persist_session();
+                            s.touch();
+                            Response::Ok
+                        }
+                        Err(e) => Response::Error(e),
+                    }
+                }
+                crate::fingerprint::Outcome::NoMatch => {
+                    Response::Error(IpcError::FingerprintFailed)
+                }
+                crate::fingerprint::Outcome::Unavailable(why) => {
+                    Response::Error(IpcError::FingerprintUnavailable(why))
+                }
             }
         }
         Request::PinSet { pin } => {
@@ -380,9 +408,16 @@ pub async fn idle_lock_loop(state: Arc<Mutex<AgentState>>) {
         sleep(Duration::from_secs(15)).await;
         let mut s = state.lock().await;
         if s.idle_lock_due() {
-            // Idle-lock is a security event: forget the keyring session too.
-            s.lock_and_clear_session();
-            eprintln!("vault-agent: idle-lock triggered");
+            if s.fingerprint_unlock {
+                // Fingerprint unlock: zeroise the in-memory key but KEEP the
+                // keyring entry so a verified touch can re-unlock within its TTL.
+                s.lock();
+                eprintln!("vault-agent: idle-lock (key zeroised; keyring kept for fingerprint)");
+            } else {
+                // Idle-lock is a security event: forget the keyring session too.
+                s.lock_and_clear_session();
+                eprintln!("vault-agent: idle-lock triggered");
+            }
         }
         if s.shutdown_requested {
             break;

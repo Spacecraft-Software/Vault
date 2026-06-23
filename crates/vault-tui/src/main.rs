@@ -225,6 +225,9 @@ async fn locked_screen(socket: &Path, s: Status) -> App {
         client::request(socket, &Request::PinStatus { server: server.clone(), email: email.clone() }).await,
         Ok(Response::PinStatus(p)) if p.enabled
     );
+    // Fingerprint mode is offered when configured; the agent still reports
+    // "unavailable" if it can't actually run, so this is just the menu gate.
+    let fingerprint_enabled = cfg.fingerprint_unlock().unwrap_or(false);
     App::unlock_screen(
         s,
         app::UnlockState {
@@ -234,6 +237,8 @@ async fn locked_screen(socket: &Path, s: Status) -> App {
             secret: app::TextInput::default(),
             use_pin: false,
             pin_enabled,
+            use_fingerprint: false,
+            fingerprint_enabled,
             error: None,
             awaiting_2fa: false,
             password: zeroize::Zeroizing::new(Vec::new()),
@@ -275,7 +280,7 @@ async fn handle_unlock_key(state: &mut App, key: KeyEvent, socket: &Path) {
     }
     match key.code {
         KeyCode::Esc => state.quit(),
-        KeyCode::Tab | KeyCode::BackTab => state.toggle_pin(),
+        KeyCode::Tab | KeyCode::BackTab => state.cycle_unlock_mode(),
         KeyCode::Backspace => {
             if let Some(u) = state.unlock.as_mut() {
                 u.secret.backspace();

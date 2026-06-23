@@ -156,6 +156,19 @@ envelope; exit codes documented in `docs/exit_codes.md`.
   sole, default-off carve-out to G4's "master key never resident outside the
   agent process"; off, the key never leaves the process.
 
+- **Fingerprint unlock (opt-in, Linux).** An extension of the same carve-out:
+  with `agent.fingerprint_unlock` (requires `session_keyring`, the off-by-default
+  `fingerprint` feature, and the system `fprintd`), the agent **gates the keyring
+  resume behind a verified fingerprint** instead of resuming silently — idle-lock
+  then zeroises the in-memory key but *keeps* the keyring entry so a touch
+  re-unlocks (lifetime `agent.fingerprint_ttl_secs`), while manual `vault lock`
+  still clears it. The biometric is verified in the agent (D-Bus), and enrollment
+  is OS-level (`fprintd-enroll`) — Vault stores no template. **Posture:** because
+  the keyring entry is possessor-gated, a fingerprint adds *user-presence and
+  convenience*, **not** cryptographic strength beyond `session_keyring`; it is
+  strictly weaker than a master-password unlock. Default off. See
+  `docs/fingerprint.md`.
+
 ### 7.4 Storage
 
 - Vault items persisted as Bitwarden-format ciphertext (AES-256-CBC + HMAC-SHA256) under `$XDG_DATA_HOME/vault/`.

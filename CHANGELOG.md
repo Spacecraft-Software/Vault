@@ -76,6 +76,20 @@ range may break in any release.
 
 ### Added
 
+- **Fingerprint unlock (Linux, off by default).** With `agent.session_keyring`
+  and the new `agent.fingerprint_unlock` enabled, `vault unlock --fingerprint`
+  (and a TUI unlock-screen mode) re-unlock the keyring-held session after a
+  fingerprint verified — inside the agent, over D-Bus to the system `fprintd`
+  (via the new off-by-default `fingerprint` cargo feature + `zbus`). Idle-lock
+  zeroises the in-memory key but **keeps** the keyring entry so a touch works
+  after a timeout (lifetime: `agent.fingerprint_ttl_secs`); the agent no longer
+  silently auto-resumes, and manual `vault lock` still clears everything.
+  Enrollment stays OS-level (`fprintd-enroll`); Vault only verifies and stores
+  no template. **Posture (PRD §7.3):** this is convenience + user-presence, not
+  a cryptographic boundary — the keyring entry is possessor-gated, so it's no
+  stronger than `session_keyring` and weaker than a master-password unlock. See
+  `docs/fingerprint.md`.
+
 - **Organization / Collection items now decrypt (org-key support).** Vault
   previously skipped every organization-owned cipher — the bulk of a vault that
   uses Collections — because it held no key for them. At unlock the agent now

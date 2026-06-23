@@ -224,6 +224,20 @@ pub enum Request {
         pin: Vec<u8>,
     },
 
+    /// Resume an unlocked session by verifying a fingerprint (Linux, `fprintd`),
+    /// then rebuilding the vault from the key held in the kernel session keyring.
+    /// Carries **no secret**: the biometric is verified inside the agent (so a
+    /// client can't bypass it over the socket), and the key is the one
+    /// `agent.session_keyring` already stored. Requires `session_keyring` +
+    /// `agent.fingerprint_unlock`, the `fingerprint` agent feature, and a live
+    /// keyring entry — otherwise [`Error::FingerprintUnavailable`].
+    UnlockFingerprint {
+        /// Server origin.
+        server: String,
+        /// Account email.
+        email: String,
+    },
+
     /// Report whether a Bitwarden API key is stored for the account. Carries
     /// the account so the credential file can be found while the agent is
     /// locked. Never returns the secret.
@@ -658,6 +672,16 @@ pub enum Error {
     /// `unlock --pin` (or `pin status` action) but no PIN is enrolled.
     #[error("no PIN is set — run `vault pin set` after unlocking")]
     PinNotSet,
+    /// Fingerprint unlock can't run: the agent lacks the `fingerprint` feature,
+    /// no reader / `fprintd` / enrolled finger, the session isn't active, or
+    /// there's no live keyring session to resume (idle TTL elapsed, locked, or
+    /// `session_keyring`/`fingerprint_unlock` not enabled). Fall back to the
+    /// master password (or PIN).
+    #[error("fingerprint unlock unavailable: {0}")]
+    FingerprintUnavailable(String),
+    /// A fingerprint was read but did not match an enrolled finger.
+    #[error("fingerprint not recognized")]
+    FingerprintFailed,
     /// Any other internal error — message is for the operator, not for parsing.
     #[error("internal: {0}")]
     Internal(String),

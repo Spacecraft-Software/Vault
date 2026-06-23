@@ -117,14 +117,13 @@ fn render_unlock(frame: &mut Frame, app: &App, area: Rect) {
     let steel = hex(steelbore::STEEL_BLUE);
     let label = if u.awaiting_2fa {
         "Authenticator code"
+    } else if u.use_fingerprint {
+        "Fingerprint"
     } else if u.use_pin {
         "PIN"
     } else {
         "Password"
     };
-    // Mask the secret, with the caret at the cursor position.
-    let masked = "•".repeat(u.secret.as_str().chars().count());
-    let field = with_cursor(&masked, Some(masked.len()));
 
     let mut lines = vec![
         Line::from(Span::styled(
@@ -132,11 +131,22 @@ fn render_unlock(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(amber).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(vec![
+    ];
+    if u.use_fingerprint {
+        // Touchless: no secret field — prompt for the scan instead.
+        lines.push(Line::from(Span::styled(
+            "Fingerprint — press Enter, then touch the sensor",
+            Style::default().fg(steel),
+        )));
+    } else {
+        // Mask the secret, with the caret at the cursor position.
+        let masked = "•".repeat(u.secret.as_str().chars().count());
+        let field = with_cursor(&masked, Some(masked.len()));
+        lines.push(Line::from(vec![
             Span::styled(format!("{label}: "), Style::default().fg(steel)),
             Span::styled(field, Style::default().fg(amber)),
-        ]),
-    ];
+        ]));
+    }
     if let Some(err) = u.error.as_deref() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -146,11 +156,20 @@ fn render_unlock(frame: &mut Frame, app: &App, area: Rect) {
     }
     lines.push(Line::from(""));
     let hint = if u.awaiting_2fa {
-        "Enter submit code · Esc quit"
-    } else if u.pin_enabled {
-        "Enter unlock · Tab password/PIN · Esc quit"
+        "Enter submit code · Esc quit".to_owned()
     } else {
-        "Enter unlock · Esc quit"
+        let mut modes = vec!["password"];
+        if u.pin_enabled {
+            modes.push("PIN");
+        }
+        if u.fingerprint_enabled {
+            modes.push("fingerprint");
+        }
+        if modes.len() > 1 {
+            format!("Enter unlock · Tab {} · Esc quit", modes.join("/"))
+        } else {
+            "Enter unlock · Esc quit".to_owned()
+        }
     };
     lines.push(Line::from(Span::styled(
         hint,
@@ -877,6 +896,8 @@ mod tests {
             secret: TextInput::default(),
             use_pin: false,
             pin_enabled: true,
+            use_fingerprint: false,
+            fingerprint_enabled: false,
             error: None,
             awaiting_2fa: false,
             password: zeroize::Zeroizing::new(Vec::new()),

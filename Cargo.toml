@@ -87,6 +87,12 @@ dirs = "5"
 # breakage). MIT/Apache-2.0; GPL-3.0-or-later compatible. Linux-only, gated
 # behind `cfg(target_os = "linux")` in vault-agent.
 linux-keyutils = "0.2"
+# fprintd over D-Bus for the off-by-default `fingerprint` unlock feature
+# (vault-agent, Linux). Pure-Rust D-Bus; MIT; GPL-3.0-or-later compatible.
+# `futures-util` drives the VerifyStatus signal stream. Both optional, pulled
+# only by `--features fingerprint`.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+futures-util = { version = "0.3", default-features = false }
 time = { version = "0.3", features = ["serde", "serde-well-known"] }
 fs2 = "0.4"
 # Terminal control — disable echo while reading secrets at an interactive

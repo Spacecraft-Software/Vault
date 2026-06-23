@@ -249,6 +249,9 @@ pub enum Screen {
 
 /// State for the in-TUI unlock prompt, shown when the agent is locked and an
 /// account is registered. The typed secret is zeroised on drop (`TextInput`).
+// The flags are independent screen state (chosen mode, which modes are
+// available, the 2FA step) — a flag bag, not a state machine begging for an enum.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug)]
 pub struct UnlockState {
     /// Server origin from the registered profile.
@@ -263,6 +266,10 @@ pub struct UnlockState {
     pub use_pin: bool,
     /// Whether a PIN is enrolled (drives offering the `Tab` toggle).
     pub pin_enabled: bool,
+    /// Whether the prompt is in fingerprint mode (touchless — `Enter` scans).
+    pub use_fingerprint: bool,
+    /// Whether fingerprint unlock is configured (drives offering it in the toggle).
+    pub fingerprint_enabled: bool,
     /// Last failed-unlock message, shown under the field.
     pub error: Option<String>,
     /// In the second step of a 2FA unlock: the `secret` field now holds the
@@ -279,7 +286,14 @@ impl UnlockState {
     pub fn request(&self) -> vault_ipc::proto::Request {
         use vault_ipc::proto::Request;
         let secret = self.secret.as_str().as_bytes().to_vec();
-        if self.use_pin {
+        if self.use_fingerprint {
+            // Touchless: the agent verifies the finger and resumes the keyring
+            // session; no secret crosses the socket.
+            Request::UnlockFingerprint {
+                server: self.server.clone(),
+                email: self.email.clone(),
+            }
+        } else if self.use_pin {
             Request::UnlockPin {
                 server: self.server.clone(),
                 email: self.email.clone(),
@@ -1263,17 +1277,34 @@ impl App {
         app
     }
 
-    /// Toggle between master-password and PIN entry (no-op unless a PIN is
-    /// enrolled); clears the field and any error on switch.
-    pub fn toggle_pin(&mut self) {
-        if let Some(u) = self.unlock.as_mut()
-            && u.pin_enabled
-            && !u.awaiting_2fa
-        {
-            u.use_pin = !u.use_pin;
-            u.secret.clear();
-            u.error = None;
+    /// Cycle the unlock mode: master password → PIN (if enrolled) → fingerprint
+    /// (if configured) → … . A no-op when no alternative is available or mid-2FA.
+    /// Clears the field and any error on switch.
+    pub fn cycle_unlock_mode(&mut self) {
+        let Some(u) = self.unlock.as_mut() else {
+            return;
+        };
+        if u.awaiting_2fa {
+            return;
         }
+        // `(use_pin, use_fingerprint)` for each available mode, in cycle order.
+        let mut modes = vec![(false, false)]; // master password — always present
+        if u.pin_enabled {
+            modes.push((true, false));
+        }
+        if u.fingerprint_enabled {
+            modes.push((false, true));
+        }
+        if modes.len() < 2 {
+            return; // nothing to switch to
+        }
+        let cur = (u.use_pin, u.use_fingerprint);
+        let idx = modes.iter().position(|m| *m == cur).unwrap_or(0);
+        let (next_pin, next_fp) = modes[(idx + 1) % modes.len()];
+        u.use_pin = next_pin;
+        u.use_fingerprint = next_fp;
+        u.secret.clear();
+        u.error = None;
     }
 
     /// Record a failed-unlock message and clear the typed secret.
@@ -3130,6 +3161,8 @@ mod tests {
             secret: TextInput::default(),
             use_pin: false,
             pin_enabled,
+            use_fingerprint: false,
+            fingerprint_enabled: false,
             error: None,
             awaiting_2fa: false,
             password: Zeroizing::new(Vec::new()),
@@ -3161,7 +3194,7 @@ mod tests {
         }
 
         // Toggle to PIN, re-type → UnlockPin (no device_id field).
-        app.toggle_pin();
+        app.cycle_unlock_mode();
         app.input_insert_str("4321");
         match app.unlock.as_ref().unwrap().request() {
             Request::UnlockPin { server, email, pin } => {
@@ -3200,7 +3233,7 @@ mod tests {
             other => panic!("expected Unlock, got {other:?}"),
         }
         // Tab must not switch to PIN mid-2FA even with a PIN enrolled.
-        app.toggle_pin();
+        app.cycle_unlock_mode();
         assert!(app.unlock.as_ref().unwrap().awaiting_2fa);
         assert!(!app.unlock.as_ref().unwrap().use_pin);
     }
@@ -3208,7 +3241,7 @@ mod tests {
     #[test]
     fn toggle_pin_is_noop_without_enrollment_and_clears_on_switch() {
         let mut app = App::unlock_screen(status(), unlock_state(false));
-        app.toggle_pin();
+        app.cycle_unlock_mode();
         assert!(
             !app.unlock.as_ref().unwrap().use_pin,
             "no PIN enrolled → no switch"
@@ -3216,7 +3249,7 @@ mod tests {
 
         let mut app = App::unlock_screen(status(), unlock_state(true));
         app.input_insert_str("abc");
-        app.toggle_pin();
+        app.cycle_unlock_mode();
         let u = app.unlock.as_ref().unwrap();
         assert!(u.use_pin);
         assert!(u.secret.is_empty(), "switch clears the field");
