@@ -21,6 +21,7 @@ use vault_ipc::default_socket_path;
 
 #[cfg(feature = "clipboard")]
 mod clipboard;
+mod fingerprint;
 mod harden;
 mod sealed;
 mod server;
@@ -73,6 +74,16 @@ struct Args {
     /// idle-lock TTL (opt-in; PRD §7.3 carve-out). No effect on non-Linux.
     #[arg(long)]
     session_keyring: bool,
+    /// Gate the keyring session behind a fingerprint (Linux, `fprintd`): the
+    /// agent stays locked until a verified touch, idle-lock keeps the keyring
+    /// entry, and its lifetime is `--fingerprint-ttl-secs`. Requires
+    /// `--session-keyring` and the `fingerprint` feature; otherwise a no-op.
+    #[arg(long)]
+    fingerprint_unlock: bool,
+    /// Keyring-session lifetime under fingerprint unlock — how long after the
+    /// last unlock a touch can still re-unlock; `0` = until logout / manual lock.
+    #[arg(long, default_value_t = 0)]
+    fingerprint_ttl_secs: u64,
     /// Seconds between background `/sync`es while unlocked; `0` disables. Keeps
     /// the cache fresh without a manual `vault sync`.
     #[arg(long, default_value_t = 0)]
@@ -123,6 +134,8 @@ async fn main() -> anyhow::Result<()> {
     let agent = AgentState::new(args.idle_lock_secs);
     let mut agent = agent;
     agent.session_keyring = args.session_keyring;
+    agent.fingerprint_unlock = args.fingerprint_unlock;
+    agent.fingerprint_ttl_secs = args.fingerprint_ttl_secs;
     agent.sync_interval_secs = args.sync_interval_secs;
     // Opt-in: resume an unlocked session left in the kernel keyring by a prior
     // agent (e.g. after a crash / restart), within its idle-lock deadline.
@@ -172,31 +185,20 @@ fn resolve_clear_secs(flag: Option<u64>, env: Option<&str>) -> u64 {
 /// vault from it + the on-disk cache so the agent comes up unlocked. Any
 /// failure (disabled, no entry, expired, missing cache) leaves it locked.
 fn try_resume(agent: &mut AgentState) {
-    if !agent.session_keyring {
+    // Fingerprint unlock deliberately does NOT auto-resume: the agent stays
+    // locked until a verified touch (`Request::UnlockFingerprint`). The keyring
+    // entry is left in place for that.
+    if !agent.session_keyring || agent.fingerprint_unlock {
         return;
     }
-    let Some(blob) = session::load() else {
-        return;
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    // deadline_unix == 0 means "no expiry" (idle-lock disabled).
-    if blob.deadline_unix != 0 && now >= blob.deadline_unix {
-        session::clear();
-        return;
-    }
-    let Some(cache) = unlock::load_cache(&blob.server, &blob.email) else {
-        return;
-    };
-    let user_enc = zeroize::Zeroizing::new(blob.user_enc);
-    let user_mac = zeroize::Zeroizing::new(blob.user_mac);
-    match unlock::vault_from_user_key(&cache, &blob.server, &blob.email, &user_enc, &user_mac) {
-        Ok(vault) => {
+    match unlock::resume_from_keyring() {
+        Ok(Some(vault)) => {
             agent.vault = Some(vault);
             agent.touch();
             eprintln!("vault-agent: resumed session from kernel keyring");
         }
+        // No resumable session (absent / expired / no cache) — stay locked.
+        Ok(None) => {}
         Err(e) => eprintln!("vault-agent: keyring resume failed: {e}"),
     }
 }

@@ -30,6 +30,10 @@ clipboard = ["dep:arboard"]
 # Post-quantum transport (off by default): prefer X25519MLKEM768 on the HTTPS
 # client. Passes through to vault-api; see `docs/pqc.md`.
 pqc = ["vault-api/pqc"]
+# Fingerprint unlock (off by default, Linux): verify a finger via `fprintd` over
+# D-Bus, then resume the keyring-held session. Pulls zbus + futures-util. See
+# `docs/fingerprint.md`.
+fingerprint = ["dep:zbus", "dep:futures-util"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -42,6 +46,9 @@ uuid = { workspace = true }
 url = { workspace = true }
 thiserror = { workspace = true }
 arboard = { workspace = true, optional = true }
+# fprintd D-Bus client for the `fingerprint` feature (used Linux-only in code).
+zbus = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 # Process hardening: disable core dumps + ptrace at startup (safe rustix-backed
 # API, keeps the crate's #![forbid(unsafe_code)]). See `harden.rs`.
 secmem-proc = "0.3"

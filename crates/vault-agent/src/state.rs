@@ -230,6 +230,15 @@ pub struct AgentState {
     /// on unlock so a restarted agent can resume without the master password
     /// (opt-in; PRD §7.3 carve-out). Off by default; no-op on non-Linux.
     pub session_keyring: bool,
+    /// Gate the keyring session behind a fingerprint (Linux). When set: idle-lock
+    /// zeroises the in-memory key but **keeps** the keyring entry, the agent does
+    /// not silently auto-resume, and the keyring entry's lifetime is governed by
+    /// [`fingerprint_ttl_secs`](Self::fingerprint_ttl_secs) rather than the idle
+    /// timeout. Requires `session_keyring` + the `fingerprint` feature.
+    pub fingerprint_unlock: bool,
+    /// Keyring-session lifetime under fingerprint unlock (the touch window after
+    /// the last unlock); `0` = no kernel timeout (until logout / manual lock).
+    pub fingerprint_ttl_secs: u64,
     /// Seconds between agent-side background `/sync`es while unlocked; `0`
     /// disables. Drives [`server::scheduled_sync_loop`](crate::server::scheduled_sync_loop).
     pub sync_interval_secs: u64,
@@ -296,6 +305,8 @@ impl AgentState {
             last_activity: Instant::now(),
             idle_lock_secs,
             session_keyring: false,
+            fingerprint_unlock: false,
+            fingerprint_ttl_secs: 0,
             sync_interval_secs: 0,
             last_session_refresh: None,
             shutdown_requested: false,
@@ -343,12 +354,19 @@ impl AgentState {
         let Some(v) = self.vault.as_ref() else {
             return;
         };
-        // idle_lock_secs == 0 disables idle-lock, so the session has no
-        // deadline (deadline_unix == 0) and no kernel timeout either.
-        let deadline_unix = if self.idle_lock_secs == 0 {
+        // Under fingerprint unlock the keyring entry must outlive the (short)
+        // in-memory idle-lock so a touch can re-unlock, so its lifetime is the
+        // fingerprint TTL; otherwise it's the idle-lock TTL. `0` for either =>
+        // no deadline / no kernel timeout (idle-lock disabled, or "until logout").
+        let ttl = if self.fingerprint_unlock {
+            self.fingerprint_ttl_secs
+        } else {
+            self.idle_lock_secs
+        };
+        let deadline_unix = if ttl == 0 {
             0
         } else {
-            now_unix().saturating_add(self.idle_lock_secs)
+            now_unix().saturating_add(ttl)
         };
         let blob = crate::session::SessionBlob {
             server: v.server.clone(),
@@ -357,8 +375,34 @@ impl AgentState {
             user_mac: *v.user_mac,
             deadline_unix,
         };
-        crate::session::store(&blob, self.idle_lock_secs);
+        crate::session::store(&blob, ttl);
         self.last_session_refresh = Some(Instant::now());
+    }
+
+    /// Resume an unlocked vault from the kernel keyring after a **verified
+    /// fingerprint** (the biometric check happens in the dispatch, before this).
+    /// Requires fingerprint unlock enabled and a live keyring session.
+    ///
+    /// # Errors
+    ///
+    /// [`IpcError::FingerprintUnavailable`] when fingerprint unlock is off or no
+    /// resumable session remains (expired / cleared / `session_keyring` off);
+    /// otherwise the typed failure from rebuilding the vault.
+    pub fn resume_after_fingerprint(&mut self) -> Result<(), IpcError> {
+        if !self.fingerprint_unlock {
+            return Err(IpcError::FingerprintUnavailable(
+                "fingerprint unlock is not enabled".to_owned(),
+            ));
+        }
+        match crate::unlock::resume_from_keyring()? {
+            Some(vault) => {
+                self.vault = Some(vault);
+                Ok(())
+            }
+            None => Err(IpcError::FingerprintUnavailable(
+                "no resumable session — unlock with your master password".to_owned(),
+            )),
+        }
     }
 
     /// Whether the idle-lock policy says it's time to drop keys.
@@ -1276,6 +1320,18 @@ mod tests {
         assert!(s.is_unlocked());
         s.lock();
         assert!(!s.is_unlocked());
+    }
+
+    #[test]
+    fn fingerprint_resume_refused_when_disabled() {
+        // With fingerprint unlock off (the default), a resume request is a clean
+        // "unavailable" — never a silent unlock and never a different error.
+        let mut s = AgentState::new(900);
+        assert!(matches!(
+            s.resume_after_fingerprint(),
+            Err(IpcError::FingerprintUnavailable(_))
+        ));
+        assert!(!s.is_unlocked(), "must never auto-unlock");
     }
 
     #[test]

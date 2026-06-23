@@ -66,5 +66,11 @@ pqc:
     cargo build -p vault-agent --features pqc
     cargo test -p vault-api --features pqc
 
+# Build + lint the off-by-default fingerprint-unlock feature (docs/fingerprint.md;
+# Linux/fprintd). Mirrors what CI's feature check would run for it.
+fingerprint:
+    cargo build -p vault-agent --features fingerprint
+    cargo clippy -p vault-agent --features fingerprint -- -D warnings
+
 # Everything the CI runner checks, in order. Run before pushing.
 ci: fmt clippy test headless version-gate deny audit reuse

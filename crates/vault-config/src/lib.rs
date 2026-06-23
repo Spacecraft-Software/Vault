@@ -27,6 +27,8 @@ pub const KNOWN_KEYS: &[&str] = &[
     "clipboard.backend",
     "agent.idle_lock_secs",
     "agent.session_keyring",
+    "agent.fingerprint_unlock",
+    "agent.fingerprint_ttl_secs",
     "sync.interval_secs",
     "ui.reduced_motion",
     "tui.vim",
@@ -81,6 +83,16 @@ pub struct AgentCfg {
     /// session keyring (opt-in; Linux-only). `true` passes `--session-keyring`
     /// to the auto-spawned agent.
     pub session_keyring: Option<bool>,
+    /// Gate the keyring-stored session behind a fingerprint (Linux, `fprintd`):
+    /// the agent stays locked on restart / after idle-lock and re-unlocks only
+    /// on a verified touch, and idle-lock keeps the keyring entry so the touch
+    /// works after a timeout. Requires `session_keyring` and the agent's
+    /// `fingerprint` feature. `true` passes `--fingerprint-unlock`.
+    pub fingerprint_unlock: Option<bool>,
+    /// Lifetime (seconds) of the keyring session under fingerprint unlock — how
+    /// long after the last unlock a touch can still re-unlock; `0` = until the
+    /// keyring is cleared (logout / manual lock). Passes `--fingerprint-ttl-secs`.
+    pub fingerprint_ttl_secs: Option<u64>,
 }
 
 /// `[sync]` table.
@@ -163,6 +175,18 @@ impl Config {
         self.agent.session_keyring
     }
 
+    /// Effective `agent.fingerprint_unlock`, if set.
+    #[must_use]
+    pub const fn fingerprint_unlock(&self) -> Option<bool> {
+        self.agent.fingerprint_unlock
+    }
+
+    /// Effective `agent.fingerprint_ttl_secs`, if set.
+    #[must_use]
+    pub const fn fingerprint_ttl_secs(&self) -> Option<u64> {
+        self.agent.fingerprint_ttl_secs
+    }
+
     /// Effective `sync.interval_secs`, if set.
     #[must_use]
     pub const fn sync_interval_secs(&self) -> Option<u64> {
@@ -209,6 +233,10 @@ impl Config {
             "clipboard.backend" => Ok(self.clipboard.backend.clone()),
             "agent.idle_lock_secs" => Ok(self.agent.idle_lock_secs.map(|v| v.to_string())),
             "agent.session_keyring" => Ok(self.agent.session_keyring.map(|v| v.to_string())),
+            "agent.fingerprint_unlock" => Ok(self.agent.fingerprint_unlock.map(|v| v.to_string())),
+            "agent.fingerprint_ttl_secs" => {
+                Ok(self.agent.fingerprint_ttl_secs.map(|v| v.to_string()))
+            }
             "sync.interval_secs" => Ok(self.sync.interval_secs.map(|v| v.to_string())),
             "ui.reduced_motion" => Ok(self.ui.reduced_motion.map(|v| v.to_string())),
             "tui.vim" => Ok(self.tui.vim.map(|v| v.to_string())),
@@ -238,6 +266,14 @@ impl Config {
             }
             "agent.session_keyring" => {
                 self.agent.session_keyring = Some(parse_bool(key, raw)?);
+                Ok(())
+            }
+            "agent.fingerprint_unlock" => {
+                self.agent.fingerprint_unlock = Some(parse_bool(key, raw)?);
+                Ok(())
+            }
+            "agent.fingerprint_ttl_secs" => {
+                self.agent.fingerprint_ttl_secs = Some(parse_u64(key, raw)?);
                 Ok(())
             }
             "sync.interval_secs" => {
@@ -279,6 +315,14 @@ impl Config {
                 self.agent.session_keyring = None;
                 Ok(())
             }
+            "agent.fingerprint_unlock" => {
+                self.agent.fingerprint_unlock = None;
+                Ok(())
+            }
+            "agent.fingerprint_ttl_secs" => {
+                self.agent.fingerprint_ttl_secs = None;
+                Ok(())
+            }
             "sync.interval_secs" => {
                 self.sync.interval_secs = None;
                 Ok(())
@@ -317,6 +361,13 @@ pub fn agent_args(cfg: &Config) -> Vec<OsString> {
     // Boolean flag: present only when explicitly enabled.
     if cfg.session_keyring() == Some(true) {
         args.push(OsString::from("--session-keyring"));
+    }
+    if cfg.fingerprint_unlock() == Some(true) {
+        args.push(OsString::from("--fingerprint-unlock"));
+    }
+    if let Some(secs) = cfg.fingerprint_ttl_secs() {
+        args.push(OsString::from("--fingerprint-ttl-secs"));
+        args.push(OsString::from(secs.to_string()));
     }
     if let Some(secs) = cfg.sync_interval_secs() {
         args.push(OsString::from("--sync-interval-secs"));
@@ -633,6 +684,42 @@ mod tests {
         c.unset("sync.interval_secs").expect("unset");
         assert_eq!(c.sync_interval_secs(), None);
         assert!(c.set("sync.interval_secs", "soon").is_err());
+    }
+
+    #[test]
+    fn fingerprint_keys_round_trip_and_emit_flags() {
+        let mut c = Config::default();
+        assert_eq!(c.fingerprint_unlock(), None);
+        assert_eq!(c.fingerprint_ttl_secs(), None);
+        assert!(
+            !agent_args(&c).iter().any(|a| a == "--fingerprint-unlock"),
+            "unset → no flag"
+        );
+
+        c.set("agent.fingerprint_unlock", "true").expect("set");
+        c.set("agent.fingerprint_ttl_secs", "7200").expect("set");
+        assert_eq!(c.fingerprint_unlock(), Some(true));
+        assert_eq!(c.fingerprint_ttl_secs(), Some(7200));
+
+        let args = agent_args(&c);
+        assert!(args.contains(&OsString::from("--fingerprint-unlock")));
+        let i = args
+            .iter()
+            .position(|a| a == "--fingerprint-ttl-secs")
+            .expect("ttl flag present");
+        assert_eq!(args[i + 1], OsString::from("7200"));
+
+        // `false` must not emit the boolean flag.
+        c.set("agent.fingerprint_unlock", "false").expect("set");
+        assert!(!agent_args(&c).iter().any(|a| a == "--fingerprint-unlock"));
+
+        // Survives a toml round-trip; unset clears; bad value rejected.
+        let text = toml::to_string_pretty(&c).expect("serialise");
+        let back: Config = toml::from_str(&text).expect("parse");
+        assert_eq!(back.fingerprint_ttl_secs(), Some(7200));
+        c.unset("agent.fingerprint_ttl_secs").expect("unset");
+        assert_eq!(c.fingerprint_ttl_secs(), None);
+        assert!(c.set("agent.fingerprint_unlock", "maybe").is_err());
     }
 
     #[test]

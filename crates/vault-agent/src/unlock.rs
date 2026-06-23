@@ -333,6 +333,39 @@ pub fn load_cache(server: &str, email: &str) -> Option<VaultCache> {
     vault_store::load_from_dir(&dir).ok()
 }
 
+/// Rebuild an unlocked vault from a session blob in the kernel keyring plus the
+/// on-disk cache. Shared by the silent startup resume ([`try_resume`] in
+/// `main.rs`) and the fingerprint-gated resume
+/// ([`AgentState::resume_after_fingerprint`](crate::state::AgentState::resume_after_fingerprint)).
+///
+/// `Ok(None)` means "no resumable session" — absent, past its deadline, or no
+/// cache — which is the normal, silent outcome; an expired entry is also
+/// cleared. `Ok(Some(_))` resumed; `Err` is a genuine failure (e.g. the cached
+/// payload won't decrypt under the keyring key).
+///
+/// # Errors
+///
+/// Propagates the typed failure from [`vault_from_user_key`].
+pub fn resume_from_keyring() -> Result<Option<Vault>, IpcError> {
+    let Some(blob) = crate::session::load() else {
+        return Ok(None);
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    // deadline_unix == 0 means "no expiry".
+    if blob.deadline_unix != 0 && now >= blob.deadline_unix {
+        crate::session::clear();
+        return Ok(None);
+    }
+    let Some(cache) = load_cache(&blob.server, &blob.email) else {
+        return Ok(None);
+    };
+    let user_enc = Zeroizing::new(blob.user_enc);
+    let user_mac = Zeroizing::new(blob.user_mac);
+    vault_from_user_key(&cache, &blob.server, &blob.email, &user_enc, &user_mac).map(Some)
+}
+
 /// Path to the account's cache directory.
 pub fn cache_dir(server: &str, email: &str) -> Option<std::path::PathBuf> {
     Some(vault_store::default_data_dir()?.join(account_dir_name(server, email)))
