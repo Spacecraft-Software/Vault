@@ -50,7 +50,7 @@ and appreciated within the bounds set out below.
    Memory safety → performance → hardened security, in that order. Rust where
    viable. POSIX-compliant CLI. GPL-3.0-or-later with SPDX headers on every
    source file.
-3. **Match the CLI Standard** (SFRS v1.0.0) for anything touching `vault-cli`.
+3. **Match the CLI Standard** (v1.0.0) for anything touching `vault-cli`.
 4. **Run the full test suite locally.** PRs that don't pass CI will not be
    reviewed.
 5. **Use the project's preferred toolchain.** Format with `rustfmt`, lint with
