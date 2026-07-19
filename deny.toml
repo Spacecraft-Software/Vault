@@ -20,6 +20,14 @@ ignore = [
     # adaptively-chosen ciphertexts; Vault never exposes one. Mirrors the
     # cargo-audit ignore in CI. Revisit if `rsa` ships a constant-time fix.
     "RUSTSEC-2023-0071",
+    # quick-xml 0.39.4 — RUSTSEC-2026-0195 / RUSTSEC-2026-0194. Build-time-only
+    # proc-macro dependency of wayland-scanner (transitive via arboard's Wayland
+    # clipboard support); it only parses the Wayland protocol XML bundled in
+    # wayland-scanner at compile time, never runtime/attacker-controlled input.
+    # No newer wayland-scanner is resolvable yet under wayland-client's current
+    # constraint. Mirrors the cargo-audit ignore in CI. Revisit when one lands.
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0194",
 ]
 
 [licenses]

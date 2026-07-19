@@ -49,9 +49,12 @@ version-gate:
 deny:
     cargo deny check
 
-# Vulnerability advisories; --ignore mirrors CI's audit job (.github/workflows/ci.yml). Needs cargo-audit.
+# Vulnerability advisories; --ignore mirrors CI's audit job (.github/workflows/ci.yml). Needs cargo-audit
+# (install with `cargo install cargo-audit --locked` — unlocked resolves cargo-audit's own deps fresh,
+# which can outrun the pinned toolchain's MSRV).
 audit:
-    cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2023-0071
+    cargo audit --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2023-0071 \
+        --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0194
 
 # REUSE/SPDX licensing lint (CI: REUSE job). Needs reuse (`uvx reuse lint` or `pipx install reuse`).
 reuse:

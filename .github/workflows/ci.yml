@@ -91,31 +91,33 @@ jobs:
   audit:
     name: cargo-audit
     runs-on: ubuntu-latest
-    # audit-check posts findings as a check run — needs checks:write. Job-level
-    # permissions replace the default set, so contents:read is restated for
-    # checkout.
-    permissions:
-      contents: read
-      checks: write
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # Build-time / transitive advisories from the ratatui TUI tree, kept in
-          # lock-step with deny.toml's policy (see that file for the paste
-          # rationale). Both are informational (no fix that doesn't mean dropping
-          # ratatui); revisit when ratatui's tree updates.
-          #   RUSTSEC-2024-0436 — paste (unmaintained, build-time proc-macro)
-          #   RUSTSEC-2026-0002 — lru 0.12.5 (unsound IterMut; transitive via ratatui)
-          # RUSTSEC-2023-0071 — rsa (Marvin timing sidechannel, no upstream fix).
-          # rsa unwraps organization keys (RSA-OAEP) once, locally, at unlock;
-          # the attack needs a network-observable decryption oracle, which Vault
-          # never exposes. Revisit if rsa ships a constant-time fix.
-          ignore: RUSTSEC-2024-0436,RUSTSEC-2026-0002,RUSTSEC-2023-0071
+      # Installed directly (not via rustsec/audit-check@v2) so `--locked` pins
+      # cargo-audit to its own committed lockfile. Without it, `cargo install`
+      # re-resolves cargo-audit's dependencies fresh on every run, and a
+      # transitive bump (e.g. kstring requiring a newer rustc) can outrun the
+      # workspace's pinned toolchain even though nothing here changed.
+      - run: cargo install cargo-audit --locked
+      # --ignore mirrors `just audit`; keep both lists in lock-step.
+      #   RUSTSEC-2024-0436 — paste (unmaintained, build-time proc-macro; transitive via ratatui)
+      #   RUSTSEC-2026-0002 — lru 0.12.5 (unsound IterMut; transitive via ratatui)
+      #   RUSTSEC-2023-0071 — rsa (Marvin timing sidechannel, no upstream fix). rsa unwraps
+      #     organization keys (RSA-OAEP) once, locally, at unlock; the attack needs a
+      #     network-observable decryption oracle, which Vault never exposes. Revisit if rsa
+      #     ships a constant-time fix.
+      #   RUSTSEC-2026-0195, RUSTSEC-2026-0194 — quick-xml 0.39.4 (build-time-only proc-macro
+      #     dependency of wayland-scanner, itself transitive via arboard's Wayland clipboard
+      #     support; parses only the Wayland protocol XML bundled in wayland-scanner at compile
+      #     time, never runtime/attacker-controlled input). No newer wayland-scanner release is
+      #     resolvable yet under wayland-client's current constraint; revisit when one lands.
+      - run: >-
+          cargo audit
+          --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2023-0071
+          --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0194
 
   deny:
     name: cargo-deny
