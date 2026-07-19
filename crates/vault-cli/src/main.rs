@@ -1615,11 +1615,7 @@ fn cmd_config_exec(action: ExecConfigAction) -> Result<(), u8> {
             }
             Ok(())
         }
-        ExecConfigAction::Unset {
-            profile,
-            var,
-            json,
-        } => {
+        ExecConfigAction::Unset { profile, var, json } => {
             let mut cfg = load_config()?;
             if let Err(msg) = cfg.exec_unset(&profile, &var) {
                 eprintln!("vault: {msg}");
@@ -1627,7 +1623,10 @@ fn cmd_config_exec(action: ExecConfigAction) -> Result<(), u8> {
             }
             save_config(&cfg)?;
             if json {
-                println!("{}", serde_json::json!({ "profile": profile, "unset": var }));
+                println!(
+                    "{}",
+                    serde_json::json!({ "profile": profile, "unset": var })
+                );
             }
             Ok(())
         }
@@ -2124,7 +2123,10 @@ async fn cmd_exec(
 
     match status {
         Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(status.code().and_then(|c| u8::try_from(c).ok()).unwrap_or(1)),
+        Ok(status) => Err(status
+            .code()
+            .and_then(|c| u8::try_from(c).ok())
+            .unwrap_or(1)),
         Err(e) => {
             eprintln!("vault: failed to run '{program}': {e}");
             Err(127)

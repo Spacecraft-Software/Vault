@@ -1500,9 +1500,7 @@ impl App {
     #[must_use]
     pub fn selected_detail_field(&self) -> Option<DetailField> {
         let e = self.selected_entry()?;
-        detail_fields(e.cipher_type)
-            .get(self.detail_field)
-            .cloned()
+        detail_fields(e.cipher_type).get(self.detail_field).cloned()
     }
 
     /// The `(id, name, field)` that `Space` should reveal given the current
@@ -2287,7 +2285,9 @@ mod tests {
             assert!(f.masked, "{label} must be masked");
         }
         assert_eq!(
-            id.iter().find(|f| f.label == "SSN").map(|f| f.field.clone()),
+            id.iter()
+                .find(|f| f.label == "SSN")
+                .map(|f| f.field.clone()),
             Some(Field::IdentitySsn)
         );
     }

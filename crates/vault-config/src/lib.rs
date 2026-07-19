@@ -642,7 +642,11 @@ mod tests {
         assert_eq!(c.exec_profile("default"), None);
 
         c.exec_set("default", "ANTHROPIC_API_KEY", "Anthropic API Key");
-        c.exec_set("default", "BRAVE_API_KEY", "Brave Search API Key#custom:api_key");
+        c.exec_set(
+            "default",
+            "BRAVE_API_KEY",
+            "Brave Search API Key#custom:api_key",
+        );
         let profile = c.exec_profile("default").expect("profile present");
         assert_eq!(
             profile.get("ANTHROPIC_API_KEY").map(String::as_str),
@@ -659,8 +663,7 @@ mod tests {
         assert_eq!(back.exec_profile("default"), c.exec_profile("default"));
 
         // Unset removes just that var; the profile survives with the other.
-        c.exec_unset("default", "ANTHROPIC_API_KEY")
-            .expect("unset");
+        c.exec_unset("default", "ANTHROPIC_API_KEY").expect("unset");
         assert_eq!(
             c.exec_profile("default").map(BTreeMap::len),
             Some(1),
