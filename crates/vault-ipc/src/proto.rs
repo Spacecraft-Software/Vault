@@ -533,7 +533,7 @@ impl Drop for Item {
 }
 
 /// Selectable field on `Request::Get`.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Field {
     /// `Login.Password`. The default.
@@ -547,6 +547,10 @@ pub enum Field {
     Notes,
     /// First `Login.Uris[].Uri`.
     Uri,
+    /// A named custom field (any cipher type), matched case-insensitively
+    /// against `CustomField.name`. Used by `vault exec` to pull an API key
+    /// out of a custom field rather than the password slot.
+    Custom(String),
     /// `Card.CardholderName`.
     CardCardholder,
     /// `Card.Number`.

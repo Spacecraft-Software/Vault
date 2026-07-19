@@ -105,7 +105,7 @@ keeps the crypto, sync, and storage code consolidated and auditable.
 ### 7.1 CLI surface
 
 Verbs are flat, matching `rbw`'s muscle memory; flags follow the Spacecraft
-Software CLI Standard (SFRS v1.0.0).
+Software CLI Standard (v1.0.0).
 
 | Command                                      | Purpose                                       |
 | -------------------------------------------- | --------------------------------------------- |
@@ -120,6 +120,8 @@ Software CLI Standard (SFRS v1.0.0).
 | `vault generate [--length N] [--symbols]`    | Password generation                           |
 | `vault purge`                                | Wipe local cache                              |
 | `vault config get`/`set`/`unset`             | Settings                                      |
+| `vault config exec set`/`unset`/`list`       | `[exec.profiles.*]` env-var-to-item mappings  |
+| `vault exec [--profile P] -- <cmd>`          | Launch `<cmd>` with those vars injected as env — see `docs/exec.md` |
 | `vault stop-agent`                           | Kill the daemon                               |
 
 **Standard-mandated flags on every subcommand:**

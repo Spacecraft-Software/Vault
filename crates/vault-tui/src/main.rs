@@ -732,14 +732,14 @@ async fn toggle_reveal(state: &mut App, socket: &Path) {
         return;
     };
 
-    if state.is_revealed(&id, field) {
+    if state.is_revealed(&id, &field) {
         state.hide_revealed();
         return;
     }
     let req = Request::Get {
         id: Some(id.clone()),
         name: name.clone(),
-        field: Some(field),
+        field: Some(field.clone()),
     };
     match client::request(socket, &req).await {
         Ok(Response::Item(item)) => {
@@ -752,11 +752,11 @@ async fn toggle_reveal(state: &mut App, socket: &Path) {
 }
 
 /// Fetch one field's value for an item, or `None` on a missing field / error.
-async fn fetch_field(socket: &Path, id: &str, name: &str, field: Field) -> Option<String> {
+async fn fetch_field(socket: &Path, id: &str, name: &str, field: &Field) -> Option<String> {
     let req = Request::Get {
         id: Some(id.to_owned()),
         name: name.to_owned(),
-        field: Some(field),
+        field: Some(field.clone()),
     };
     match client::request(socket, &req).await {
         Ok(Response::Item(item)) => Some(item.value.clone()),
@@ -812,7 +812,7 @@ async fn ensure_detail(state: &mut App, socket: &Path) {
     };
     let mut lines = Vec::new();
     for (label, field) in specs {
-        if let Some(value) = fetch_field(socket, &sel.id, &sel.name, *field).await {
+        if let Some(value) = fetch_field(socket, &sel.id, &sel.name, field).await {
             lines.push(((*label).to_owned(), value));
         }
     }
@@ -835,13 +835,13 @@ async fn copy_field(state: &mut App, socket: &Path, field: Field, label: &str) {
     let req = Request::Copy {
         id: Some(sel.id.clone()),
         name: sel.name.clone(),
-        field: Some(field),
+        field: Some(field.clone()),
         clear_after_secs: None,
     };
     match client::request(socket, &req).await {
         Ok(Response::Copied(c)) => state.set_toast(copied_toast(label, c.clear_after_secs)),
         Ok(Response::Error(IpcError::ClipboardUnavailable)) => {
-            osc52_field_fallback(state, socket, &sel.id, &sel.name, field, label).await;
+            osc52_field_fallback(state, socket, &sel.id, &sel.name, &field, label).await;
         }
         Ok(Response::Error(e)) => state.set_toast(format!("copy failed: {e}")),
         Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
@@ -866,13 +866,13 @@ async fn osc52_field_fallback(
     socket: &Path,
     id: &str,
     name: &str,
-    field: Field,
+    field: &Field,
     label: &str,
 ) {
     let req = Request::Get {
         id: Some(id.to_owned()),
         name: name.to_owned(),
-        field: Some(field),
+        field: Some(field.clone()),
     };
     match client::request(socket, &req).await {
         Ok(Response::Item(item)) => osc52_copy(state, &item.value, label),

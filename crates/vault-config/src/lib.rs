@@ -14,6 +14,7 @@
 //! `[account]` profile to drive in-place unlock). The registry is shaped to
 //! grow into the rest of PRD §7.1's keys without disturbing callers.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
@@ -58,6 +59,11 @@ pub struct Config {
     /// empty `[account]` table.
     #[serde(skip_serializing_if = "AccountCfg::is_empty")]
     pub account: AccountCfg,
+    /// `vault exec` env-var-to-item-spec profiles. Skipped from the file until
+    /// a profile is configured, so a config with no `exec` use carries no
+    /// empty `[exec]` table.
+    #[serde(skip_serializing_if = "ExecCfg::is_empty")]
+    pub exec: ExecCfg,
 }
 
 /// `[clipboard]` table.
@@ -150,6 +156,30 @@ impl AccountCfg {
     }
 }
 
+/// `[exec.profiles.*]` tables — env-var-name → item-spec mappings.
+///
+/// Consumed by `vault exec`. Unlike the scalar `KNOWN_KEYS` registry, this is
+/// a table of tables, so it's edited via its own `exec_set`/`exec_unset`
+/// methods rather than the generic `Config::set`. `BTreeMap` keeps both the
+/// profile names and the env vars within a profile in a stable, sorted order
+/// for `config.toml` and `vault config exec list`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecCfg {
+    /// Profile name → (env var name → item spec, e.g. `"Anthropic API Key"` or
+    /// `"Anthropic API Key#custom:api_key"`). Item-spec grammar is parsed by
+    /// `vault-cli`, not here — this crate only stores and round-trips strings.
+    pub profiles: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl ExecCfg {
+    /// Whether no profile is set (drives skipping the table on write).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.profiles.is_empty()
+    }
+}
+
 impl Config {
     /// Effective `clipboard.clear_secs`, if set.
     #[must_use]
@@ -220,6 +250,43 @@ impl Config {
         if self.account.device_id.is_none() {
             self.account.device_id = Some(uuid::Uuid::new_v4().to_string());
         }
+    }
+
+    /// The `[exec.profiles.<profile>]` mapping, if any entry is configured for
+    /// it. Used by `vault exec` to resolve every env var it must inject.
+    #[must_use]
+    pub fn exec_profile(&self, profile: &str) -> Option<&BTreeMap<String, String>> {
+        self.exec.profiles.get(profile)
+    }
+
+    /// Map `env_var` to `item_spec` within `profile` (created if new).
+    pub fn exec_set(&mut self, profile: &str, env_var: &str, item_spec: &str) {
+        self.exec
+            .profiles
+            .entry(profile.to_owned())
+            .or_default()
+            .insert(env_var.to_owned(), item_spec.to_owned());
+    }
+
+    /// Remove `env_var` from `profile`. Drops the profile entirely once its
+    /// last mapping is removed, so an unused profile doesn't linger empty in
+    /// `config.toml`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing message when `profile` or `env_var` isn't set.
+    pub fn exec_unset(&mut self, profile: &str, env_var: &str) -> Result<(), String> {
+        let vars = self
+            .exec
+            .profiles
+            .get_mut(profile)
+            .ok_or_else(|| format!("no such exec profile '{profile}'"))?;
+        vars.remove(env_var)
+            .ok_or_else(|| format!("'{env_var}' is not set in exec profile '{profile}'"))?;
+        if vars.is_empty() {
+            self.exec.profiles.remove(profile);
+        }
+        Ok(())
     }
 
     /// Current value of `key` as a display string, `None` when unset.
@@ -567,6 +634,54 @@ mod tests {
         assert!(text.contains("[account]"), "account table missing:\n{text}");
         let back: Config = toml::from_str(&text).expect("parse");
         assert_eq!(back.account(), c.account());
+    }
+
+    #[test]
+    fn exec_set_get_unset_round_trips() {
+        let mut c = Config::default();
+        assert_eq!(c.exec_profile("default"), None);
+
+        c.exec_set("default", "ANTHROPIC_API_KEY", "Anthropic API Key");
+        c.exec_set("default", "BRAVE_API_KEY", "Brave Search API Key#custom:api_key");
+        let profile = c.exec_profile("default").expect("profile present");
+        assert_eq!(
+            profile.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("Anthropic API Key")
+        );
+        assert_eq!(
+            profile.get("BRAVE_API_KEY").map(String::as_str),
+            Some("Brave Search API Key#custom:api_key")
+        );
+
+        // Survives a toml round-trip.
+        let text = toml::to_string_pretty(&c).expect("serialise");
+        let back: Config = toml::from_str(&text).expect("parse");
+        assert_eq!(back.exec_profile("default"), c.exec_profile("default"));
+
+        // Unset removes just that var; the profile survives with the other.
+        c.exec_unset("default", "ANTHROPIC_API_KEY")
+            .expect("unset");
+        assert_eq!(
+            c.exec_profile("default").map(BTreeMap::len),
+            Some(1),
+            "profile should still hold BRAVE_API_KEY"
+        );
+
+        // Unsetting the last var drops the whole profile.
+        c.exec_unset("default", "BRAVE_API_KEY").expect("unset");
+        assert_eq!(c.exec_profile("default"), None);
+
+        // Unknown profile/var are user-facing errors, not panics.
+        assert!(c.exec_unset("no-such-profile", "X").is_err());
+    }
+
+    #[test]
+    fn exec_profiles_absent_until_set() {
+        let empty = toml::to_string_pretty(&Config::default()).expect("serialise");
+        assert!(
+            !empty.contains("[exec"),
+            "empty config grew an [exec] table:\n{empty}"
+        );
     }
 
     #[test]
