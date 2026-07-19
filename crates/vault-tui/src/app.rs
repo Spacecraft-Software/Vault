@@ -17,17 +17,25 @@ use std::fmt;
 
 use zeroize::Zeroizing;
 
-use vault_core::{GenerateOptions, generate_password};
+use vault_core::{GenerateOptions, PassphraseOptions, generate_passphrase, generate_password};
 use vault_ipc::proto::{Field, ListEntry, Status};
 
 /// Smallest password the generator overlay will produce. Comfortably above the
 /// four-character floor `generate_password` needs to seat one character from
 /// every enabled class, and below it a generated password isn't worth copying.
-const GEN_MIN_LEN: usize = 8;
+pub const GEN_MIN_LEN: usize = 8;
 
 /// Largest password the generator overlay will produce — matches Bitwarden's
 /// own generator ceiling so saved values round-trip everywhere.
-const GEN_MAX_LEN: usize = 128;
+pub const GEN_MAX_LEN: usize = 128;
+
+/// Passphrase word-count bounds, matching `generate_passphrase`'s own `3..=20`.
+pub const GEN_MIN_WORDS: usize = 3;
+/// See [`GEN_MIN_WORDS`].
+pub const GEN_MAX_WORDS: usize = 20;
+
+/// Word separators the overlay cycles through with `e` in passphrase mode.
+const SEPARATORS: &[&str] = &["-", "_", ".", ",", " "];
 
 /// Rows a vim half-page motion (`Ctrl-d`/`Ctrl-u`) moves. A fixed approximation
 /// of vim's "half the window": the pure-render `App` has no viewport height, so
@@ -491,30 +499,42 @@ impl fmt::Debug for RevealedSecret {
     }
 }
 
-/// The password-generator overlay's state: the options in force and the
-/// password generated under them. The password is zeroised on drop and never
-/// surfaced by `Debug`.
+/// Whether the generator produces a character password or a diceware passphrase.
+///
+/// The active mode and both option sets live on [`App`] so they persist across
+/// overlay open/close within a session; [`GeneratorState`] holds only the
+/// freshly generated value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GeneratorMode {
+    /// Character password — length plus class toggles.
+    #[default]
+    Password,
+    /// Diceware passphrase — word count, separator, capitalize, number.
+    Passphrase,
+}
+
+/// The generator overlay's live value (password or passphrase).
+///
+/// Zeroised on drop and never surfaced by `Debug`. The options it was generated
+/// under live on [`App`] (`gen_mode` / `gen_pw` / `gen_pp`).
 #[derive(Clone)]
 pub struct GeneratorState {
-    /// Options the current password was generated under.
-    pub opts: GenerateOptions,
-    /// The freshly generated password.
-    password: Zeroizing<String>,
+    /// The freshly generated value.
+    value: Zeroizing<String>,
 }
 
 impl GeneratorState {
-    /// The generated password, for display and copy.
+    /// The generated value, for display and copy.
     #[must_use]
-    pub fn password(&self) -> &str {
-        &self.password
+    pub fn value(&self) -> &str {
+        &self.value
     }
 }
 
 impl fmt::Debug for GeneratorState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GeneratorState")
-            .field("opts", &self.opts)
-            .field("password", &"<redacted>")
+            .field("value", &"<redacted>")
             .finish()
     }
 }
@@ -1157,8 +1177,14 @@ pub struct App {
     pub command: TextInput,
     /// Shared kill-ring for `Ctrl+W`/`Ctrl+U`/`Ctrl+K` cuts; `Ctrl+Y` yanks it.
     pub kill_ring: String,
-    /// Generator overlay state, `Some` while [`InputMode::Generate`] is open.
+    /// Generator overlay value, `Some` while [`InputMode::Generate`] is open.
     pub generator: Option<GeneratorState>,
+    /// Active generator mode (`generate.mode`); persists across overlay reopen.
+    pub gen_mode: GeneratorMode,
+    /// Character-password options for the generator (`generate.length` / classes).
+    pub gen_pw: GenerateOptions,
+    /// Passphrase options for the generator (`generate.words` / separator / …).
+    pub gen_pp: PassphraseOptions,
     /// Add/edit form state, `Some` while [`InputMode::Form`] is open.
     pub form: Option<FormState>,
     /// Delete target `(id, name)`, `Some` while [`InputMode::ConfirmDelete`]
@@ -1213,6 +1239,9 @@ impl App {
             command: TextInput::default(),
             kill_ring: String::new(),
             generator: None,
+            gen_mode: GeneratorMode::Password,
+            gen_pw: GenerateOptions::default(),
+            gen_pp: PassphraseOptions::default(),
             form: None,
             confirm_delete: None,
             revealed: None,
@@ -1251,6 +1280,9 @@ impl App {
             command: TextInput::default(),
             kill_ring: String::new(),
             generator: None,
+            gen_mode: GeneratorMode::Password,
+            gen_pw: GenerateOptions::default(),
+            gen_pp: PassphraseOptions::default(),
             form: None,
             confirm_delete: None,
             revealed: None,
@@ -1777,14 +1809,11 @@ impl App {
 
     /// Open the generator overlay with a fresh default-options password.
     pub fn open_generator(&mut self) {
-        let opts = GenerateOptions::default();
-        match generate_password(&opts) {
-            Ok(password) => {
-                self.generator = Some(GeneratorState { opts, password });
-                self.mode = InputMode::Generate;
-            }
-            Err(e) => self.set_toast(format!("generate failed: {e}")),
-        }
+        self.generator = Some(GeneratorState {
+            value: Zeroizing::new(String::new()),
+        });
+        self.mode = InputMode::Generate;
+        self.regenerate();
     }
 
     /// Close the generator overlay, dropping (and zeroising) its password.
@@ -1803,38 +1832,103 @@ impl App {
         self.mode = InputMode::Normal;
     }
 
-    /// Replace the overlay's password with a fresh one under the same options.
+    /// Replace the overlay's value with a fresh one under the current mode and
+    /// options. No-op when the overlay is closed.
     pub fn regenerate(&mut self) {
-        if let Some(g) = self.generator.as_mut() {
-            match generate_password(&g.opts) {
-                Ok(password) => g.password = password,
-                Err(e) => self.toast = Some(format!("generate failed: {e}")),
+        if self.generator.is_none() {
+            return;
+        }
+        let result = match self.gen_mode {
+            GeneratorMode::Password => generate_password(&self.gen_pw),
+            GeneratorMode::Passphrase => generate_passphrase(&self.gen_pp),
+        };
+        match result {
+            Ok(value) => {
+                if let Some(g) = self.generator.as_mut() {
+                    g.value = value;
+                }
             }
+            Err(e) => self.toast = Some(format!("generate failed: {e}")),
         }
     }
 
-    /// Grow or shrink the generated length by `delta`, clamped to
-    /// [`GEN_MIN_LEN`]..=[`GEN_MAX_LEN`], regenerating on change.
-    pub fn gen_adjust_length(&mut self, delta: isize) {
-        if let Some(g) = self.generator.as_mut() {
-            let len = g
-                .opts
-                .length
-                .saturating_add_signed(delta)
-                .clamp(GEN_MIN_LEN, GEN_MAX_LEN);
-            if len != g.opts.length {
-                g.opts.length = len;
-                self.regenerate();
-            }
-        }
+    /// Toggle between password and passphrase mode, regenerating immediately.
+    pub fn gen_toggle_mode(&mut self) {
+        self.gen_mode = match self.gen_mode {
+            GeneratorMode::Password => GeneratorMode::Passphrase,
+            GeneratorMode::Passphrase => GeneratorMode::Password,
+        };
+        self.regenerate();
     }
 
-    /// Toggle the symbol class on the generator, regenerating immediately.
-    pub fn gen_toggle_symbols(&mut self) {
-        if let Some(g) = self.generator.as_mut() {
-            g.opts.symbols = !g.opts.symbols;
+    /// Grow or shrink the primary count by `delta` — password length or
+    /// passphrase word count, each clamped to its bounds — regenerating on
+    /// change.
+    pub fn gen_adjust_count(&mut self, delta: isize) {
+        let changed = match self.gen_mode {
+            GeneratorMode::Password => {
+                let len = self
+                    .gen_pw
+                    .length
+                    .saturating_add_signed(delta)
+                    .clamp(GEN_MIN_LEN, GEN_MAX_LEN);
+                let changed = len != self.gen_pw.length;
+                self.gen_pw.length = len;
+                changed
+            }
+            GeneratorMode::Passphrase => {
+                let words = self
+                    .gen_pp
+                    .words
+                    .saturating_add_signed(delta)
+                    .clamp(GEN_MIN_WORDS, GEN_MAX_WORDS);
+                let changed = words != self.gen_pp.words;
+                self.gen_pp.words = words;
+                changed
+            }
+        };
+        if changed {
             self.regenerate();
         }
+    }
+
+    /// Toggle the symbol class (password mode only), regenerating immediately.
+    pub fn gen_toggle_symbols(&mut self) {
+        if self.gen_mode == GeneratorMode::Password {
+            self.gen_pw.symbols = !self.gen_pw.symbols;
+            self.regenerate();
+        }
+    }
+
+    /// Toggle word capitalization (passphrase mode only), regenerating.
+    pub fn gen_toggle_capitalize(&mut self) {
+        if self.gen_mode == GeneratorMode::Passphrase {
+            self.gen_pp.capitalize = !self.gen_pp.capitalize;
+            self.regenerate();
+        }
+    }
+
+    /// Toggle the appended digit (passphrase mode only), regenerating.
+    pub fn gen_toggle_include_number(&mut self) {
+        if self.gen_mode == GeneratorMode::Passphrase {
+            self.gen_pp.include_number = !self.gen_pp.include_number;
+            self.regenerate();
+        }
+    }
+
+    /// Cycle the word separator through [`SEPARATORS`] (passphrase mode only),
+    /// regenerating. An off-list separator (e.g. from config) restarts at the
+    /// front of the list.
+    pub fn gen_cycle_separator(&mut self) {
+        if self.gen_mode != GeneratorMode::Passphrase {
+            return;
+        }
+        let next = SEPARATORS
+            .iter()
+            .position(|s| *s == self.gen_pp.separator)
+            .map_or(0, |i| (i + 1) % SEPARATORS.len());
+        SEPARATORS[next].clone_into(&mut self.gen_pp.separator);
+        self.regenerate();
     }
 
     // --- mutation form -----------------------------------------------------
@@ -2571,10 +2665,11 @@ mod tests {
         let mut app = App::browsing(status(), vec![entry("a", None)]);
         app.open_generator();
         assert_eq!(app.mode, InputMode::Generate);
+        assert_eq!(app.gen_mode, GeneratorMode::Password);
         let first = app
             .generator
             .as_ref()
-            .map(|g| g.password().to_owned())
+            .map(|g| g.value().to_owned())
             .expect("generator open");
         assert_eq!(first.chars().count(), 20, "default length is 20");
 
@@ -2582,10 +2677,10 @@ mod tests {
         let second = app
             .generator
             .as_ref()
-            .map(|g| g.password().to_owned())
+            .map(|g| g.value().to_owned())
             .expect("generator still open");
         // 62^20 keyspace — a collision here means the RNG is broken.
-        assert_ne!(first, second, "regenerate must draw a fresh password");
+        assert_ne!(first, second, "regenerate must draw a fresh value");
 
         app.close_generator();
         assert!(app.generator.is_none());
@@ -2593,25 +2688,20 @@ mod tests {
     }
 
     #[test]
-    fn generator_length_adjusts_and_clamps() {
+    fn generator_count_adjusts_and_clamps() {
         let mut app = App::browsing(status(), vec![entry("a", None)]);
         app.open_generator();
-        app.gen_adjust_length(1);
-        assert_eq!(app.generator.as_ref().map(|g| g.opts.length), Some(21));
+        app.gen_adjust_count(1);
+        assert_eq!(app.gen_pw.length, 21);
         assert_eq!(
-            app.generator.as_ref().map(|g| g.password().chars().count()),
+            app.generator.as_ref().map(|g| g.value().chars().count()),
             Some(21)
         );
-        app.gen_adjust_length(-1000);
+        app.gen_adjust_count(-1000);
+        assert_eq!(app.gen_pw.length, GEN_MIN_LEN, "length clamps at the floor");
+        app.gen_adjust_count(1000);
         assert_eq!(
-            app.generator.as_ref().map(|g| g.opts.length),
-            Some(GEN_MIN_LEN),
-            "length clamps at the floor"
-        );
-        app.gen_adjust_length(1000);
-        assert_eq!(
-            app.generator.as_ref().map(|g| g.opts.length),
-            Some(GEN_MAX_LEN),
+            app.gen_pw.length, GEN_MAX_LEN,
             "length clamps at the ceiling"
         );
     }
@@ -2620,28 +2710,70 @@ mod tests {
     fn generator_symbols_toggle_regenerates() {
         let mut app = App::browsing(status(), vec![entry("a", None)]);
         app.open_generator();
-        assert_eq!(app.generator.as_ref().map(|g| g.opts.symbols), Some(false));
+        assert!(!app.gen_pw.symbols);
         app.gen_toggle_symbols();
+        assert!(app.gen_pw.symbols);
         let g = app.generator.as_ref().expect("generator open");
-        assert!(g.opts.symbols);
         assert!(
-            g.password().chars().any(|c| "!@#$%^&*".contains(c)),
+            g.value().chars().any(|c| "!@#$%^&*".contains(c)),
             "an enabled class is guaranteed at least one character"
         );
     }
 
     #[test]
-    fn generator_debug_redacts_password() {
+    fn generator_passphrase_mode_words_separator_and_toggles() {
+        let mut app = App::browsing(status(), vec![entry("a", None)]);
+        app.open_generator();
+        app.gen_toggle_mode();
+        assert_eq!(app.gen_mode, GeneratorMode::Passphrase);
+        // Cycle to "_" (never appears in EFF words) so word-splitting is exact.
+        app.gen_cycle_separator();
+        assert_eq!(app.gen_pp.separator, "_");
+        let v = app
+            .generator
+            .as_ref()
+            .map(|g| g.value().to_owned())
+            .expect("open");
+        assert_eq!(v.split('_').count(), 3, "default is 3 words: {v}");
+        // `+`/`-` adjust the word count in passphrase mode.
+        app.gen_adjust_count(2);
+        assert_eq!(app.gen_pp.words, 5);
+        // Capitalize + include-number toggles take effect.
+        app.gen_toggle_capitalize();
+        app.gen_toggle_include_number();
+        assert!(app.gen_pp.capitalize && app.gen_pp.include_number);
+        let v = app
+            .generator
+            .as_ref()
+            .map(|g| g.value().to_owned())
+            .expect("open");
+        assert_eq!(v.split('_').count(), 5);
+        assert!(
+            v.chars().any(|c| c.is_ascii_uppercase()),
+            "capitalized: {v}"
+        );
+        assert!(v.chars().any(|c| c.is_ascii_digit()), "has a number: {v}");
+        // Symbols toggle is password-only — a no-op here.
+        let before = app.gen_pw.symbols;
+        app.gen_toggle_symbols();
+        assert_eq!(
+            app.gen_pw.symbols, before,
+            "symbols toggle is password-only"
+        );
+    }
+
+    #[test]
+    fn generator_debug_redacts_value() {
         let mut app = App::browsing(status(), vec![entry("a", None)]);
         app.open_generator();
         let g = app.generator.as_ref().expect("generator open");
-        let pw = g.password().to_owned();
+        let v = g.value().to_owned();
         let rendered = format!("{g:?}");
         assert!(rendered.contains("GeneratorState"));
         assert!(rendered.contains("<redacted>"));
         assert!(
-            !rendered.contains(&pw),
-            "Debug leaked the generated password: {rendered}"
+            !rendered.contains(&v),
+            "Debug leaked the generated value: {rendered}"
         );
     }
 

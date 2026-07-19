@@ -52,6 +52,16 @@ conceptual basis for Vault appear below.
 | Source URL | <https://github.com/ratatui-org/ratatui>                               |
 | Scope      | Used as the rendering substrate for `vault-tui`. Listed here because the TUI's structure is shaped by ratatui's widget and layout primitives, beyond routine dependency use. |
 
+## EFF large wordlist — passphrase generation
+
+| Field      | Value                                                                  |
+| ---------- | ---------------------------------------------------------------------- |
+| Name       | EFF Large Wordlist for Passphrases                                     |
+| Author(s)  | Electronic Frontier Foundation                                         |
+| License    | CC-BY-3.0                                                              |
+| Source URL | <https://www.eff.org/dice>                                             |
+| Scope      | The 7776-word diceware list embedded at `crates/vault-core/src/wordlist.rs`, used by `generate_passphrase`. Verbatim EFF word data (regenerated from the EFF source via `crates/vault-core/tools/gen_wordlist.sh`); declared CC-BY-3.0 in `REUSE.toml` per Standard §4.2. |
+
 ## The Spacecraft Software Standard
 
 | Field      | Value                                                                  |

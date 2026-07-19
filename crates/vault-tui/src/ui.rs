@@ -12,7 +12,9 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use vault_ipc::proto::Field;
 use vault_theme::steelbore;
 
-use crate::app::{App, Focus, FormKind, InputMode, Screen, detail_fields, scroll_offset};
+use crate::app::{
+    App, Focus, FormKind, GeneratorMode, InputMode, Screen, detail_fields, scroll_offset,
+};
 
 /// Mask shown for a secret field that has not been revealed.
 const MASK: &str = "••••••••";
@@ -352,32 +354,49 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(para, area);
 }
 
-/// Centered password-generator overlay, drawn over the browser.
+/// Centered generator overlay (password or passphrase), drawn over the browser.
 fn render_generator(frame: &mut Frame, app: &App, area: Rect) {
     let Some(g) = app.generator.as_ref() else {
         return;
     };
     let amber = hex(steelbore::MOLTEN_AMBER);
     let info = hex(steelbore::INFO);
-    let classes = format!(
-        "Length {:<4} a-z {}  A-Z {}  0-9 {}  !@# {}",
-        g.opts.length,
-        onoff(g.opts.lowercase),
-        onoff(g.opts.uppercase),
-        onoff(g.opts.digits),
-        onoff(g.opts.symbols),
-    );
+    let (mode_label, options, hint) = match app.gen_mode {
+        GeneratorMode::Password => (
+            "Password",
+            format!(
+                "Length {:<4} a-z {}  A-Z {}  0-9 {}  !@# {}",
+                app.gen_pw.length,
+                onoff(app.gen_pw.lowercase),
+                onoff(app.gen_pw.uppercase),
+                onoff(app.gen_pw.digits),
+                onoff(app.gen_pw.symbols),
+            ),
+            "Tab passphrase · +/- length · s symbols · g regen · c copy · Esc close",
+        ),
+        GeneratorMode::Passphrase => (
+            "Passphrase",
+            format!(
+                "Words {:<3} sep {}  Aa {}  123 {}",
+                app.gen_pp.words,
+                sep_label(&app.gen_pp.separator),
+                onoff(app.gen_pp.capitalize),
+                onoff(app.gen_pp.include_number),
+            ),
+            "Tab password · +/- words · e sep · a caps · n number · g regen · c copy · Esc close",
+        ),
+    };
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            g.password().to_owned(),
+            g.value().to_owned(),
             Style::default().fg(amber).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(Span::styled(classes, Style::default().fg(info))),
+        Line::from(Span::styled(options, Style::default().fg(info))),
         Line::from(""),
         Line::from(Span::styled(
-            "g regen · +/- length · s symbols · c copy · Esc close",
+            hint,
             Style::default()
                 .fg(hex(steelbore::STEEL_BLUE))
                 .add_modifier(Modifier::ITALIC),
@@ -386,7 +405,7 @@ fn render_generator(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(amber))
-        .title(" Generate ")
+        .title(format!(" Generate · {mode_label} "))
         .style(Style::default().bg(hex(steelbore::VOID_NAVY)));
     let overlay = centered(area, 70, 40);
     // Clear whatever the browser drew underneath so the overlay reads cleanly.
@@ -398,6 +417,15 @@ fn render_generator(frame: &mut Frame, app: &App, area: Rect) {
             .block(block),
         overlay,
     );
+}
+
+/// Display label for the passphrase separator: spell out the unprintable ones.
+fn sep_label(sep: &str) -> String {
+    match sep {
+        " " => "space".to_owned(),
+        "" => "none".to_owned(),
+        other => other.to_owned(),
+    }
 }
 
 /// `on` / `off` chip text for a generator class toggle.
@@ -924,12 +952,26 @@ mod tests {
         let pw = app
             .generator
             .as_ref()
-            .map(|g| g.password().to_owned())
+            .map(|g| g.value().to_owned())
             .expect("generator open");
         let text = draw(&app);
         assert!(text.contains("Generate"), "overlay title missing:\n{text}");
+        assert!(text.contains("Password"), "mode label missing:\n{text}");
         assert!(text.contains(&pw), "generated password missing:\n{text}");
         assert!(text.contains("Length 20"), "options line missing:\n{text}");
+    }
+
+    #[test]
+    fn generator_overlay_renders_passphrase_options() {
+        let mut app = App::browsing(status(), vec![login_entry()]);
+        app.open_generator();
+        app.gen_toggle_mode();
+        let text = draw(&app);
+        assert!(
+            text.contains("Passphrase"),
+            "passphrase mode label missing:\n{text}"
+        );
+        assert!(text.contains("Words 3"), "word-count row missing:\n{text}");
     }
 
     #[test]

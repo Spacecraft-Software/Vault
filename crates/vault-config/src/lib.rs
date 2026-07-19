@@ -33,10 +33,23 @@ pub const KNOWN_KEYS: &[&str] = &[
     "sync.interval_secs",
     "ui.reduced_motion",
     "tui.vim",
+    "generate.mode",
+    "generate.length",
+    "generate.lowercase",
+    "generate.uppercase",
+    "generate.digits",
+    "generate.symbols",
+    "generate.words",
+    "generate.separator",
+    "generate.capitalize",
+    "generate.include_number",
 ];
 
 /// Accepted values for `clipboard.backend`.
 pub const CLIPBOARD_BACKENDS: &[&str] = &["auto", "arboard", "osc52"];
+
+/// Accepted values for `generate.mode`.
+pub const GENERATE_MODES: &[&str] = &["password", "passphrase"];
 
 /// The full user configuration. Every field is optional — absence means "use
 /// the consumer's own default" — so the on-disk file only carries what the
@@ -54,6 +67,8 @@ pub struct Config {
     pub ui: UiCfg,
     /// TUI keymap preferences.
     pub tui: TuiCfg,
+    /// Generator preferences (remembered across sessions).
+    pub generate: GenerateCfg,
     /// Registered account profile (written by `vault register`). Skipped from
     /// the file until something is set, so an unregistered config carries no
     /// empty `[account]` table.
@@ -129,6 +144,38 @@ pub struct TuiCfg {
     /// Enable vim-style jump motions (`gg`/`G`/`Ctrl-d`/`Ctrl-u`); the generator
     /// overlay moves from `g` to `Ctrl-g` while on.
     pub vim: Option<bool>,
+}
+
+/// `[generate]` table — generator preferences remembered across sessions.
+///
+/// Read by `vault generate` (as defaults, overridden by flags) and the TUI
+/// generator overlay (its starting state). Generation is client-side, so these
+/// are never relayed to the agent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GenerateCfg {
+    /// Default mode: `password` or `passphrase`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Password length.
+    pub length: Option<u64>,
+    /// Password: include lowercase letters.
+    pub lowercase: Option<bool>,
+    /// Password: include uppercase letters.
+    pub uppercase: Option<bool>,
+    /// Password: include digits.
+    pub digits: Option<bool>,
+    /// Password: include symbols.
+    pub symbols: Option<bool>,
+    /// Passphrase: number of words.
+    pub words: Option<u64>,
+    /// Passphrase: word separator (any string; may be empty).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
+    /// Passphrase: capitalize each word.
+    pub capitalize: Option<bool>,
+    /// Passphrase: append a number to one word.
+    pub include_number: Option<bool>,
 }
 
 /// `[account]` table — the registered account, written by `vault register`
@@ -241,6 +288,12 @@ impl Config {
         &self.account
     }
 
+    /// The generator preferences.
+    #[must_use]
+    pub const fn generate(&self) -> &GenerateCfg {
+        &self.generate
+    }
+
     /// Record the account `server` + `email`, lower-casing the email and
     /// minting a `device_id` once (a pre-existing id is preserved so the
     /// account keeps its identity across re-registration).
@@ -307,6 +360,16 @@ impl Config {
             "sync.interval_secs" => Ok(self.sync.interval_secs.map(|v| v.to_string())),
             "ui.reduced_motion" => Ok(self.ui.reduced_motion.map(|v| v.to_string())),
             "tui.vim" => Ok(self.tui.vim.map(|v| v.to_string())),
+            "generate.mode" => Ok(self.generate.mode.clone()),
+            "generate.length" => Ok(self.generate.length.map(|v| v.to_string())),
+            "generate.lowercase" => Ok(self.generate.lowercase.map(|v| v.to_string())),
+            "generate.uppercase" => Ok(self.generate.uppercase.map(|v| v.to_string())),
+            "generate.digits" => Ok(self.generate.digits.map(|v| v.to_string())),
+            "generate.symbols" => Ok(self.generate.symbols.map(|v| v.to_string())),
+            "generate.words" => Ok(self.generate.words.map(|v| v.to_string())),
+            "generate.separator" => Ok(self.generate.separator.clone()),
+            "generate.capitalize" => Ok(self.generate.capitalize.map(|v| v.to_string())),
+            "generate.include_number" => Ok(self.generate.include_number.map(|v| v.to_string())),
             other => Err(other.to_owned()),
         }
     }
@@ -355,6 +418,47 @@ impl Config {
                 self.tui.vim = Some(parse_bool(key, raw)?);
                 Ok(())
             }
+            "generate.mode" => {
+                self.generate.mode = Some(parse_generate_mode(raw)?);
+                Ok(())
+            }
+            "generate.length" => {
+                self.generate.length = Some(parse_u64(key, raw)?);
+                Ok(())
+            }
+            "generate.lowercase" => {
+                self.generate.lowercase = Some(parse_bool(key, raw)?);
+                Ok(())
+            }
+            "generate.uppercase" => {
+                self.generate.uppercase = Some(parse_bool(key, raw)?);
+                Ok(())
+            }
+            "generate.digits" => {
+                self.generate.digits = Some(parse_bool(key, raw)?);
+                Ok(())
+            }
+            "generate.symbols" => {
+                self.generate.symbols = Some(parse_bool(key, raw)?);
+                Ok(())
+            }
+            "generate.words" => {
+                self.generate.words = Some(parse_u64(key, raw)?);
+                Ok(())
+            }
+            // Any string is a valid separator (including empty and multi-char).
+            "generate.separator" => {
+                self.generate.separator = Some(raw.to_owned());
+                Ok(())
+            }
+            "generate.capitalize" => {
+                self.generate.capitalize = Some(parse_bool(key, raw)?);
+                Ok(())
+            }
+            "generate.include_number" => {
+                self.generate.include_number = Some(parse_bool(key, raw)?);
+                Ok(())
+            }
             other => Err(unknown_key(other)),
         }
     }
@@ -400,6 +504,46 @@ impl Config {
             }
             "tui.vim" => {
                 self.tui.vim = None;
+                Ok(())
+            }
+            "generate.mode" => {
+                self.generate.mode = None;
+                Ok(())
+            }
+            "generate.length" => {
+                self.generate.length = None;
+                Ok(())
+            }
+            "generate.lowercase" => {
+                self.generate.lowercase = None;
+                Ok(())
+            }
+            "generate.uppercase" => {
+                self.generate.uppercase = None;
+                Ok(())
+            }
+            "generate.digits" => {
+                self.generate.digits = None;
+                Ok(())
+            }
+            "generate.symbols" => {
+                self.generate.symbols = None;
+                Ok(())
+            }
+            "generate.words" => {
+                self.generate.words = None;
+                Ok(())
+            }
+            "generate.separator" => {
+                self.generate.separator = None;
+                Ok(())
+            }
+            "generate.capitalize" => {
+                self.generate.capitalize = None;
+                Ok(())
+            }
+            "generate.include_number" => {
+                self.generate.include_number = None;
                 Ok(())
             }
             other => Err(unknown_key(other)),
@@ -456,6 +600,18 @@ fn parse_clipboard_backend(raw: &str) -> Result<String, String> {
         Err(format!(
             "clipboard.backend: expected one of {}, got '{raw}'",
             CLIPBOARD_BACKENDS.join("/")
+        ))
+    }
+}
+
+fn parse_generate_mode(raw: &str) -> Result<String, String> {
+    let v = raw.trim().to_ascii_lowercase();
+    if GENERATE_MODES.contains(&v.as_str()) {
+        Ok(v)
+    } else {
+        Err(format!(
+            "generate.mode: expected one of {}, got '{raw}'",
+            GENERATE_MODES.join("/")
         ))
     }
 }
@@ -581,17 +737,54 @@ mod tests {
     fn known_keys_are_all_reachable_by_get_set_unset() {
         for key in KNOWN_KEYS {
             // A value valid for the key's type ("1" works for the integer /
-            // boolean keys; the enum key needs one of its variants).
-            let val = if *key == "clipboard.backend" {
-                "auto"
-            } else {
-                "1"
+            // boolean / separator keys; the enum keys need one of their variants).
+            let val = match *key {
+                "clipboard.backend" => "auto",
+                "generate.mode" => "password",
+                _ => "1",
             };
             let mut c = Config::default();
             assert!(c.get(key).is_ok(), "get missing {key}");
             assert!(c.set(key, val).is_ok(), "set missing {key}");
             assert!(c.unset(key).is_ok(), "unset missing {key}");
         }
+    }
+
+    #[test]
+    fn generate_keys_round_trip_and_stay_tui_only() {
+        let mut c = Config::default();
+        assert_eq!(c.generate().mode, None);
+        // `mode` is validated to the known set.
+        assert!(c.set("generate.mode", "passphrase").is_ok());
+        assert!(c.set("generate.mode", "bogus").is_err());
+        assert_eq!(c.generate().mode.as_deref(), Some("passphrase"));
+        // `separator` accepts any string, including empty and multi-char.
+        c.set("generate.separator", "").expect("empty sep");
+        assert_eq!(c.generate().separator.as_deref(), Some(""));
+        c.set("generate.separator", " :: ").expect("multi sep");
+        // Numeric + boolean fields.
+        c.set("generate.words", "6").expect("words");
+        c.set("generate.length", "24").expect("length");
+        c.set("generate.capitalize", "on").expect("cap");
+        c.set("generate.include_number", "true").expect("num");
+        assert_eq!(c.generate().words, Some(6));
+        assert_eq!(c.generate().length, Some(24));
+        assert_eq!(c.generate().capitalize, Some(true));
+        assert_eq!(c.generate().include_number, Some(true));
+        // Generator prefs are client-side — never relayed as an agent flag.
+        assert!(
+            !agent_args(&c)
+                .iter()
+                .any(|a| a.to_string_lossy().contains("generate")),
+            "generate.* must not become agent flags"
+        );
+        // Survives a toml round-trip.
+        let text = toml::to_string_pretty(&c).expect("serialise");
+        let back: Config = toml::from_str(&text).expect("parse");
+        assert_eq!(back.generate(), c.generate());
+        // Unset clears.
+        c.unset("generate.mode").expect("unset");
+        assert_eq!(c.generate().mode, None);
     }
 
     #[test]

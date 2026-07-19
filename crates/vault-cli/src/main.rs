@@ -340,12 +340,21 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Generate a password locally (no agent or server interaction).
+    /// Generate a password or passphrase locally (no agent or server).
+    ///
+    /// With no flags, the `[generate]` config defaults apply (built-in defaults
+    /// when unset); flags override per-invocation.
     Generate {
-        /// Password length in characters.
-        #[arg(long, short = 'l', default_value_t = 20)]
-        length: usize,
-        /// Include symbols (`!@#$%^&*`). Off by default.
+        /// Generate a diceware passphrase instead of a character password.
+        #[arg(long)]
+        passphrase: bool,
+        /// Force character-password mode (overrides a configured passphrase default).
+        #[arg(long)]
+        password: bool,
+        /// Password length in characters (default 20).
+        #[arg(long, short = 'l')]
+        length: Option<usize>,
+        /// Include symbols (`!@#$%^&*`).
         #[arg(long, short = 's')]
         symbols: bool,
         /// Exclude lowercase letters.
@@ -357,7 +366,25 @@ enum Cmd {
         /// Exclude digits.
         #[arg(long)]
         no_digits: bool,
-        /// Emit JSON instead of the raw password.
+        /// Passphrase: number of words, 3–20 (default 3).
+        #[arg(long, short = 'w')]
+        words: Option<usize>,
+        /// Passphrase: word separator (default "-").
+        #[arg(long)]
+        separator: Option<String>,
+        /// Passphrase: capitalize the first letter of each word.
+        #[arg(long)]
+        capitalize: bool,
+        /// Passphrase: do not capitalize (overrides a configured default).
+        #[arg(long)]
+        no_capitalize: bool,
+        /// Passphrase: append a digit to one word.
+        #[arg(long)]
+        include_number: bool,
+        /// Passphrase: omit the digit (overrides a configured default).
+        #[arg(long)]
+        no_include_number: bool,
+        /// Emit JSON instead of the raw value.
         #[arg(long)]
         json: bool,
     },
@@ -870,31 +897,95 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
         Cmd::Exec { profile, command } => cmd_exec(ep, profile, command).await,
         Cmd::Purge { force, json } => cmd_purge(ep, force, json).await,
         Cmd::Generate {
+            passphrase,
+            password,
             length,
             symbols,
             no_lowercase,
             no_uppercase,
             no_digits,
+            words,
+            separator,
+            capitalize,
+            no_capitalize,
+            include_number,
+            no_include_number,
             json,
-        } => cmd_generate(length, symbols, no_lowercase, no_uppercase, no_digits, json),
+        } => cmd_generate(&GenFlags {
+            passphrase,
+            password,
+            length,
+            symbols,
+            no_lowercase,
+            no_uppercase,
+            no_digits,
+            words,
+            separator,
+            capitalize,
+            no_capitalize,
+            include_number,
+            no_include_number,
+            json,
+        }),
     }
 }
 
-#[allow(clippy::fn_params_excessive_bools)] // each flag mirrors a `vault generate` CLI switch
-fn cmd_generate(
-    length: usize,
+/// Parsed `vault generate` switches.
+///
+/// Resolved against `[generate]` config in [`cmd_generate`]; each field mirrors
+/// one CLI flag.
+#[allow(clippy::struct_excessive_bools)] // one bool per CLI switch
+struct GenFlags {
+    passphrase: bool,
+    password: bool,
+    length: Option<usize>,
     symbols: bool,
     no_lowercase: bool,
     no_uppercase: bool,
     no_digits: bool,
+    words: Option<usize>,
+    separator: Option<String>,
+    capitalize: bool,
+    no_capitalize: bool,
+    include_number: bool,
+    no_include_number: bool,
     json: bool,
-) -> Result<(), u8> {
+}
+
+fn cmd_generate(f: &GenFlags) -> Result<(), u8> {
+    // Config supplies defaults; explicit flags override. A missing/unreadable
+    // config falls back to built-in defaults rather than failing generation.
+    let cfg = config::load().unwrap_or_default();
+    let g = cfg.generate();
+
+    // Mode: explicit --password wins, then --passphrase, then the configured
+    // default, else character-password.
+    let passphrase_mode = if f.password {
+        false
+    } else if f.passphrase {
+        true
+    } else {
+        g.mode.as_deref() == Some("passphrase")
+    };
+
+    if passphrase_mode {
+        cmd_generate_passphrase(f, g)
+    } else {
+        cmd_generate_password(f, g)
+    }
+}
+
+fn cmd_generate_password(f: &GenFlags, g: &config::GenerateCfg) -> Result<(), u8> {
     let opts = vault_core::GenerateOptions {
-        length,
-        lowercase: !no_lowercase,
-        uppercase: !no_uppercase,
-        digits: !no_digits,
-        symbols,
+        length: f
+            .length
+            .or_else(|| g.length.and_then(|l| usize::try_from(l).ok()))
+            .unwrap_or(20),
+        // `--no-*` forces a class off; config (else built-in default) is the baseline.
+        lowercase: g.lowercase.unwrap_or(true) && !f.no_lowercase,
+        uppercase: g.uppercase.unwrap_or(true) && !f.no_uppercase,
+        digits: g.digits.unwrap_or(true) && !f.no_digits,
+        symbols: f.symbols || g.symbols.unwrap_or(false),
     };
     let pw = match vault_core::generate_password(&opts) {
         Ok(p) => p,
@@ -903,7 +994,7 @@ fn cmd_generate(
             return Err(2);
         }
     };
-    if json {
+    if f.json {
         let v = serde_json::json!({
             "password": pw.as_str(),
             "length": opts.length,
@@ -917,6 +1008,44 @@ fn cmd_generate(
         println!("{v}");
     } else {
         println!("{}", pw.as_str());
+    }
+    Ok(())
+}
+
+fn cmd_generate_passphrase(f: &GenFlags, g: &config::GenerateCfg) -> Result<(), u8> {
+    let opts = vault_core::PassphraseOptions {
+        words: f
+            .words
+            .or_else(|| g.words.and_then(|w| usize::try_from(w).ok()))
+            .unwrap_or(3),
+        separator: f
+            .separator
+            .clone()
+            .or_else(|| g.separator.clone())
+            .unwrap_or_else(|| "-".to_owned()),
+        // A positive flag (or config) turns it on; a `--no-*` flag forces it off.
+        capitalize: (f.capitalize || g.capitalize.unwrap_or(false)) && !f.no_capitalize,
+        include_number: (f.include_number || g.include_number.unwrap_or(false))
+            && !f.no_include_number,
+    };
+    let phrase = match vault_core::generate_passphrase(&opts) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("vault: {e}");
+            return Err(2);
+        }
+    };
+    if f.json {
+        let v = serde_json::json!({
+            "passphrase": phrase.as_str(),
+            "words": opts.words,
+            "separator": opts.separator,
+            "capitalize": opts.capitalize,
+            "include_number": opts.include_number,
+        });
+        println!("{v}");
+    } else {
+        println!("{}", phrase.as_str());
     }
     Ok(())
 }

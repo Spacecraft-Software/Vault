@@ -93,6 +93,26 @@ range may break in any release.
   partially-populated environment. See `docs/exec.md` for the grammar and
   what env-var injection does and doesn't protect against.
 
+- **Passphrase generation (`vault generate --passphrase` + TUI).** The generator
+  now produces diceware passphrases — N words drawn from the EFF large wordlist
+  (7776 words, the list Bitwarden uses) joined by a separator, with optional
+  capitalization and an appended digit — alongside the existing character
+  passwords. CLI: `--passphrase` plus `--words` (3–20), `--separator`,
+  `--[no-]capitalize`, `--[no-]include-number`; `--json` emits the passphrase
+  shape. TUI generator overlay: `Tab` switches Password⇄Passphrase, `+`/`-`
+  adjust the count (length or words), and `a` / `n` / `e` toggle capitalize /
+  number / separator. Defaults match Bitwarden (3 words, `-`, no caps, no
+  number). New `[generate]` config keys (`generate.mode` / `length` / classes /
+  `words` / `separator` / `capitalize` / `include_number`) remember your
+  preferences — the TUI overlay opens with them and `vault generate` uses them as
+  defaults (explicit flags override). Generation stays fully client-side in
+  `vault-core` (`generate_passphrase`, unbiased rejection sampling over
+  `getrandom`), so no secret touches the agent or the network. The wordlist is
+  the EFF's CC-BY-3.0 data — the project's first third-party-derived in-tree file
+  — vendored at `crates/vault-core/src/wordlist.rs` with a `REUSE.toml` carve-out,
+  `LICENSES/CC-BY-3.0.txt`, and a `CREDITS.md` entry; regenerate via
+  `crates/vault-core/tools/gen_wordlist.sh`.
+
 - **Fingerprint unlock (Linux, off by default).** With `agent.session_keyring`
   and the new `agent.fingerprint_unlock` enabled, `vault unlock --fingerprint`
   (and a TUI unlock-screen mode) re-unlock the keyring-held session after a
