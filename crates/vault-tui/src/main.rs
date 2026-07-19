@@ -43,7 +43,10 @@ use vault_ipc::proto::{
 };
 use vault_ipc::{default_socket_path, sanitize_socket_path};
 
-use app::{App, FormKind, FormSubmit, InputMode, RevealedSecret, UnlockState};
+use app::{
+    App, FormKind, FormSubmit, GEN_MAX_LEN, GEN_MAX_WORDS, GEN_MIN_LEN, GEN_MIN_WORDS,
+    GeneratorMode, InputMode, RevealedSecret, UnlockState,
+};
 
 pub(crate) const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -199,13 +202,52 @@ async fn load_app(socket: &Path) -> App {
         Ok(Response::Error(err)) => App::message("Error", err.to_string(), None),
         Ok(other) => App::message("Error", format!("unexpected response: {other:?}"), None),
     };
-    // Apply TUI config preferences: `tui.vim` (vim motions) and the reserved
-    // `ui.reduced_motion` flag. One load, both flags.
+    // Apply TUI config preferences: `tui.vim` (vim motions), the reserved
+    // `ui.reduced_motion` flag, and the `[generate]` generator defaults. One load.
     if let Ok(cfg) = vault_config::load() {
         app.vim = cfg.tui_vim().unwrap_or(false);
         app.reduced_motion = cfg.reduced_motion().unwrap_or(false);
+        apply_generate_cfg(&mut app, cfg.generate());
     }
     app
+}
+
+/// Seed the generator's starting mode and options from the `[generate]` config.
+///
+/// Counts are clamped to the overlay's valid ranges; unset fields keep the
+/// built-in defaults. CLI flags on `vault generate` resolve this separately —
+/// here it's only the TUI overlay's starting state.
+fn apply_generate_cfg(app: &mut App, g: &vault_config::GenerateCfg) {
+    if g.mode.as_deref() == Some("passphrase") {
+        app.gen_mode = GeneratorMode::Passphrase;
+    }
+    if let Some(len) = g.length.and_then(|l| usize::try_from(l).ok()) {
+        app.gen_pw.length = len.clamp(GEN_MIN_LEN, GEN_MAX_LEN);
+    }
+    if let Some(b) = g.lowercase {
+        app.gen_pw.lowercase = b;
+    }
+    if let Some(b) = g.uppercase {
+        app.gen_pw.uppercase = b;
+    }
+    if let Some(b) = g.digits {
+        app.gen_pw.digits = b;
+    }
+    if let Some(b) = g.symbols {
+        app.gen_pw.symbols = b;
+    }
+    if let Some(words) = g.words.and_then(|w| usize::try_from(w).ok()) {
+        app.gen_pp.words = words.clamp(GEN_MIN_WORDS, GEN_MAX_WORDS);
+    }
+    if let Some(sep) = g.separator.clone() {
+        app.gen_pp.separator = sep;
+    }
+    if let Some(b) = g.capitalize {
+        app.gen_pp.capitalize = b;
+    }
+    if let Some(b) = g.include_number {
+        app.gen_pp.include_number = b;
+    }
 }
 
 /// Build the locked screen: an interactive unlock prompt when an account is
@@ -637,14 +679,20 @@ async fn handle_command_key(state: &mut App, key: KeyEvent, socket: &Path) {
     }
 }
 
-/// Generator-overlay keys.
+/// Generator-overlay keys. `+`/`-` adjust the primary count (password length or
+/// passphrase word count); `Tab` switches mode. The class/word toggles act only
+/// in their own mode (`s` password-only; `a`/`n`/`e` passphrase-only).
 async fn handle_generate_key(state: &mut App, key: KeyEvent, socket: &Path) {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => state.close_generator(),
+        KeyCode::Tab => state.gen_toggle_mode(),
         KeyCode::Char('g' | 'r') => state.regenerate(),
-        KeyCode::Char('+' | '=') => state.gen_adjust_length(1),
-        KeyCode::Char('-') => state.gen_adjust_length(-1),
+        KeyCode::Char('+' | '=') => state.gen_adjust_count(1),
+        KeyCode::Char('-') => state.gen_adjust_count(-1),
         KeyCode::Char('s') => state.gen_toggle_symbols(),
+        KeyCode::Char('a') => state.gen_toggle_capitalize(),
+        KeyCode::Char('n') => state.gen_toggle_include_number(),
+        KeyCode::Char('e') => state.gen_cycle_separator(),
         KeyCode::Char('c') => copy_generated(state, socket).await,
         _ => {}
     }
@@ -685,14 +733,14 @@ async fn execute_command(state: &mut App, socket: &Path, cmd: &str) {
     }
 }
 
-/// Ask the agent to put the overlay's generated password on the clipboard via
+/// Ask the agent to put the overlay's generated value on the clipboard via
 /// `CopyText`, with the same timed auto-clear as item copies. The value rides
 /// the local UDS once, exactly like `Unlock`'s password does.
 async fn copy_generated(state: &mut App, socket: &Path) {
     let Some(text) = state
         .generator
         .as_ref()
-        .map(|g| g.password().as_bytes().to_vec())
+        .map(|g| g.value().as_bytes().to_vec())
     else {
         return;
     };
@@ -702,15 +750,15 @@ async fn copy_generated(state: &mut App, socket: &Path) {
     };
     match client::request(socket, &req).await {
         Ok(Response::Copied(c)) => {
-            state.set_toast(copied_toast("generated password", c.clear_after_secs));
+            state.set_toast(copied_toast("generated value", c.clear_after_secs));
         }
-        // No agent clipboard — the password is already local, so hand it
+        // No agent clipboard — the value is already local, so hand it
         // straight to the terminal.
         Ok(Response::Error(IpcError::ClipboardUnavailable)) => {
-            let Some(pw) = state.generator.as_ref().map(|g| g.password().to_owned()) else {
+            let Some(v) = state.generator.as_ref().map(|g| g.value().to_owned()) else {
                 return;
             };
-            osc52_copy(state, &pw, "generated password");
+            osc52_copy(state, &v, "generated value");
         }
         Ok(Response::Error(e)) => state.set_toast(format!("copy failed: {e}")),
         Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),

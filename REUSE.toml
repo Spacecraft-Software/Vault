@@ -1,14 +1,23 @@
 version = 1
 
-# All of Vault's committed files are GPL-3.0-or-later (software-class, Standard
+# All of Vault's own files are GPL-3.0-or-later (software-class, Standard
 # §4.1.1). `override` precedence so example SPDX tags embedded in docs/prose
 # (e.g. CLAUDE.md / PRD.md describing the header convention) aren't parsed as
 # real license info, and supplies the copyright in bulk so no per-file
-# `SPDX-FileCopyrightText` is needed. Vault vendors no third-party-derived files
-# in-tree (the rbw/ + cruxpass/ references are gitignored), so this one
-# annotation covers the whole repository.
+# `SPDX-FileCopyrightText` is needed.
 [[annotations]]
 path = "**"
 precedence = "override"
 SPDX-FileCopyrightText = "2026 Mohamed Hammad <Mohamed.Hammad@SpacecraftSoftware.org>"
 SPDX-License-Identifier = "GPL-3.0-or-later"
+
+# The one third-party-derived file: the EFF large diceware wordlist embedded for
+# `generate_passphrase`. Verbatim EFF word data under CC-BY-3.0 (Standard §4.2 —
+# preserve the upstream license; credited in CREDITS.md). This more-specific
+# annotation overrides the `**` GPL default for this path. Regenerate the file
+# with `crates/vault-core/tools/gen_wordlist.sh`.
+[[annotations]]
+path = "crates/vault-core/src/wordlist.rs"
+precedence = "override"
+SPDX-FileCopyrightText = "Electronic Frontier Foundation"
+SPDX-License-Identifier = "CC-BY-3.0"
