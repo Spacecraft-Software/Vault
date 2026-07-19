@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+mod env_exec;
 mod spawn;
 
 use vault_config as config;
@@ -316,6 +317,20 @@ enum Cmd {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Run a command with env vars injected from a `[exec.profiles.*]`
+    /// mapping (see `vault config exec` and `docs/exec.md`) — e.g.
+    /// `vault exec -- claude` or `vault exec --profile llm-agents -- opencode`.
+    /// Every configured var is resolved before the child spawns; a missing or
+    /// ambiguous item aborts first, so the child never sees a
+    /// partially-populated environment.
+    Exec {
+        /// Named profile from `[exec.profiles.<name>]`. Defaults to `default`.
+        #[arg(long)]
+        profile: Option<String>,
+        /// Command (and its arguments) to run.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
     /// Wipe the local item cache from disk (and lock a running agent).
     Purge {
         /// Skip the confirmation prompt. Required when stdin is not a TTY.
@@ -373,6 +388,49 @@ enum ConfigAction {
         /// Dotted key, e.g. `clipboard.clear_secs`.
         key: String,
         /// Emit JSON instead of staying silent on success.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage `vault exec` env-var-to-item mappings (`[exec.profiles.*]`).
+    Exec {
+        #[command(subcommand)]
+        action: ExecConfigAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ExecConfigAction {
+    /// Map an env var to a vault item within a profile (profile created if new).
+    Set {
+        /// Profile name.
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Env var name, e.g. `ANTHROPIC_API_KEY`.
+        var: String,
+        /// Item spec: `<item name>` or `<item name>#<field>` (field is
+        /// `password`/`username`/`notes`/`totp`/`custom:<name>`; defaults to
+        /// `password`).
+        item_spec: String,
+        /// Emit JSON instead of staying silent on success.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove an env var mapping from a profile (drops the profile once empty).
+    Unset {
+        /// Profile name.
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Env var name to remove.
+        var: String,
+        /// Emit JSON instead of staying silent on success.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List every mapping in a profile, or every profile when none is given.
+    List {
+        /// Profile to list; omit to list every profile.
+        profile: Option<String>,
+        /// Emit JSON instead of a human-readable listing.
         #[arg(long)]
         json: bool,
     },
@@ -809,6 +867,7 @@ async fn run(cmd: Cmd, ep: Endpoint<'_>) -> Result<(), u8> {
         } => cmd_remove(ep, selector, force, json).await,
         Cmd::StopAgent { json } => cmd_ack(ep.no_spawn(), Request::Quit, "stopped", json).await,
         Cmd::Config { action } => cmd_config(action),
+        Cmd::Exec { profile, command } => cmd_exec(ep, profile, command).await,
         Cmd::Purge { force, json } => cmd_purge(ep, force, json).await,
         Cmd::Generate {
             length,
@@ -1524,7 +1583,86 @@ fn cmd_config(action: ConfigAction) -> Result<(), u8> {
             }
             Ok(())
         }
+        ConfigAction::Exec { action } => cmd_config_exec(action),
     }
+}
+
+/// `vault config exec set/unset/list`. Same local-file-only shape as
+/// `cmd_config`, just against the `[exec.profiles.*]` table instead of the
+/// scalar `KNOWN_KEYS` registry.
+fn cmd_config_exec(action: ExecConfigAction) -> Result<(), u8> {
+    match action {
+        ExecConfigAction::Set {
+            profile,
+            var,
+            item_spec,
+            json,
+        } => {
+            // Validate the spec parses before persisting a mapping `vault
+            // exec` could never resolve.
+            if let Err(msg) = env_exec::parse_item_spec(&item_spec) {
+                eprintln!("vault: {msg}");
+                return Err(2);
+            }
+            let mut cfg = load_config()?;
+            cfg.exec_set(&profile, &var, &item_spec);
+            save_config(&cfg)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "profile": profile, "set": var, "item_spec": item_spec })
+                );
+            }
+            Ok(())
+        }
+        ExecConfigAction::Unset { profile, var, json } => {
+            let mut cfg = load_config()?;
+            if let Err(msg) = cfg.exec_unset(&profile, &var) {
+                eprintln!("vault: {msg}");
+                return Err(2);
+            }
+            save_config(&cfg)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "profile": profile, "unset": var })
+                );
+            }
+            Ok(())
+        }
+        ExecConfigAction::List { profile, json } => cmd_config_exec_list(profile.as_deref(), json),
+    }
+}
+
+fn cmd_config_exec_list(profile: Option<&str>, json: bool) -> Result<(), u8> {
+    let cfg = load_config()?;
+    let profiles: Vec<(&String, &std::collections::BTreeMap<String, String>)> = match profile {
+        Some(name) => cfg.exec.profiles.get_key_value(name).into_iter().collect(),
+        None => cfg.exec.profiles.iter().collect(),
+    };
+    if json {
+        let map: serde_json::Map<String, serde_json::Value> = profiles
+            .iter()
+            .map(|(name, vars)| {
+                let inner: serde_json::Map<String, serde_json::Value> = vars
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                    .collect();
+                ((*name).clone(), serde_json::Value::Object(inner))
+            })
+            .collect();
+        println!("{}", serde_json::Value::Object(map));
+    } else if profiles.is_empty() {
+        println!("(no exec profiles configured)");
+    } else {
+        for (name, vars) in profiles {
+            println!("[{name}]");
+            for (var, spec) in vars {
+                println!("  {var} = {spec}");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn cmd_config_get(key: Option<&str>, json: bool) -> Result<(), u8> {
@@ -1920,6 +2058,82 @@ async fn cmd_get(ep: Endpoint<'_>, name: String, field: Field, json: bool) -> Re
     }
 }
 
+/// `vault exec` — resolve every `[exec.profiles.<profile>]` mapping to a
+/// plaintext value, then launch `command` with those values injected as env
+/// vars. Every var is resolved *before* the child spawns (fail closed): a
+/// missing item, missing field, or ambiguous name aborts without ever
+/// starting the child, so it never sees a partially-populated environment.
+///
+/// The resolved values live only in this process's memory long enough to
+/// spawn the child (which inherits them into its own environment — see
+/// `docs/exec.md` for what that does and doesn't protect against); they're
+/// zeroized here immediately after.
+async fn cmd_exec(
+    ep: Endpoint<'_>,
+    profile: Option<String>,
+    command: Vec<String>,
+) -> Result<(), u8> {
+    let Some((program, args)) = command.split_first() else {
+        eprintln!("vault: exec requires a command, e.g. `vault exec -- claude`");
+        return Err(2);
+    };
+    let profile_name = profile.as_deref().unwrap_or("default");
+    let cfg = load_config()?;
+    let Some(vars) = cfg.exec_profile(profile_name) else {
+        eprintln!(
+            "vault: no exec profile named '{profile_name}' — configure one with \
+             `vault config exec set --profile {profile_name} <VAR> <ITEM>`"
+        );
+        return Err(2);
+    };
+    if vars.is_empty() {
+        eprintln!("vault: exec profile '{profile_name}' has no mappings");
+        return Err(2);
+    }
+
+    let mut stream = connect(ep).await?;
+    let mut resolved: Vec<(String, String)> = Vec::with_capacity(vars.len());
+    for (env_var, spec) in vars {
+        let field_spec = env_exec::parse_item_spec(spec).map_err(|msg| {
+            eprintln!("vault: exec profile '{profile_name}': {env_var}: {msg}");
+            2u8
+        })?;
+        let req = Request::Get {
+            id: None,
+            name: field_spec.name,
+            field: Some(field_spec.field),
+        };
+        match exchange(&mut stream, &req).await? {
+            Response::Item(item) => resolved.push((env_var.clone(), item.value.clone())),
+            Response::Error(e) => {
+                eprintln!("vault: exec: resolving {env_var}: {e}");
+                return Err(error_exit_code(&e));
+            }
+            other => return unexpected(&other),
+        }
+    }
+
+    let status = std::process::Command::new(program)
+        .args(args)
+        .envs(resolved.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .status();
+    for (_, v) in &mut resolved {
+        v.zeroize();
+    }
+
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(status
+            .code()
+            .and_then(|c| u8::try_from(c).ok())
+            .unwrap_or(1)),
+        Err(e) => {
+            eprintln!("vault: failed to run '{program}': {e}");
+            Err(127)
+        }
+    }
+}
+
 async fn connect(ep: Endpoint<'_>) -> Result<UnixStream, u8> {
     match UnixStream::connect(ep.socket).await {
         Ok(s) => Ok(s),
@@ -1961,8 +2175,12 @@ async fn exchange(stream: &mut UnixStream, req: &Request) -> Result<Response, u8
     }
 }
 
-fn report_error(e: &IpcError) -> Result<(), u8> {
-    let code = match e {
+/// The exit code a given agent error maps to. Factored out of
+/// [`report_error`] so callers that need to add their own context line (e.g.
+/// `cmd_exec`, which names the env var that failed to resolve) can still
+/// reuse the same mapping instead of duplicating it.
+const fn error_exit_code(e: &IpcError) -> u8 {
+    match e {
         IpcError::Locked => 4,
         IpcError::BadPassword => 5,
         IpcError::TwoFactorRequired => 6,
@@ -1979,9 +2197,12 @@ fn report_error(e: &IpcError) -> Result<(), u8> {
         | IpcError::Internal(_)
         | IpcError::Decrypt(_)
         | IpcError::ClipboardUnavailable => 9,
-    };
+    }
+}
+
+fn report_error(e: &IpcError) -> Result<(), u8> {
     eprintln!("vault: {e}");
-    Err(code)
+    Err(error_exit_code(e))
 }
 
 fn unexpected(other: &Response) -> Result<(), u8> {

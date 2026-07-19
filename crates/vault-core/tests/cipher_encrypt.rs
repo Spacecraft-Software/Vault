@@ -22,6 +22,7 @@ fn from_plain_then_decrypt_round_trips_login() {
         primary_uri: Some("https://github.com".into()),
         card: None,
         identity: None,
+        fields: None,
     };
 
     let cipher = Cipher::from_plain(&plain, &enc, &mac);
@@ -57,6 +58,7 @@ fn from_plain_secure_note_has_no_login_object() {
         primary_uri: None,
         card: None,
         identity: None,
+        fields: None,
     };
 
     let cipher = Cipher::from_plain(&plain, &enc, &mac);
@@ -82,6 +84,7 @@ fn from_plain_omits_absent_login_fields() {
         primary_uri: None,
         card: None,
         identity: None,
+        fields: None,
     };
 
     let cipher = Cipher::from_plain(&plain, &enc, &mac);
@@ -117,6 +120,7 @@ fn from_plain_then_decrypt_round_trips_card() {
             code: Some("123".into()),
         }),
         identity: None,
+        fields: None,
     };
 
     let cipher = Cipher::from_plain(&plain, &enc, &mac);
@@ -184,6 +188,7 @@ fn from_plain_then_decrypt_round_trips_identity() {
             postal_code: None,
             country: None,
         }),
+        fields: None,
     };
 
     let cipher = Cipher::from_plain(&plain, &enc, &mac);

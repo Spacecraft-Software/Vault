@@ -17,8 +17,8 @@ The full product requirements live in [`PRD.md`](./PRD.md).
 
 Pre-alpha, M5. The read and write paths are wired end-to-end against a live
 agent: `status` / `unlock` / `lock` / `sync` / `list` / `get` / `add` /
-`edit` / `remove` / `generate` / `stop-agent` on the CLI (with `--json`
-everywhere), and a three-pane `vault-tui` with search, reveal/copy
+`edit` / `remove` / `generate` / `exec` / `stop-agent` on the CLI (with
+`--json` everywhere), and a three-pane `vault-tui` with search, reveal/copy
 (agent-side clipboard, 30 s auto-clear), a generator overlay, a `:` command
 line, add/edit/delete, and an About overlay (`?` / `:about`). The CLI
 auto-starts the agent when needed, and
@@ -207,6 +207,32 @@ vault apikey forget      # delete the stored key; logins revert to the password 
 The key is protected at rest by filesystem permissions (`0600`) only: it must
 be usable *before* the vault is unlocked, so it can't be encrypted under your
 key — the same trust level as the stored refresh token or an SSH private key.
+
+### Inject secrets into other tools (`vault exec`)
+
+Rather than `export`ing API keys into your shell for the session, resolve them
+from Vault at launch and inject them only into one child process:
+
+```sh
+vault config exec set ANTHROPIC_API_KEY "Anthropic API Key (Claude Code)"
+vault exec -- claude
+```
+
+Mappings live in named profiles (`--profile`, default `default`), so different
+tools can pull the same env var from different items:
+
+```sh
+vault config exec set --profile claude     ANTHROPIC_API_KEY "Anthropic API Key (Claude Code)"
+vault config exec set --profile openclaude ANTHROPIC_API_KEY "Anthropic API Key (OpenClaude)"
+vault exec --profile claude     -- claude
+vault exec --profile openclaude -- openclaude
+```
+
+Every mapped var is resolved (and validated) before the child spawns — a
+missing item, missing field, or ambiguous name aborts first, so the child
+never sees a partially-populated environment. See [`docs/exec.md`](./docs/exec.md)
+for the full item-spec grammar (`custom:<name>` fields, etc.) and what
+env-var injection does and doesn't protect against.
 
 ### Stay unlocked across restarts (Linux, opt-in)
 

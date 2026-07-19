@@ -649,6 +649,7 @@ impl AgentState {
             primary_uri: w.uri,
             card,
             identity,
+            fields: None,
         };
         let mut cipher = Cipher::from_plain(&plain, &v.user_enc, &v.user_mac);
         v.ensure_online().await?;
@@ -865,6 +866,10 @@ impl AgentState {
                 primary_uri: true,
                 ..DecryptOptions::default()
             },
+            Field::Custom(_) => DecryptOptions {
+                custom_fields: true,
+                ..DecryptOptions::default()
+            },
             Field::CardCardholder
             | Field::CardNumber
             | Field::CardBrand
@@ -915,6 +920,19 @@ impl AgentState {
             },
             Field::Notes => plain.notes.clone(),
             Field::Uri => plain.primary_uri.clone(),
+            Field::Custom(ref want) => {
+                let want_lower = want.to_lowercase();
+                plain.fields.as_ref().and_then(|fields| {
+                    fields
+                        .iter()
+                        .find(|f| {
+                            f.name
+                                .as_deref()
+                                .is_some_and(|n| n.to_lowercase() == want_lower)
+                        })
+                        .and_then(|f| f.value.clone())
+                })
+            }
             Field::CardCardholder => plain.card.as_ref().and_then(|c| c.cardholder_name.clone()),
             Field::CardNumber => plain.card.as_ref().and_then(|c| c.number.clone()),
             Field::CardBrand => plain.card.as_ref().and_then(|c| c.brand.clone()),

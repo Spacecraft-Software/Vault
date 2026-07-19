@@ -393,7 +393,7 @@ pub const fn primary_copy_field(cipher_type: u8) -> Option<(Field, &'static str)
 
 /// One navigable field in the detail pane: its label, the agent selector to
 /// reveal/copy it, and whether it renders masked until revealed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DetailField {
     /// Label shown in the detail pane.
     pub label: &'static str,
@@ -1500,7 +1500,7 @@ impl App {
     #[must_use]
     pub fn selected_detail_field(&self) -> Option<DetailField> {
         let e = self.selected_entry()?;
-        detail_fields(e.cipher_type).get(self.detail_field).copied()
+        detail_fields(e.cipher_type).get(self.detail_field).cloned()
     }
 
     /// The `(id, name, field)` that `Space` should reveal given the current
@@ -1535,10 +1535,10 @@ impl App {
 
     /// Whether `field` of the item with `entry_id` is currently revealed.
     #[must_use]
-    pub fn is_revealed(&self, entry_id: &str, field: Field) -> bool {
+    pub fn is_revealed(&self, entry_id: &str, field: &Field) -> bool {
         self.revealed
             .as_ref()
-            .is_some_and(|r| r.entry_id == entry_id && r.field == field)
+            .is_some_and(|r| r.entry_id == entry_id && &r.field == field)
     }
 
     /// Reveal a freshly-fetched secret in the detail pane.
@@ -2285,7 +2285,9 @@ mod tests {
             assert!(f.masked, "{label} must be masked");
         }
         assert_eq!(
-            id.iter().find(|f| f.label == "SSN").map(|f| f.field),
+            id.iter()
+                .find(|f| f.label == "SSN")
+                .map(|f| f.field.clone()),
             Some(Field::IdentitySsn)
         );
     }
@@ -2336,18 +2338,18 @@ mod tests {
     #[test]
     fn reveal_is_tracked_per_item_and_field() {
         let mut app = App::browsing(status(), vec![entry("a", None)]);
-        assert!(!app.is_revealed("id-a", Field::Password));
+        assert!(!app.is_revealed("id-a", &Field::Password));
         app.reveal(RevealedSecret::new(
             "id-a".to_owned(),
             Field::Password,
             "hunter2".to_owned(),
         ));
-        assert!(app.is_revealed("id-a", Field::Password));
+        assert!(app.is_revealed("id-a", &Field::Password));
         // A different item or field is not considered revealed.
-        assert!(!app.is_revealed("id-b", Field::Password));
-        assert!(!app.is_revealed("id-a", Field::Username));
+        assert!(!app.is_revealed("id-b", &Field::Password));
+        assert!(!app.is_revealed("id-a", &Field::Username));
         app.hide_revealed();
-        assert!(!app.is_revealed("id-a", Field::Password));
+        assert!(!app.is_revealed("id-a", &Field::Password));
     }
 
     #[test]

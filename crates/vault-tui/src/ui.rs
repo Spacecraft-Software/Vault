@@ -259,7 +259,7 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
             ];
             // A masked field shown in amber when revealed, steel when hidden.
             let masked = |lines: &mut Vec<Line>, label: &str, field: Field| {
-                if app.is_revealed(&e.id, field) {
+                if app.is_revealed(&e.id, &field) {
                     let value = app.revealed.as_ref().map_or(MASK, |r| r.value());
                     lines.push(field_line(label, value, amber));
                 } else {
@@ -281,7 +281,7 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
                 // (`app.detail_field`) selects one for reveal/copy.
                 3 | 4 => {
                     for (i, fd) in detail_fields(e.cipher_type).iter().enumerate() {
-                        let revealed = fd.masked && app.is_revealed(&e.id, fd.field);
+                        let revealed = fd.masked && app.is_revealed(&e.id, &fd.field);
                         let value = if fd.masked {
                             if revealed {
                                 app.revealed.as_ref().map_or(MASK, |r| r.value()).to_owned()

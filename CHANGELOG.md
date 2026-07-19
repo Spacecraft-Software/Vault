@@ -76,6 +76,23 @@ range may break in any release.
 
 ### Added
 
+- **`vault exec` — inject secrets as env vars at launch.** `vault exec --
+  claude` (or `--profile <name> -- <cmd>`) resolves every var in a new
+  `[exec.profiles.<name>]` mapping against the agent and injects the
+  plaintext only into the launched child's environment — never the invoking
+  shell, never disk — instead of `export`ing API keys into a shell session for
+  its lifetime. Mappings are edited via `vault config exec set/unset/list`
+  (no manual TOML). Each mapping is an item spec: `<item name>` (password
+  field, the default) or `<item name>#<field>` where `<field>` is
+  `username`/`notes`/`totp`/`custom:<name>` — the last resolves a named
+  custom field, which required a new `Field::Custom(String)` wire variant
+  (`vault-ipc`) and custom-field decryption support in `vault-core`
+  (`PlainCipher::fields`, `DecryptOptions::custom_fields`) and `vault-agent`.
+  Every var is resolved *before* the child spawns — a missing item, missing
+  field, or ambiguous name aborts first, so the child never sees a
+  partially-populated environment. See `docs/exec.md` for the grammar and
+  what env-var injection does and doesn't protect against.
+
 - **Fingerprint unlock (Linux, off by default).** With `agent.session_keyring`
   and the new `agent.fingerprint_unlock` enabled, `vault unlock --fingerprint`
   (and a TUI unlock-screen mode) re-unlock the keyring-held session after a

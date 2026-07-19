@@ -187,6 +187,25 @@ pub struct CustomField {
     pub field_type: u8,
 }
 
+/// One decrypted `Fields[]` entry.
+#[derive(Clone, Debug, Default)]
+pub struct PlainCustomField {
+    /// Field name (as the user labeled it).
+    pub name: Option<String>,
+    /// Field value (sensitive when `field_type == 1`, hidden — zeroized on drop
+    /// regardless, since a text-type field can still hold a secret in
+    /// practice).
+    pub value: Option<String>,
+}
+
+impl Drop for PlainCustomField {
+    fn drop(&mut self) {
+        if let Some(s) = self.value.as_mut() {
+            s.zeroize();
+        }
+    }
+}
+
 /// Decrypted card fields (cipher type 3).
 #[derive(Clone, Debug, Default)]
 pub struct PlainCard {
@@ -296,6 +315,9 @@ pub struct PlainCipher {
     pub card: Option<PlainCard>,
     /// Decrypted identity fields (identity items only, when asked for).
     pub identity: Option<PlainIdentity>,
+    /// Decrypted custom fields, when asked for. `PlainCustomField` zeroizes
+    /// its own value on drop, so no extra scrubbing is needed here.
+    pub fields: Option<Vec<PlainCustomField>>,
 }
 
 impl Drop for PlainCipher {
@@ -330,6 +352,10 @@ pub struct DecryptOptions {
     pub card: bool,
     /// Decrypt the `identity` sub-object (all its fields). Default `false`.
     pub identity: bool,
+    /// Decrypt every custom `Fields[]` entry (name + value). Default `false`.
+    /// There is no way to decrypt a single custom field by name without first
+    /// decrypting every field's name to search it, so this is all-or-nothing.
+    pub custom_fields: bool,
 }
 
 impl DecryptOptions {
@@ -344,6 +370,7 @@ impl DecryptOptions {
             primary_uri: true,
             card: true,
             identity: true,
+            custom_fields: true,
         }
     }
     /// Decrypt only `username` — useful for list views.
@@ -357,6 +384,7 @@ impl DecryptOptions {
             primary_uri: false,
             card: false,
             identity: false,
+            custom_fields: false,
         }
     }
 }
@@ -451,6 +479,7 @@ impl Cipher {
             primary_uri: None,
             card: None,
             identity: None,
+            fields: None,
         };
 
         if opts.card
@@ -491,6 +520,23 @@ impl Cipher {
                 postal_code: d(id.postal_code.as_deref())?,
                 country: d(id.country.as_deref())?,
             });
+        }
+
+        if opts.custom_fields
+            && let Some(fields) = self.fields.as_ref()
+        {
+            let d = |s: Option<&str>| decrypt_optional(s, enc_key, mac_key);
+            out.fields = Some(
+                fields
+                    .iter()
+                    .map(|f| {
+                        Ok(PlainCustomField {
+                            name: d(f.name.as_deref())?,
+                            value: d(f.value.as_deref())?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            );
         }
 
         if let Some(login) = self.login.as_ref() {
