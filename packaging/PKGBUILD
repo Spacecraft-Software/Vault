@@ -1,0 +1,53 @@
+# Maintainer: Mohamed Hammad <Mohamed.Hammad@SpacecraftSoftware.org>
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Arch Linux PKGBUILD for vault (Steelbore Standard §5.5).
+# v0.1.0 is unreleased, so this builds from a pinned commit.
+
+pkgname=vault
+# PKGBUILD forbids hyphens in pkgver; a -dev suffix would be spelled .dev.
+# Left as the plain release number so vercmp still orders it below the real
+# 0.1.0 tag when that lands.
+pkgver=0.0.1
+pkgrel=1
+pkgdesc="Terminal-native Bitwarden client — CLI, TUI, and key-custody agent"
+arch=('x86_64' 'aarch64')
+url="https://Vault.SpacecraftSoftware.org/"
+license=('GPL-3.0-or-later')
+makedepends=('cargo' 'git')
+source=("$pkgname::git+https://github.com/Spacecraft-Software/Vault#commit=8a30f324364b2e2b2578eb1753bae2bb50668df7")
+# At release, switch to the tagged tarball and pin its real checksum:
+#   source=("$pkgname-0.1.0.tar.gz::https://github.com/Spacecraft-Software/Vault/archive/refs/tags/v0.1.0.tar.gz")
+#   sha256sums=('<real sha256 of the tagged tarball>')
+# 'SKIP' is legal only for the VCS source below.
+sha256sums=('SKIP')
+
+# Disable makepkg's LTO. Arch's /etc/makepkg.conf exports CFLAGS containing
+# `-flto=auto`; cc-rs (via ring's build.rs) inherits it and emits fat-LTO ELF
+# objects that ld.lld cannot pull symbols out of (no GCC LTO plugin), so
+# linking any binary that uses `ring` fails with hundreds of
+# `undefined symbol: ring_core_0_17_14__*` errors. `options=('!lto')` turns off
+# makepkg's LTO stage; the explicit CFLAGS scrub in build() is still needed
+# because CFLAGS is exported into the environment before `options` takes effect.
+# (This is the permanent home for what the gitignored .cargo/config.toml does
+# locally — see AGENTS.md "Arch Linux build gotcha".)
+options=('!lto')
+
+build() {
+  cd "$pkgname"
+  export CFLAGS="${CFLAGS//-flto=auto/}"
+  export CXXFLAGS="${CXXFLAGS//-flto=auto/}"
+  # Virtual workspace: a bare release build compiles every member on default
+  # features — exactly vault, vault-agent and vault-tui (clipboard on).
+  cargo build --release --locked
+}
+
+package() {
+  cd "$pkgname"
+  install -Dm755 "target/release/vault"       "$pkgdir/usr/bin/vault"
+  install -Dm755 "target/release/vault-agent" "$pkgdir/usr/bin/vault-agent"
+  install -Dm755 "target/release/vault-tui"   "$pkgdir/usr/bin/vault-tui"
+  install -Dm644 LICENSE   "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 NOTICE.md "$pkgdir/usr/share/doc/$pkgname/NOTICE.md"
+}

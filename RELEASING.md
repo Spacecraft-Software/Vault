@@ -24,12 +24,27 @@ do the mechanical cut below.
       both bitwarden.com and a Vaultwarden container (`docs/m2-vaultwarden.md`).
 - [ ] **Daily-driver** (PRD §11.2) — two consecutive weeks of maintainer use with
       no blocker.
+- [ ] **§5.5 packaging** — `packaging/{default.nix,guix.scm,PKGBUILD}` all
+      present and updated to reference the `v0.1.0` tag and its real source
+      hashes (the mechanical swaps are in §2 below). Standard §5.5 requires all
+      three before the tag is pushed; `nix build -L .` must stay green.
 
 ## 2. Cut the release (mechanical)
 
 - [ ] Bump the version once: `[workspace.package] version` in the root
       `Cargo.toml` (`0.0.1` → `0.1.0`); all crates inherit it. Commit the updated
       `Cargo.lock`.
+- [ ] Update the packaging manifests to the tag (Standard §5.5):
+      - `flake.nix`: drop the `version = "0.0.1-dev"` override so the build
+        collapses to the `packaging/default.nix` default (`0.1.0`).
+      - `packaging/default.nix`: replace `hash = lib.fakeHash` with the real
+        `sha256-…` reported by a `fetchFromGitHub` build of the `v0.1.0` tarball.
+      - `packaging/PKGBUILD`: swap the `git+…#commit=` source and
+        `sha256sums=('SKIP')` for the `v0.1.0` tarball URL and its real hex
+        `sha256sums`; bump `pkgver` to `0.1.0`.
+      - `packaging/guix.scm`: swap the `git-fetch` origin for the commented
+        `url-fetch` release stanza and its real `(base32 …)` hash; bump
+        `(version …)` to `0.1.0`.
 - [ ] `CHANGELOG.md`: rename `## [Unreleased]` → `## [0.1.0] - <YYYY-MM-DD>`
       (ISO 8601 UTC, Standard §12) and open a fresh empty `[Unreleased]`.
 - [ ] Run the CI-exact gates locally and confirm green:

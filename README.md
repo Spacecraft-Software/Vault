@@ -63,6 +63,24 @@ the in-memory user key can't leak to a core file or a debugger) and **`mlock`s
 the user-key pages** so they're never swapped to disk — on top of the `0600`
 socket and zeroized key buffers.
 
+### Nix
+
+A first-party flake builds and installs all three binaries (Standard §5.5;
+`packaging/default.nix` is the derivation):
+
+```sh
+nix build            # result/bin/{vault,vault-agent,vault-tui}
+nix run . -- --help  # run vault without installing
+nix profile install .
+nix develop          # dev shell (see the caveat below)
+```
+
+All three binaries land in **one** package output, which the CLI's auto-spawn
+relies on — it resolves `vault-agent` from a sibling of its own path. The
+`nix develop` shell uses **nixpkgs' rustc, not the pinned 1.95.0** that CI
+enforces, so its `cargo fmt` / `clippy` are convenient but not CI-exact; run the
+gates through rustup (which honours `rust-toolchain.toml`) before pushing.
+
 ## Getting started
 
 ```sh
