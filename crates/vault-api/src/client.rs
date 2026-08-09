@@ -553,22 +553,40 @@ async fn expect_success(resp: reqwest::Response) -> Result<()> {
     }
 }
 
-/// Bitwarden create/update cipher request body. Note the wire shape: the
-/// top level is **`camelCase`** (`type`, `folderId`, `name`, `notes`, `login`,
-/// `secureNote`) while the nested `login` object reuses `vault_core`'s
-/// `PascalCase` [`Login`](vault_core::cipher::Login) — the asymmetry the
-/// Bitwarden API actually expects.
+/// Bitwarden create/update cipher request body. The top level is **`camelCase`**
+/// (`type`, `organizationId`, `folderId`, `key`, `name`, `notes`, `login`,
+/// `card`, `identity`, `fields`, `secureNote`); the nested `login`/`card`/
+/// `identity`/`fields` objects reuse `vault_core`'s own cipher structs, whose
+/// field renames already match the shape the Bitwarden API expects.
+///
+/// `organizationId` and `key` round-trip the values an org item was synced with:
+/// omitting them on a `PUT` would strip the item's organization membership and
+/// its per-cipher key, so an org edit must echo both back. They serialize only
+/// when present, so a personal item's body is unchanged (both `None`).
 #[derive(serde::Serialize, Debug)]
 struct CipherRequest<'a> {
     #[serde(rename = "type")]
     cipher_type: u8,
+    #[serde(rename = "organizationId", skip_serializing_if = "Option::is_none")]
+    organization_id: Option<&'a str>,
     #[serde(rename = "folderId", skip_serializing_if = "Option::is_none")]
     folder_id: Option<&'a str>,
+    // The per-cipher key ("cipher key encryption"), echoed back verbatim so the
+    // server keeps it — the item's fields are encrypted under it, not directly
+    // under the org/user key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<&'a str>,
     name: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     notes: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     login: Option<&'a vault_core::cipher::Login>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    card: Option<&'a vault_core::cipher::Card>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<&'a vault_core::cipher::Identity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fields: Option<&'a [vault_core::cipher::CustomField]>,
     #[serde(rename = "secureNote", skip_serializing_if = "Option::is_none")]
     secure_note: Option<SecureNoteRequest>,
 }
@@ -577,10 +595,15 @@ impl<'a> CipherRequest<'a> {
     fn from_cipher(c: &'a vault_core::Cipher) -> Self {
         Self {
             cipher_type: c.cipher_type,
+            organization_id: c.organization_id.as_deref(),
             folder_id: c.folder_id.as_deref(),
+            key: c.key.as_deref(),
             name: c.name.as_deref().unwrap_or_default(),
             notes: c.notes.as_deref(),
             login: c.login.as_ref(),
+            card: c.card.as_ref(),
+            identity: c.identity.as_ref(),
+            fields: c.fields.as_deref(),
             // Bitwarden requires a `secureNote: { type: 0 }` marker on type-2.
             secure_note: (c.cipher_type == 2).then_some(SecureNoteRequest { note_type: 0 }),
         }
@@ -620,7 +643,58 @@ fn base64_url_no_pad(b: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLIENT_NAME, CLIENT_VERSION, DEVICE_TYPE_CLI, client_headers};
+    use super::{CLIENT_NAME, CLIENT_VERSION, CipherRequest, DEVICE_TYPE_CLI, client_headers};
+
+    /// An organization item's create/update body must echo back `organizationId`
+    /// and the per-cipher `key`, and carry the type-specific `card`/`identity`
+    /// objects and custom `fields` — omitting any of these on a `PUT` would strip
+    /// the item's org membership, its cipher key, or its data. This is the wire
+    /// contract an org-aware edit depends on; a serialization test guards it
+    /// without a live server (the wiremock round-trip is `#[ignore]`d).
+    #[test]
+    fn cipher_request_carries_org_key_card_identity_fields() {
+        let cipher = vault_core::Cipher {
+            cipher_type: 3,
+            organization_id: Some("org-123".to_owned()),
+            key: Some("2.aXY=|Y3Q=|bWFj".to_owned()),
+            name: Some("2.name".to_owned()),
+            card: Some(vault_core::cipher::Card {
+                cardholder_name: Some("2.holder".to_owned()),
+                exp_month: Some("2.06".to_owned()),
+                ..Default::default()
+            }),
+            fields: Some(vec![vault_core::cipher::CustomField::default()]),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(CipherRequest::from_cipher(&cipher)).unwrap();
+
+        assert_eq!(body["organizationId"], "org-123");
+        assert_eq!(body["key"], "2.aXY=|Y3Q=|bWFj");
+        assert!(body.get("card").is_some(), "card object must be sent");
+        // Nested camelCase rename is preserved through the request wrapper.
+        assert_eq!(body["card"]["expMonth"], "2.06");
+        assert!(body.get("fields").is_some(), "custom fields must be sent");
+        // An identity was not set on this card item, so it must not appear.
+        assert!(body.get("identity").is_none());
+    }
+
+    /// A personal item sets neither `organizationId` nor `key`; both must be
+    /// absent from the body (not serialized as `null`), so the personal-write
+    /// wire shape is unchanged by the org additions.
+    #[test]
+    fn cipher_request_omits_org_fields_for_personal_item() {
+        let cipher = vault_core::Cipher {
+            cipher_type: 1,
+            name: Some("2.name".to_owned()),
+            login: Some(vault_core::cipher::Login::default()),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(CipherRequest::from_cipher(&cipher)).unwrap();
+
+        assert!(body.get("organizationId").is_none());
+        assert!(body.get("key").is_none());
+        assert!(body.get("card").is_none());
+    }
 
     /// The Bitwarden client-identification trio must be present and correct, or
     /// the server rejects authenticated requests with `version_header_missing`.

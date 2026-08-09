@@ -33,6 +33,16 @@ range may break in any release.
 
 ### Fixed
 
+- **Create/update now sends `card`, `identity`, and custom `fields` on the
+  wire.** `CipherRequest` (the `POST`/`PUT /api/ciphers` body) only serialized
+  `type`/`folderId`/`name`/`notes`/`login`/`secureNote`, so **edits to card and
+  identity items — and any custom fields — never reached the server**; the
+  in-memory cipher was built correctly but the fields were dropped at
+  serialization. The request body now carries `card`, `identity`, and `fields`
+  (plus `organizationId` and `key`, for organization support below). Guarded by
+  a serialization test (`cipher_request_carries_org_key_card_identity_fields`)
+  since the live wiremock round-trip is `#[ignore]`d.
+
 - **TUI `Space` reveals the password from every pane.** `Space` revealed a
   login's password from the item list, but did nothing while the **detail** pane
   was focused (logins have no per-field detail rows, so there was nothing to
@@ -75,6 +85,22 @@ range may break in any release.
   both casings, and the test fixtures were corrected to the real shape.
 
 ### Added
+
+- **Editing organization-owned items.** `vault edit` (and the TUI `e`) now works
+  on organization ciphers, not just personal ones — previously it refused with
+  "editing organization items is not supported yet." An org item's fields are
+  encrypted under a per-cipher key that is itself wrapped under the *org* key;
+  the edit path now resolves that key via `Cipher::field_keys` (symmetric to the
+  read path's `Cipher::decrypt`) and re-encrypts changed fields under it,
+  echoing the item's `organizationId` and `key` back on the `PUT` so membership
+  and the cipher key are preserved. An org item whose key this session does not
+  hold is still refused up front (it can't be decrypted, so it can't be safely
+  re-encrypted) rather than corrupted. **Adding** a *new* item directly into an
+  organization/collection is still out of scope (needs collection selection) —
+  `vault add` continues to create personal items. Verified by unit tests
+  (`field_keys_*` round-trip in `vault-core`, org-edit gating in `vault-agent`);
+  the live end-to-end write against a real org is a maintainer step
+  (`docs/m2-vaultwarden.md`).
 
 - **First-party Nix flake and Standard §5.5 packaging.** A root `flake.nix`
   (`nix build` / `nix run . -- --help` / `nix profile install .` / `nix

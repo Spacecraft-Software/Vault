@@ -79,6 +79,30 @@ impl Vault {
         (&self.user_enc, &self.user_mac)
     }
 
+    /// The base `(enc, mac)` an existing cipher must be *edited* under, as owned
+    /// copies: its organization's key when org-owned (and held this session),
+    /// otherwise the user key. Unlike [`base_keys`](Self::base_keys), an org
+    /// item whose key we do not hold is an **error**, not a silent user-key
+    /// fallback — we could not decrypt it, so re-encrypting its fields under the
+    /// user key would corrupt them.
+    ///
+    /// # Errors
+    ///
+    /// [`IpcError::Internal`] when the cipher is org-owned but this session does
+    /// not hold that organization's key.
+    fn edit_base_keys(&self, cipher: &Cipher) -> Result<([u8; 32], [u8; 32]), IpcError> {
+        let Some(oid) = cipher.organization_id.as_deref() else {
+            return Ok((*self.user_enc, *self.user_mac));
+        };
+        match self.org_keys.get(oid) {
+            Some((enc, mac)) => Ok((*enc, *mac)),
+            None => Err(IpcError::Internal(format!(
+                "cannot edit organization item: the key for organization {oid} is not \
+                 available in this session (its items are read-only here)"
+            ))),
+        }
+    }
+
     /// Encrypt the `/sync` response under the user key and write the account's
     /// cache (payload + protected user key + KDF + device id) to disk
     /// atomically, so a later `unlock` can reconstruct this vault offline.
@@ -701,15 +725,11 @@ impl AgentState {
         let v = self.vault.as_mut().ok_or(IpcError::Locked)?;
 
         let mut cipher = v.ciphers[idx].clone();
-        // Organization items are encrypted under the org key (and a per-cipher
-        // key wrapped under it); the edit path re-encrypts changed fields under
-        // the *user* key, which would corrupt them. Refuse until org-aware write
-        // support exists — reads/copy of org items already work.
-        if cipher.organization_id.is_some() {
-            return Err(IpcError::Internal(
-                "editing organization items is not supported yet".to_owned(),
-            ));
-        }
+        // The key this item is filed under (org key when org-owned, else user
+        // key), as owned copies so no borrow of `v` is held across the later
+        // `&mut` use. Refuses an org item whose key we don't hold rather than
+        // corrupting it — see `edit_base_keys`.
+        let (base_enc, base_mac) = v.edit_base_keys(&cipher)?;
         if card_present && cipher.cipher_type != 3 {
             return Err(IpcError::Internal(
                 "card fields can only be edited on a card item".to_owned(),
@@ -760,7 +780,14 @@ impl AgentState {
             card,
             identity,
         };
-        apply_cipher_edits(&mut cipher, &overlay, &v.user_enc, &v.user_mac);
+        // Fields are encrypted under the per-cipher key when the item carries
+        // one ("cipher key encryption"), unwrapped under the base key above;
+        // older keyless items use the base key directly. This mirrors the read
+        // path (`Cipher::decrypt`) so a re-encrypted field round-trips.
+        let (field_enc, field_mac) = cipher
+            .field_keys(&base_enc, &base_mac)
+            .map_err(|e| IpcError::Decrypt(e.to_string()))?;
+        apply_cipher_edits(&mut cipher, &overlay, &field_enc, &field_mac);
 
         let id = cipher.id.clone();
         v.ensure_online().await?;
@@ -770,8 +797,10 @@ impl AgentState {
             .update_cipher(&id, &cipher)
             .await
             .map_err(|e| IpcError::Network(e.to_string()))?;
+        // `decrypt_name` resolves the per-cipher key itself, so it takes the
+        // base key (not the already-resolved field key).
         let name = cipher
-            .decrypt_name(&v.user_enc, &v.user_mac)
+            .decrypt_name(&base_enc, &base_mac)
             .map_err(|e| IpcError::Decrypt(e.to_string()))?
             .unwrap_or_default();
         v.ciphers[idx] = cipher;
@@ -1506,14 +1535,23 @@ mod tests {
         assert_eq!(list.len(), 1, "the unknown-org cipher is skipped");
         assert_eq!(list[0].name, "shared-login");
 
-        // Editing an org item is refused (write path would corrupt it).
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("rt");
-        let err = rt
+        // Editing an org item whose key we HOLD is no longer refused: it clears
+        // the crypto (base + per-cipher key resolution) and reaches the server
+        // call, which the stub client can't authenticate → Network (401), NOT
+        // the Internal refusal below.
+        let held = rt
             .block_on(s.edit_cipher("org-c1", CipherWrite::default()))
             .unwrap_err();
-        assert!(matches!(err, IpcError::Internal(_)), "got {err:?}");
+        assert!(matches!(held, IpcError::Network(_)), "got {held:?}");
+        // Editing an org item whose key we DON'T hold is still refused up front
+        // (Internal), before any network — we can't decrypt or re-encrypt it.
+        let unheld = rt
+            .block_on(s.edit_cipher("org-c2", CipherWrite::default()))
+            .unwrap_err();
+        assert!(matches!(unheld, IpcError::Internal(_)), "got {unheld:?}");
     }
 
     #[cfg(feature = "clipboard")]

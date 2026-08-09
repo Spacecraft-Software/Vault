@@ -389,9 +389,10 @@ impl DecryptOptions {
     }
 }
 
-/// A per-cipher field key — the (enc, mac) pair recovered from a cipher's own
-/// `key` ("cipher key encryption"), each half zeroized on drop.
-type ItemKey = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
+/// A per-cipher field key — the `(enc, mac)` pair a cipher's fields are
+/// encrypted under ("cipher key encryption"), each half zeroized on drop.
+/// Returned by [`Cipher::field_keys`].
+pub type ItemKey = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
 
 impl Cipher {
     /// Resolve the per-cipher field key for "cipher key encryption".
@@ -421,6 +422,28 @@ impl Cipher {
         item_enc.copy_from_slice(&material[..32]);
         item_mac.copy_from_slice(&material[32..]);
         Ok(Some((item_enc, item_mac)))
+    }
+
+    /// The `(enc, mac)` this cipher's *fields* are encrypted under, given the
+    /// base key it is filed against — the user key for a personal item, or its
+    /// organization's key for an org-owned one. When the item carries a
+    /// per-cipher `key` ("cipher key encryption") this unwraps it under the base
+    /// key and returns that; otherwise the base key is returned unchanged (older
+    /// keyless items). The result is owned and zeroizing, so a caller can both
+    /// decrypt and *re-encrypt* fields under it without re-resolving — which is
+    /// what an org-aware edit needs, mirroring what [`Cipher::decrypt`] does
+    /// internally on the read path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MacMismatch`] if a present per-cipher `key` fails
+    /// authentication under `base_enc`/`base_mac` (e.g. the wrong base key was
+    /// supplied for an organization item), or [`Error::EncString`] if it does
+    /// not unwrap to exactly 64 bytes.
+    pub fn field_keys(&self, base_enc: &[u8; 32], base_mac: &[u8; 32]) -> Result<ItemKey> {
+        Ok(self
+            .item_field_key(base_enc, base_mac)?
+            .unwrap_or_else(|| (Zeroizing::new(*base_enc), Zeroizing::new(*base_mac))))
     }
 
     /// Decrypt this cipher's name. Returns `Ok(None)` for ciphers with no name
@@ -763,5 +786,71 @@ mod tests {
             ..Cipher::default()
         };
         assert!(cipher.decrypt_name(&USER_ENC, &USER_MAC).is_err());
+    }
+
+    /// The org-edit re-encryption path: `field_keys` unwraps the per-cipher key
+    /// under the base key (an organization key, here modelled by `USER_*`), and
+    /// a field re-encrypted under the returned key reads back through `decrypt`.
+    /// This is exactly what an org-aware edit does — resolve the item key, then
+    /// re-encrypt changed fields under it.
+    #[test]
+    fn field_keys_resolves_item_key_and_reencryption_round_trips() {
+        let mut material = [0u8; 64];
+        material[..32].copy_from_slice(&ITEM_ENC);
+        material[32..].copy_from_slice(&ITEM_MAC);
+        let wrapped = EncString::encrypt(&USER_ENC, &USER_MAC, &material).serialize();
+        let mut cipher = Cipher {
+            cipher_type: 1,
+            key: Some(wrapped),
+            name: Some(under(&ITEM_ENC, &ITEM_MAC, "old name")),
+            ..Cipher::default()
+        };
+
+        let (fe, fm) = cipher.field_keys(&USER_ENC, &USER_MAC).unwrap();
+        assert_eq!(*fe, ITEM_ENC, "unwrapped the per-cipher enc key");
+        assert_eq!(*fm, ITEM_MAC, "unwrapped the per-cipher mac key");
+        let (fe, fm): ([u8; 32], [u8; 32]) = (*fe, *fm);
+        cipher.name = Some(under(&fe, &fm, "new name"));
+
+        // Reads back under the BASE key — `decrypt_name` resolves the per-cipher
+        // key itself, so the re-encrypted field round-trips.
+        assert_eq!(
+            cipher
+                .decrypt_name(&USER_ENC, &USER_MAC)
+                .unwrap()
+                .as_deref(),
+            Some("new name"),
+        );
+    }
+
+    /// A keyless item (older vault) resolves to the base key verbatim, so an
+    /// edit re-encrypts directly under it — unchanged from before.
+    #[test]
+    fn field_keys_falls_back_to_base_when_keyless() {
+        let cipher = Cipher {
+            cipher_type: 2,
+            key: None,
+            ..Cipher::default()
+        };
+        let (fe, fm) = cipher.field_keys(&USER_ENC, &USER_MAC).unwrap();
+        assert_eq!(*fe, USER_ENC);
+        assert_eq!(*fm, USER_MAC);
+    }
+
+    /// Supplying the wrong base key for a keyed item fails rather than returning
+    /// a garbage key — the guard that stops an org edit corrupting an item whose
+    /// org key the session does not actually hold.
+    #[test]
+    fn field_keys_errors_on_wrong_base_key() {
+        let mut material = [0u8; 64];
+        material[..32].copy_from_slice(&ITEM_ENC);
+        material[32..].copy_from_slice(&ITEM_MAC);
+        let wrapped = EncString::encrypt(&USER_ENC, &USER_MAC, &material).serialize();
+        let cipher = Cipher {
+            cipher_type: 1,
+            key: Some(wrapped),
+            ..Cipher::default()
+        };
+        assert!(cipher.field_keys(&[9u8; 32], &[9u8; 32]).is_err());
     }
 }
