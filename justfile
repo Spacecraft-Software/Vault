@@ -75,5 +75,12 @@ fingerprint:
     cargo build -p vault-agent --features fingerprint
     cargo clippy -p vault-agent --features fingerprint -- -D warnings
 
+# Build the first-party flake and smoke-test the result (docs: README "Nix",
+# packaging/default.nix). Kept OUT of the `ci:` chain below so `just ci` stays
+# runnable without Nix installed. Uses nixpkgs' rustc, not the pinned 1.95.0.
+nix:
+    nix build --no-link --print-out-paths .
+    nix run . -- --version
+
 # Everything the CI runner checks, in order. Run before pushing.
 ci: fmt clippy test headless version-gate deny audit reuse

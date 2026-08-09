@@ -76,6 +76,23 @@ range may break in any release.
 
 ### Added
 
+- **First-party Nix flake and Standard §5.5 packaging.** A root `flake.nix`
+  (`nix build` / `nix run . -- --help` / `nix profile install .` / `nix
+  develop`) builds all three binaries from one derivation
+  (`packaging/default.nix`, vendoring from the committed `Cargo.lock`), plus the
+  §5.5 trio `packaging/{default.nix,guix.scm,PKGBUILD}`. A non-required `nix`
+  CI job and a `just nix` recipe smoke-test the build; both are kept out of the
+  pinned-toolchain path (`just ci`, the `test` job). **Toolchain caveat:** the
+  Nix build and `nix develop` use nixpkgs' rustc, **not** the CI-pinned 1.95.0,
+  so their `fmt`/`clippy` are not CI-exact — run the gates through rustup.
+  The `PKGBUILD` carries the `-flto=auto` CFLAGS scrub (`options=('!lto')` plus
+  an explicit scrub in `build()`) that the gitignored `.cargo/config.toml`
+  applies locally, so `ring` links on Arch. `guix.scm` is present and pins the
+  version/commit but is not the path that builds today (Guix's
+  `cargo-build-system` does not vendor from `Cargo.lock`; use Nix). No Texinfo
+  manual yet (Standard §8 gap, tracked), so the derivation installs `docs/*.md`
+  where a manual would install `.info`.
+
 - **`vault exec` — inject secrets as env vars at launch.** `vault exec --
   claude` (or `--profile <name> -- <cmd>`) resolves every var in a new
   `[exec.profiles.<name>]` mapping against the agent and injects the

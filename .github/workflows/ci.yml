@@ -139,3 +139,21 @@ jobs:
           python-version: "3.x"
       - run: pip install reuse
       - run: reuse lint
+
+  # First-party flake (§5.5). Builds the package and smoke-tests the result.
+  # This job compiles against nixpkgs' rustc, NOT the RUST_TOOLCHAIN pin above,
+  # so it does not replace the pinned `test` job — it only proves the flake and
+  # packaging/default.nix stay buildable. (A third site for the "keep
+  # RUST_TOOLCHAIN in sync with rust-toolchain.toml" note: this job is exempt
+  # from it by design.) Not matrixed, no Cachix push.
+  nix:
+    name: nix build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix build -L .
+      - run: nix run . -- --version
