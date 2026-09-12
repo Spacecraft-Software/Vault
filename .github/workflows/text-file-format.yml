@@ -4,10 +4,15 @@
 # Steelbore Standard §6.5 — Text File Format.
 #
 # .gitattributes and .editorconfig are advisory to the tools that read them,
-# and neither stops a CR byte written by a tool that reads neither. §6.5 makes
-# the gate the binding part. `git grep -I` skips binaries and honors
-# .gitattributes, so a pinned CRLF exception is invisible here and needs no
-# exclusion list.
+# and neither stops CRLF committed by a tool that reads neither. §6.5 makes
+# the gate the binding part.
+#
+# The gate reads the INDEX, not the working tree. `git ls-files --eol` reports
+# the stored line ending as i/lf, i/crlf or i/mixed; anything but i/lf is CRLF
+# in the repository. Grepping the working tree for a CR byte is wrong: a file
+# pinned `eol=crlf` is stored LF and checked out CRLF by design, so a
+# working-tree grep fails the very exception §6.5 grants. i/-text is binary
+# and is not a text file at all.
 name: Text file format
 
 on:
@@ -25,10 +30,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: No CR bytes in tracked text files
+      - name: No CRLF stored in tracked text files
         run: |
-          CR=$(printf '\r')
-          if git grep -Il "$CR" -- .; then
-            echo "::error::CR byte in a tracked text file — §6.5 requires LF line endings"
+          bad=$(git ls-files --eol | awk -F'\t' '$1 ~ /i\/(crlf|mixed)/ {print $2}')
+          if [ -n "$bad" ]; then
+            echo "::error::CRLF stored in tracked text files — §6.5 requires LF"
+            echo "$bad"
             exit 1
           fi
