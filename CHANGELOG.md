@@ -22,10 +22,15 @@ range may break in any release.
   `syncing…` status line draws first. `vault sync` adds the same indicator to
   its stderr spinner. OSC 9;4 is allow-list only: WezTerm's 20240203 stable
   and older iTerm2 and kitty releases show `OSC 9` as a notification.
+- The probe is skipped on macOS, where `poll(2)` reports `POLLNVAL` for
+  terminal devices and the bounded wait can't work. The wait also treats
+  `POLLNVAL`/`POLLERR` as errors on every platform, so it never falls through
+  to a blocking `read`.
 - **`vault-tui` restores the terminal on `SIGTERM`/`SIGHUP`/`SIGINT`** as well
   as on exit, error and panic, through one idempotent restore (pop key flags →
   clear progress → leave the alternate screen → leave raw mode). It exits
-  `128+N`.
+  `128+N`. Every agent request races the signal, so a stalled agent can't
+  hold the terminal in raw mode.
 
 ### Changed
 

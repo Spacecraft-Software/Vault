@@ -260,7 +260,17 @@ async fn run(socket: &Path, env: &TermEnv, overrides: Overrides) -> anyhow::Resu
     loop {
         // Refresh the card/identity detail cache for the current selection
         // before drawing (cheap no-op unless the selection changed).
-        ensure_detail(&mut state, socket).await;
+        // Every agent request below races shutdown signals: the handlers
+        // registered above replace the default "terminate" action, and
+        // `client::request` has no timeout, so a stalled agent must not be
+        // able to keep the terminal in raw mode.
+        tokio::select! {
+            () = ensure_detail(&mut state, socket) => {}
+            code = signals.recv() => {
+                exit = Some(code);
+                break;
+            }
+        }
         terminal.draw(|f| ui::render(f, &state))?;
         if state.should_quit {
             break;
@@ -297,7 +307,15 @@ async fn run(socket: &Path, env: &TermEnv, overrides: Overrides) -> anyhow::Resu
             }
         };
         match ev {
-            Some(Event::Key(key)) => handle_key(&mut state, key, socket).await,
+            Some(Event::Key(key)) => {
+                tokio::select! {
+                    () = handle_key(&mut state, key, socket) => {}
+                    code = signals.recv() => {
+                        exit = Some(code);
+                        break;
+                    }
+                }
+            }
             Some(Event::Paste(s)) => state.input_insert_str(&s),
             Some(_) => {}  // resize / mouse / focus — redraw on next iteration
             None => break, // input thread gone

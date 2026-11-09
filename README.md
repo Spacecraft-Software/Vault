@@ -324,7 +324,9 @@ and never defers the idle-lock countdown.
 ### Terminal protocols
 
 `vault-tui` probes the terminal once at startup (a 200 ms, DA1-fenced query)
-and uses what it finds:
+and uses what it finds. On macOS there is no probe, because macOS `poll(2)`
+can't wait on a terminal. Keys stay legacy there, and progress support is
+judged from the environment.
 
 - **Kitty keyboard protocol** — pushed when the terminal answers, so `Esc`
   and `Ctrl`-chords are unambiguous; legacy keys otherwise. WezTerm needs

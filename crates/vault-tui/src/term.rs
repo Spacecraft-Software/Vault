@@ -42,6 +42,16 @@ const DRAIN_QUIET: Duration = Duration::from_millis(20);
 /// cannot hold the drain open.
 const DRAIN_MAX_READS: usize = 64;
 
+/// Whether the startup probe can run on this platform.
+///
+/// macOS `poll(2)` does not support terminal devices: it reports `POLLNVAL`
+/// at once, so the bounded wait cannot work and a raw-mode `read` would block
+/// startup. The probe is skipped there *before* anything is written, so no
+/// reply can leak into the input stream. macOS sessions keep legacy keys and
+/// choose OSC 9;4 from the environment alone. A `select(2)`-based wait would
+/// lift this but needs `unsafe` fd-set handling, which this crate forbids.
+const PROBE_SUPPORTED: bool = !cfg!(target_os = "macos");
+
 /// Kitty keyboard push with flag 1 (disambiguate escape codes) only: enough to
 /// tell `Esc` from the start of a sequence and `Ctrl+I` from `Tab`. No binding
 /// needs key-release or text reporting, so no other flag is requested.
@@ -92,7 +102,7 @@ pub fn enter(env: &TermEnv, overrides: Overrides) -> io::Result<Caps> {
     execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
 
     let allowed = env.protocols_allowed(out.is_terminal());
-    let report = if allowed && probe_needed(overrides) {
+    let report = if allowed && PROBE_SUPPORTED && probe_needed(overrides) {
         probe_tty(PROBE_DEADLINE).unwrap_or_default()
     } else {
         ProbeReport::default()
@@ -278,13 +288,24 @@ fn drain(tty: &mut File) {
 }
 
 /// `poll(2)` the TTY for input, at most `timeout`. Never a blocking read.
+///
+/// Readiness comes from the returned events, not the ready count: `POLLNVAL`
+/// or `POLLERR` is an error (the probe then reports "nothing supported"), so
+/// a `read` that could block is never attempted.
 fn wait_readable(tty: &File, timeout: Duration) -> io::Result<bool> {
     let ts = Timespec {
         tv_sec: i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX),
         tv_nsec: i64::from(timeout.subsec_nanos()),
     };
     let mut fds = [PollFd::new(tty, PollFlags::IN)];
-    Ok(poll(&mut fds, Some(&ts))? > 0)
+    if poll(&mut fds, Some(&ts))? == 0 {
+        return Ok(false);
+    }
+    let revents = fds[0].revents();
+    if revents.intersects(PollFlags::NVAL | PollFlags::ERR) {
+        return Err(io::Error::other("poll(2) on the terminal failed"));
+    }
+    Ok(revents.intersects(PollFlags::IN | PollFlags::HUP))
 }
 
 #[cfg(test)]
