@@ -10,6 +10,23 @@ range may break in any release.
 
 ### Security
 
+- **Cleared the 2026-11 RustSec backlog** (`cargo audit` / `cargo deny` were
+  red on `main`). Lockfile bumps: `rustls` 0.23.40 → 0.23.46 (RUSTSEC-2026-0285,
+  -0346, -0348, -0349), `rustls-webpki` 0.103.13 → 0.103.16
+  (RUSTSEC-2026-0382), `webpki-roots` 1.0.7 → 1.0.11 (RUSTSEC-2026-0381),
+  `tokio` 1.52.3 → 1.54.1 (RUSTSEC-2026-0386), `h2` 0.4.14 → 0.4.20
+  (RUSTSEC-2026-0258), and `quinn-proto` 0.11.15 → 0.11.19 (RUSTSEC-2026-0338
+  to -0342), which pulls `rand` 0.10. `quinn-proto` is still a phantom
+  `Cargo.lock` entry that never enters the build. The yanked `clipboard-win`
+  5.4.1 moved to 5.4.3.
+- **`zbus` 5 → 6** for the off-by-default `fingerprint` unlock. `zvariant`,
+  `zvariant_derive` and `zbus_names` were declared unmaintained
+  (RUSTSEC-2026-0370/-0371/-0372) after being merged into `zbus` 6, which
+  removes them from the tree. The migration also drops `event-listener` 5,
+  which clears RUSTSEC-2026-0221. Code changes: the `proxy` feature is now
+  explicit, the import is `zbus::OwnedObjectPath`, and `proxy::Builder::path`
+  no longer returns a `Result`.
+
 - **Interactive secret prompts no longer echo to the terminal.** `vault login`
   / `vault unlock` printed the **master password in clear text** as it was
   typed (visible on screen and in scrollback); the PIN, the `add`/`edit` login

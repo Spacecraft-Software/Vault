@@ -91,7 +91,7 @@ linux-keyutils = "0.2"
 # (vault-agent, Linux). Pure-Rust D-Bus; MIT; GPL-3.0-or-later compatible.
 # `futures-util` drives the VerifyStatus signal stream. Both optional, pulled
 # only by `--features fingerprint`.
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus = { version = "6", default-features = false, features = ["tokio", "proxy"] }
 futures-util = { version = "0.3", default-features = false }
 time = { version = "0.3", features = ["serde", "serde-well-known"] }
 fs2 = "0.4"

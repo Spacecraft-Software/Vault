@@ -52,7 +52,7 @@ mod imp {
         default_path = "/net/reactivated/Fprint/Manager"
     )]
     trait FprintManager {
-        fn get_default_device(&self) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+        fn get_default_device(&self) -> zbus::Result<zbus::OwnedObjectPath>;
     }
 
     #[zbus::proxy(
@@ -86,8 +86,9 @@ mod imp {
         let conn = zbus::Connection::system().await?;
         let manager = FprintManagerProxy::new(&conn).await?;
         let device_path = manager.get_default_device().await?;
+        // zbus 6: `path` is infallible; an invalid path surfaces from `build`.
         let device = FprintDeviceProxy::builder(&conn)
-            .path(device_path)?
+            .path(device_path)
             .build()
             .await?;
         device.claim("").await?;
