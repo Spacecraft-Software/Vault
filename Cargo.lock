@@ -2848,6 +2848,7 @@ dependencies = [
  "vault-core",
  "vault-ipc",
  "vault-store",
+ "vault-term",
  "zeroize",
 ]
 
@@ -2918,6 +2919,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vault-term"
+version = "0.0.1"
+dependencies = [
+ "base64",
+]
+
+[[package]]
 name = "vault-theme"
 version = "0.0.1"
 
@@ -2926,14 +2934,17 @@ name = "vault-tui"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "base64",
  "clap",
  "crossterm",
  "ratatui",
+ "rustix 1.1.4",
+ "serde_json",
+ "time",
  "tokio",
  "vault-config",
  "vault-core",
  "vault-ipc",
+ "vault-term",
  "vault-theme",
  "zeroize",
 ]

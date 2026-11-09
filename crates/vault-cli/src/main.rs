@@ -70,6 +70,14 @@ struct Cli {
     #[arg(long, global = true)]
     no_auto_spawn: bool,
 
+    /// Force terminal protocols on or off, overriding detection: a
+    /// comma-separated list of +name / -name. The CLI only uses `progress`
+    /// (OSC 9;4 while `sync` runs); `all`, keyboard, graphics, animation,
+    /// clipboard, clipboard-rich and pointer are accepted. Beats
+    /// `$SPACECRAFT_TERM_PROTOCOLS`.
+    #[arg(long, global = true, value_name = "LIST")]
+    term_protocols: Option<String>,
+
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -750,6 +758,10 @@ impl IdentityArgs {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    if let Err(e) = init_stderr_policy(cli.term_protocols.as_deref()) {
+        eprintln!("vault: {e}");
+        return std::process::ExitCode::from(2);
+    }
     let socket = match resolve_socket(cli.socket) {
         Ok(p) => p,
         Err(e) => {
@@ -1567,27 +1579,92 @@ async fn cmd_ack(ep: Endpoint<'_>, req: Request, action: &str, json: bool) -> Re
     }
 }
 
+/// What may be drawn on stderr, resolved once in `main`.
+#[derive(Clone, Copy, Debug, Default)]
+struct StderrPolicy {
+    /// The animated spinner (and its ANSI line clearing) may be drawn.
+    spinner: bool,
+    /// OSC 9;4 progress may be sent alongside the spinner.
+    progress: bool,
+}
+
+static STDERR_POLICY: std::sync::OnceLock<StderrPolicy> = std::sync::OnceLock::new();
+
+/// Resolve what stderr may carry: nothing decorative unless stderr is a
+/// terminal, the session is not in agent/CI mode and `TERM` is real; OSC 9;4
+/// only on an allow-listed terminal, with `--term-protocols` /
+/// `$SPACECRAFT_TERM_PROTOCOLS` beating detection (the flag wins).
+fn init_stderr_policy(flag: Option<&str>) -> Result<(), vault_term::ParseOverridesError> {
+    use vault_term::{Overrides, Protocol, TermEnv, progress};
+    let env = TermEnv::from_process();
+    let from_env = env.overrides().map(Overrides::parse).transpose()?;
+    let from_flag = flag.map(Overrides::parse).transpose()?;
+    let overrides = from_env
+        .unwrap_or_default()
+        .layered(from_flag.unwrap_or_default());
+    let allowed = env.protocols_allowed(io::stderr().is_terminal());
+    let policy = StderrPolicy {
+        spinner: allowed,
+        progress: allowed && overrides.resolve(Protocol::Progress, progress::supported(&env, None)),
+    };
+    let _ = STDERR_POLICY.set(policy);
+    Ok(())
+}
+
+fn stderr_policy() -> StderrPolicy {
+    STDERR_POLICY.get().copied().unwrap_or_default()
+}
+
+/// Write an OSC 9;4 progress sequence to stderr (best-effort).
+fn stderr_progress(state: vault_term::progress::ProgressState) {
+    let mut err = io::stderr();
+    let _ = err.write_all(vault_term::progress::sequence(state).as_bytes());
+    let _ = err.flush();
+}
+
 /// Run `fut` while animating a spinner on stderr, clearing the line when it
-/// resolves. No-ops to a plain await when stderr isn't a TTY (piped/redirected),
-/// so machine consumers never see escape codes. The work itself happens in the
-/// agent; this is purely a "something is happening" affordance.
+/// resolves. No-ops to a plain await when stderr isn't a terminal, in agent/CI
+/// mode, or under `TERM=dumb`, so machine consumers never see escape codes.
+/// On an allow-listed terminal the tab/taskbar shows an indeterminate OSC 9;4
+/// indicator too; Ctrl+C clears both before exiting 130. The work itself
+/// happens in the agent; this is purely a "something is happening"
+/// affordance.
 async fn with_spinner<F: std::future::Future>(label: &str, fut: F) -> F::Output {
+    use vault_term::progress::ProgressState;
     // Braille spinner — matches the dot aesthetic used elsewhere in the UI.
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    if !io::stderr().is_terminal() {
+    let policy = stderr_policy();
+    if !policy.spinner {
         return fut.await;
     }
-    tokio::pin!(fut);
+    // Clears the spinner line and, when shown, the progress indicator.
+    let finish = || {
+        let mut err = io::stderr();
+        // Carriage return + clear-to-end-of-line wipes the spinner.
+        let _ = write!(err, "\r\x1b[2K");
+        let _ = err.flush();
+        if policy.progress {
+            stderr_progress(ProgressState::Clear);
+        }
+    };
+    if policy.progress {
+        stderr_progress(ProgressState::Indeterminate);
+    }
+    // Created once, outside the loop, so a Ctrl+C between ticks is not lost.
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(fut, ctrl_c);
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(80));
     let mut frame = 0usize;
     loop {
         tokio::select! {
             output = &mut fut => {
-                // Carriage return + clear-to-end-of-line wipes the spinner.
-                let mut err = io::stderr();
-                let _ = write!(err, "\r\x1b[2K");
-                let _ = err.flush();
+                finish();
                 return output;
+            }
+            _ = &mut ctrl_c => {
+                // Without this the tab's progress bar would outlive us.
+                finish();
+                std::process::exit(130);
             }
             _ = ticker.tick() => {
                 let mut err = io::stderr();

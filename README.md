@@ -321,6 +321,40 @@ and never defers the idle-lock countdown.
   `set-clipboard on`). The agent itself can't emit OSC52 — it's a daemon with no
   terminal — so this just makes it step aside for the TUI.
 
+### Terminal protocols
+
+`vault-tui` probes the terminal once at startup (a 200 ms, DA1-fenced query)
+and uses what it finds. On macOS there is no probe, because macOS `poll(2)`
+can't wait on a terminal. Keys stay legacy there, and progress support is
+judged from the environment.
+
+- **Kitty keyboard protocol** — pushed when the terminal answers, so `Esc`
+  and `Ctrl`-chords are unambiguous; legacy keys otherwise. WezTerm needs
+  `config.enable_kitty_keyboard = true`.
+- **OSC 52 clipboard** — the copy fallback above. There is no way to confirm
+  a terminal accepted it (GNOME Terminal ignores it), so the status line
+  always names a manual fallback (`Space` reveals the value).
+- **OSC 9;4 progress** — an indeterminate tab/taskbar indicator while
+  `unlock` or `:sync` run in the TUI, and while `vault sync` runs in the CLI.
+  Sent only to terminals known to render it (Windows Terminal, ConEmu,
+  Ghostty, VS Code, Rio, contour, foot, iTerm2 ≥ 3.6, WezTerm builds from
+  2025-02-10), because older terminals show `OSC 9` as a desktop notification.
+
+Every mode is undone on exit, error, panic, and `SIGTERM`/`SIGHUP`. Nothing is
+sent when stdout isn't a terminal, under `TERM=dumb`, or in agent/CI mode
+(`AI_AGENT`/`AGENT` set, or `CI` truthy). In that mode `vault-tui` refuses to
+start (exit 2) and points at `vault list --json`.
+
+Override detection with `--term-protocols` (both binaries) or
+`SPACECRAFT_TERM_PROTOCOLS`; the flag wins. Each takes a comma-separated list of `+name` /
+`-name`, with name one of `all`, `keyboard`, `clipboard`, `progress`:
+
+```sh
+vault-tui --term-protocols=-keyboard           # stay on legacy keys
+SPACECRAFT_TERM_PROTOCOLS=+progress vault-tui  # kitty, or a terminal not on the list
+vault-tui --term-protocols=-all                # no protocols, no probe
+```
+
 ## Repository layout
 
 ```
@@ -333,6 +367,7 @@ vault/
 │   ├── vault-ipc/       client ↔ agent CBOR protocol
 │   ├── vault-cli/       `vault` binary
 │   ├── vault-tui/       `vault-tui` binary (ratatui)
+│   ├── vault-term/      terminal-protocol policy (gate, overrides, OSC 52/9;4)
 │   └── vault-theme/     Steelbore palette tokens
 ├── docs/                deeper design notes
 ├── CHANGELOG.md

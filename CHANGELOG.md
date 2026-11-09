@@ -8,6 +8,47 @@ range may break in any release.
 
 ## [Unreleased]
 
+### Added
+
+- **Terminal protocols (Spacecraft `spacecraft-tui-protocols`).** New
+  `vault-term` crate holds the policy, which is pure and unit-tested: the
+  agent/TTY/`TERM=dumb` gate, the `--term-protocols` /
+  `SPACECRAFT_TERM_PROTOCOLS` override parser (the flag wins), a DA1-fenced
+  probe-reply parser, and the OSC 52 and OSC 9;4 encoders. `vault-tui` now
+  probes once at startup (200 ms deadline, late replies drained), pushes the
+  **kitty keyboard protocol** (flag 1, disambiguate) when the terminal answers
+  `CSI ? u`, and shows an **OSC 9;4** indeterminate indicator while `unlock`
+  and `:sync` run. Both requests are now queued so their `unlocking…` /
+  `syncing…` status line draws first. `vault sync` adds the same indicator to
+  its stderr spinner. OSC 9;4 is allow-list only: WezTerm's 20240203 stable
+  and older iTerm2 and kitty releases show `OSC 9` as a notification.
+- The probe is skipped on macOS, where `poll(2)` reports `POLLNVAL` for
+  terminal devices and the bounded wait can't work. The wait also treats
+  `POLLNVAL`/`POLLERR` as errors on every platform, so it never falls through
+  to a blocking `read`.
+- **`vault-tui` restores the terminal on `SIGTERM`/`SIGHUP`/`SIGINT`** as well
+  as on exit, error and panic, through one idempotent restore (pop key flags →
+  clear progress → leave the alternate screen → leave raw mode). It exits
+  `128+N`. Every agent request races the signal, so a stalled agent can't
+  hold the terminal in raw mode.
+
+### Changed
+
+- **`vault-tui` refuses to start in agent/CI mode or without a terminal** on
+  stdin/stdout (exit 2). Agent mode gets a structured `error` object on
+  stderr; a human gets an `[ERROR]` line. Both carry the hint
+  `vault list --json`. Agent detection is presence-based: any non-empty
+  `AI_AGENT`/`AGENT`, or a truthy `CI`.
+- **OSC 52 is sent unwrapped inside tmux** and terminated with `ST`. The old
+  `DCS tmux;` passthrough wrapper also needed `allow-passthrough`, which has
+  been off by default since tmux 3.3. tmux's own `set-clipboard on` handles
+  the bare sequence. Payloads over 100 KB of base64 are refused rather than
+  truncated. The copy toast now names a manual fallback, because OSC 52
+  cannot confirm the copy landed.
+- `vault sync`'s spinner is suppressed in agent/CI mode and under
+  `TERM=dumb`, not only when stderr is piped. Ctrl+C during it clears the
+  line (and the progress indicator) and exits 130.
+
 ### Security
 
 - **Cleared the 2026-11 RustSec backlog** (`cargo audit` / `cargo deny` were

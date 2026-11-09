@@ -22,13 +22,17 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-base64 = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+# `event` for poll(2) on the TTY during the bounded startup protocol probe.
+rustix = { workspace = true, features = ["event"] }
+serde_json = { workspace = true }
+time = { workspace = true }
 zeroize = { workspace = true }
 vault-config = { path = "../vault-config" }
 vault-core = { path = "../vault-core" }
 vault-ipc = { path = "../vault-ipc" }
+vault-term = { path = "../vault-term" }
 vault-theme = { path = "../vault-theme" }
