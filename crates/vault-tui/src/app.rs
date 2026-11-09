@@ -1219,6 +1219,21 @@ pub struct App {
     pub pending_g: bool,
     /// Set when the user asks to quit.
     pub should_quit: bool,
+    /// A slow agent request queued for the run loop, which draws the
+    /// "…ing" status line (and starts the terminal's progress indicator)
+    /// before the request blocks, then runs it.
+    pub pending: Option<PendingOp>,
+}
+
+/// A slow agent request deferred to the run loop so its progress is visible
+/// while it runs: the status line always says what is happening, and OSC 9;4
+/// supplements it where the terminal supports that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingOp {
+    /// `:sync` — the agent pulls and decrypts `/sync`.
+    Sync,
+    /// Unlock-screen submit — KDF plus, when online, a token request.
+    Unlock,
 }
 
 impl App {
@@ -1254,6 +1269,7 @@ impl App {
             vim: false,
             pending_g: false,
             should_quit: false,
+            pending: None,
         }
     }
 
@@ -1295,6 +1311,7 @@ impl App {
             vim: false,
             pending_g: false,
             should_quit: false,
+            pending: None,
         }
     }
 
@@ -1591,6 +1608,12 @@ impl App {
     /// Clear the transient status-bar message (called before each key press).
     pub fn clear_toast(&mut self) {
         self.toast = None;
+    }
+
+    /// Queue a slow request for the run loop and show `label` while it runs.
+    pub fn queue(&mut self, op: PendingOp, label: &str) {
+        self.pending = Some(op);
+        self.toast = Some(label.to_owned());
     }
 
     /// Request shutdown on the next loop iteration.

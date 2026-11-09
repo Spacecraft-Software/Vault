@@ -13,30 +13,30 @@
 //! drive `Request::Add` / `Edit` / `Remove` through a form overlay and a
 //! delete confirm. Requires a pre-unlocked agent; a locked or absent agent
 //! shows a centered banner.
+//!
+//! Terminal protocols (kitty keyboard, OSC 52, OSC 9;4) are probed once at
+//! startup and restored on every exit path — see [`term`]. The TUI refuses to
+//! start in agent/CI mode or without a terminal on stdin and stdout, pointing
+//! at the CLI's `--json` output instead.
 
 #![forbid(unsafe_code)]
 
 mod app;
 mod client;
-mod osc52;
+mod term;
 mod ui;
 
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::mpsc;
+use vault_term::{Overrides, ParseOverridesError, TermEnv};
 
 use vault_ipc::proto::{
     CardWrite, Error as IpcError, Field, IdentityWrite, Request, Response, Status,
@@ -45,7 +45,7 @@ use vault_ipc::{default_socket_path, sanitize_socket_path};
 
 use app::{
     App, FormKind, FormSubmit, GEN_MAX_LEN, GEN_MAX_WORDS, GEN_MIN_LEN, GEN_MIN_WORDS,
-    GeneratorMode, InputMode, RevealedSecret, UnlockState,
+    GeneratorMode, InputMode, PendingOp, RevealedSecret, UnlockState,
 };
 
 pub(crate) const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -87,11 +87,44 @@ struct Cli {
     /// `$XDG_RUNTIME_DIR/vault/agent.sock`.
     #[arg(long)]
     socket: Option<PathBuf>,
+
+    /// Force terminal protocols on or off, overriding detection: a
+    /// comma-separated list of +name / -name, with name one of all, keyboard,
+    /// clipboard, progress (graphics, animation, clipboard-rich and pointer
+    /// are accepted but unused). Beats `$SPACECRAFT_TERM_PROTOCOLS`.
+    #[arg(long, value_name = "LIST")]
+    term_protocols: Option<String>,
 }
+
+/// Where Vault's documentation lives (structured-error `docs_url`).
+const DOCS_URL: &str = "https://Vault.SpacecraftSoftware.org/";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
+    let env = TermEnv::from_process();
+    let overrides = match resolve_overrides(&env, cli.term_protocols.as_deref()) {
+        Ok(o) => o,
+        Err(e) => {
+            usage_error(
+                &env,
+                "INVALID_ARGUMENT",
+                &e.to_string(),
+                "vault-tui --term-protocols=-all",
+            );
+            return ExitCode::from(2);
+        }
+    };
+    // Never trap an agent (or a pipe) in an interactive render loop.
+    if env.is_agent() || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        usage_error(
+            &env,
+            "USAGE_ERROR",
+            "vault-tui needs an interactive terminal; agent/CI mode or redirected stdio detected",
+            "vault list --json",
+        );
+        return ExitCode::from(2);
+    }
     let socket = match resolve_socket(cli.socket) {
         Ok(p) => p,
         Err(e) => {
@@ -99,12 +132,88 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(&socket).await {
-        Ok(()) => ExitCode::SUCCESS,
+    match run(&socket, &env, overrides).await {
+        Ok(None) => ExitCode::SUCCESS,
+        Ok(Some(code)) => ExitCode::from(code),
         Err(e) => {
             eprintln!("vault-tui: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `$SPACECRAFT_TERM_PROTOCOLS` with `--term-protocols` layered over it, so
+/// the flag wins wherever both name a protocol.
+fn resolve_overrides(env: &TermEnv, flag: Option<&str>) -> Result<Overrides, ParseOverridesError> {
+    let from_env = env.overrides().map(Overrides::parse).transpose()?;
+    let from_flag = flag.map(Overrides::parse).transpose()?;
+    Ok(from_env
+        .unwrap_or_default()
+        .layered(from_flag.unwrap_or_default()))
+}
+
+/// Report a usage error on stderr: the structured `error` object in agent
+/// mode, a tagged line plus a runnable hint for a human.
+fn usage_error(env: &TermEnv, code: &str, message: &str, hint: &str) {
+    if env.is_agent() {
+        let timestamp = time::OffsetDateTime::now_utc()
+            .replace_nanosecond(0)
+            .ok()
+            .and_then(|t| {
+                t.format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            });
+        let v = serde_json::json!({
+            "error": {
+                "code": code,
+                "exit_code": 2,
+                "message": message,
+                "hint": hint,
+                "timestamp": timestamp,
+                "command": "vault-tui",
+                "docs_url": DOCS_URL,
+            }
+        });
+        eprintln!("{v}");
+    } else {
+        eprintln!("[ERROR] vault-tui: {message}");
+        eprintln!("        hint: {hint}");
+    }
+}
+
+/// SIGTERM, SIGHUP and an externally sent SIGINT. In raw mode a typed Ctrl+C
+/// arrives as a key, so these only come from outside (a closed terminal, `kill`).
+struct Signals {
+    term: Signal,
+    hup: Signal,
+    int: Signal,
+}
+
+impl Signals {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            term: signal(SignalKind::terminate())?,
+            hup: signal(SignalKind::hangup())?,
+            int: signal(SignalKind::interrupt())?,
+        })
+    }
+
+    /// Wait for the next shutdown signal; yields the conventional `128 + N`
+    /// exit status.
+    async fn recv(&mut self) -> u8 {
+        tokio::select! {
+            _ = self.term.recv() => 128 + 15,
+            _ = self.hup.recv() => 128 + 1,
+            _ = self.int.recv() => 128 + 2,
+        }
+    }
+}
+
+/// Sleep until the OSC 52 clear deadline, or forever when none is armed.
+async fn osc52_deadline(at: Option<std::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -123,14 +232,16 @@ fn resolve_socket(cli: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 }
 
 /// Set up the terminal, run the event loop, and tear the terminal back down on
-/// every exit path (including panic).
-async fn run(socket: &Path) -> anyhow::Result<()> {
+/// every exit path (normal, error, panic, SIGTERM/SIGHUP/SIGINT). Returns the
+/// `128 + N` exit status when a signal ended the session.
+async fn run(socket: &Path, env: &TermEnv, overrides: Overrides) -> anyhow::Result<Option<u8>> {
     let mut state = load_app(socket).await;
+    let mut signals = Signals::new()?;
 
-    install_panic_hook();
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
-    let _restore = Restore; // RAII: restores the terminal on drop / unwind.
+    term::install_panic_hook();
+    let _guard = term::Guard; // restores the terminal on drop / unwind.
+    // Probes run here, before the input thread below starts reading.
+    term::enter(env, overrides)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
     // Input runs on a dedicated OS thread (crossterm `read()` is blocking) and
@@ -145,6 +256,7 @@ async fn run(socket: &Path) -> anyhow::Result<()> {
         }
     });
 
+    let mut exit = None;
     loop {
         // Refresh the card/identity detail cache for the current selection
         // before drawing (cheap no-op unless the selection changed).
@@ -153,21 +265,36 @@ async fn run(socket: &Path) -> anyhow::Result<()> {
         if state.should_quit {
             break;
         }
-        // When an OSC52 fallback copy is pending its timed clear, race the
-        // input channel against the deadline so the clear fires even while
-        // the user is idle.
-        let ev = if let Some(at) = state.osc52_clear_at {
-            tokio::select! {
-                ev = rx.recv() => ev,
-                () = tokio::time::sleep_until(tokio::time::Instant::from_std(at)) => {
-                    let _ = osc52::clear();
-                    state.osc52_clear_at = None;
-                    state.set_toast("clipboard cleared (OSC52)");
-                    continue;
-                }
+        // A queued slow request: its "…ing" status line is on screen now, so
+        // run it under the terminal's progress indicator. A signal still
+        // ends the session mid-request.
+        if let Some(op) = state.pending.take() {
+            term::progress_begin();
+            let interrupted = tokio::select! {
+                () = run_pending(&mut state, socket, op) => None,
+                code = signals.recv() => Some(code),
+            };
+            term::progress_end();
+            if interrupted.is_some() {
+                exit = interrupted;
+                break;
             }
-        } else {
-            rx.recv().await
+            continue;
+        }
+        // Race input against the OSC 52 clear deadline (so the clear fires
+        // even while the user is idle) and against shutdown signals.
+        let ev = tokio::select! {
+            ev = rx.recv() => ev,
+            () = osc52_deadline(state.osc52_clear_at) => {
+                term::osc52_clear();
+                state.osc52_clear_at = None;
+                state.set_toast("clipboard cleared (OSC 52)");
+                continue;
+            }
+            code = signals.recv() => {
+                exit = Some(code);
+                break;
+            }
         };
         match ev {
             Some(Event::Key(key)) => handle_key(&mut state, key, socket).await,
@@ -176,12 +303,22 @@ async fn run(socket: &Path) -> anyhow::Result<()> {
             None => break, // input thread gone
         }
     }
-    // Quitting with an OSC52 clear still pending: sweep before the terminal
+    // Quitting with an OSC 52 clear still pending: sweep before the terminal
     // is restored — mirrors the agent's own clear-on-shutdown.
     if state.osc52_clear_at.is_some() {
-        let _ = osc52::clear();
+        term::osc52_clear();
     }
-    Ok(())
+    Ok(exit)
+}
+
+/// Run a queued slow request. The queue's "…ing" toast was drawn before this
+/// started; clear it so the request's own outcome (or none) shows next.
+async fn run_pending(state: &mut App, socket: &Path, op: PendingOp) {
+    state.clear_toast();
+    match op {
+        PendingOp::Sync => sync(state, socket).await,
+        PendingOp::Unlock => submit_unlock(state, socket).await,
+    }
 }
 
 /// Query the agent and build the initial (or refreshed) [`App`].
@@ -309,14 +446,14 @@ async fn handle_key(state: &mut App, key: KeyEvent, socket: &Path) {
         InputMode::Generate => handle_generate_key(state, key, socket).await,
         InputMode::Form => handle_form_key(state, key, socket).await,
         InputMode::ConfirmDelete => handle_confirm_key(state, key, socket).await,
-        InputMode::Unlock => handle_unlock_key(state, key, socket).await,
+        InputMode::Unlock => handle_unlock_key(state, key),
         InputMode::About => handle_about_key(state, key),
     }
 }
 
 /// Unlock-screen keys — edit the secret, `Tab` toggles password/PIN, `Enter`
 /// submits, `Esc` quits. On success the app reloads into the browser.
-async fn handle_unlock_key(state: &mut App, key: KeyEvent, socket: &Path) {
+fn handle_unlock_key(state: &mut App, key: KeyEvent) {
     if handle_text_edit_key(state, key) {
         return;
     }
@@ -328,7 +465,7 @@ async fn handle_unlock_key(state: &mut App, key: KeyEvent, socket: &Path) {
                 u.secret.backspace();
             }
         }
-        KeyCode::Enter => submit_unlock(state, socket).await,
+        KeyCode::Enter => state.queue(PendingOp::Unlock, "unlocking…"),
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Some(u) = state.unlock.as_mut() {
                 u.secret.insert(c);
@@ -708,15 +845,7 @@ async fn execute_command(state: &mut App, socket: &Path, cmd: &str) {
             *state = load_app(socket).await;
             state.set_toast("refreshed");
         }
-        "sync" => match client::request(socket, &Request::Sync).await {
-            Ok(Response::Status(_)) => {
-                *state = load_app(socket).await;
-                state.set_toast("synced");
-            }
-            Ok(Response::Error(e)) => state.set_toast(format!("sync failed: {e}")),
-            Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
-            Err(e) => state.set_toast(e.to_string()),
-        },
+        "sync" => state.queue(PendingOp::Sync, "syncing…"),
         "lock" => {
             match client::request(socket, &Request::Lock).await {
                 // Reload so the screen flips to the Locked banner.
@@ -730,6 +859,19 @@ async fn execute_command(state: &mut App, socket: &Path, cmd: &str) {
         other => state.set_toast(format!(
             "unknown command: {other} (q · r · sync · lock · about)"
         )),
+    }
+}
+
+/// `:sync` — ask the agent to re-pull `/sync`, then reload the browser.
+async fn sync(state: &mut App, socket: &Path) {
+    match client::request(socket, &Request::Sync).await {
+        Ok(Response::Status(_)) => {
+            *state = load_app(socket).await;
+            state.set_toast("synced");
+        }
+        Ok(Response::Error(e)) => state.set_toast(format!("sync failed: {e}")),
+        Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
+        Err(e) => state.set_toast(e.to_string()),
     }
 }
 
@@ -758,7 +900,9 @@ async fn copy_generated(state: &mut App, socket: &Path) {
             let Some(v) = state.generator.as_ref().map(|g| g.value().to_owned()) else {
                 return;
             };
-            osc52_copy(state, &v, "generated value");
+            // The value is on screen in the overlay, so a terminal that
+            // ignores OSC 52 still leaves the user a way to copy it by hand.
+            osc52_copy(state, &v, "generated value", "shown above");
         }
         Ok(Response::Error(e)) => state.set_toast(format!("copy failed: {e}")),
         Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
@@ -923,50 +1067,28 @@ async fn osc52_field_fallback(
         field: Some(field.clone()),
     };
     match client::request(socket, &req).await {
-        Ok(Response::Item(item)) => osc52_copy(state, &item.value, label),
+        Ok(Response::Item(item)) => osc52_copy(state, &item.value, label, "Space reveals"),
         Ok(Response::Error(e)) => state.set_toast(format!("copy failed: {e}")),
         Ok(other) => state.set_toast(format!("unexpected response: {other:?}")),
         Err(e) => state.set_toast(e.to_string()),
     }
 }
 
-/// Emit an OSC52 copy and arm the TUI-side timed clear.
-fn osc52_copy(state: &mut App, value: &str, label: &str) {
-    match osc52::copy(value) {
+/// Emit an OSC 52 copy and arm the TUI-side timed clear.
+///
+/// OSC 52 has no acknowledgement — a terminal without it (GNOME Terminal /
+/// VTE) drops the sequence silently — so the toast always names a way to get
+/// at the value by hand (`fallback`, e.g. "Space reveals").
+fn osc52_copy(state: &mut App, value: &str, label: &str, fallback: &str) {
+    match term::osc52_copy(value) {
         Ok(()) => {
             state.osc52_clear_at =
                 Some(std::time::Instant::now() + std::time::Duration::from_secs(COPY_CLEAR_SECS));
             state.set_toast(format!(
-                "copied {label} via OSC52 · clears in {COPY_CLEAR_SECS}s"
+                "sent {label} to terminal clipboard (OSC 52) · clears in {COPY_CLEAR_SECS}s · \
+                 not pasting? {fallback}"
             ));
         }
-        Err(e) => state.set_toast(format!("OSC52 copy failed: {e}")),
+        Err(e) => state.set_toast(format!("copy failed: {e} · {fallback}")),
     }
-}
-
-/// Restore the terminal to its cooked state. Best-effort: errors are ignored
-/// because this also runs from the panic hook, where there's nothing to return
-/// an error to.
-fn restore_terminal() {
-    let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen);
-}
-
-/// RAII terminal-restore guard.
-struct Restore;
-
-impl Drop for Restore {
-    fn drop(&mut self) {
-        restore_terminal();
-    }
-}
-
-/// Chain a terminal-restore in front of the default panic hook so a panic never
-/// leaves the user staring at a raw-mode alternate screen.
-fn install_panic_hook() {
-    let default = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
-        default(info);
-    }));
 }

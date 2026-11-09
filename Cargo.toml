@@ -12,6 +12,7 @@ members = [
     "crates/vault-tui",
     "crates/vault-theme",
     "crates/vault-config",
+    "crates/vault-term",
 ]
 # The cargo-fuzz harness is a standalone workspace (nightly + sanitizer only);
 # keep it out of `cargo <cmd> --workspace` and the CI gates.

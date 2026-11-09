@@ -44,3 +44,4 @@ vault-config = { path = "../vault-config" }
 vault-core = { path = "../vault-core" }
 vault-ipc = { path = "../vault-ipc" }
 vault-store = { path = "../vault-store" }
+vault-term = { path = "../vault-term" }
